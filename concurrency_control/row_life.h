@@ -3,6 +3,7 @@
 
 #include "../storage/row.h"
 #include "../system/txn.h"
+#include "life_types.h"
 #include <vector>
 
 enum States { EXECUTING, ABORTED };
@@ -15,23 +16,22 @@ struct RE {
 
 } typedef RE;
 
-class Row_state {
+class Row_life {
 
 public:
   void init(row_t *row);
-  RE execute(TxnManager *txn);
-  RE prepare(TxnManager *txn);
+  LifeExecuteResult execute(TxnManager *txn);
+  LifeResponse prepare(TxnManager *txn);
   void commit(TxnManager *txn);
+  void rollback(const LifeTxnDescriptor &tx);
 
 private:
   pthread_mutex_t *latch;
   // placeholder for now
   row_t *_row;
+  Optional<LifeProcessId> active_process;
+  std::unordered_map<LifeProcessId, LifeProcssRecord> processes;
   uint64_t proposed_action;
-  TxnManager *inLine;
-
-  // the whole pid to latest transaction thing
-  vector<pair<TxnManager *, States>> processes;
 };
 
 #endif
