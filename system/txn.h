@@ -155,7 +155,7 @@ public:
   void commit_stats();
   bool is_multi_part();
 
-  const LifeTxnDescriptor &life_descriptor() const;
+  virtual LifeTxnDescriptor life_descriptor() const;
   void life_reset_attempt(uint64_t observered_attempt);
   bool life_finalize();
 

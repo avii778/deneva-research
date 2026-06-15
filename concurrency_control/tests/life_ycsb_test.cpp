@@ -1,0 +1,199 @@
+#include "../../benchmarks/ycsb.h"
+#include "../../benchmarks/ycsb_query.h"
+#include "../row_life.h"
+#include "../../storage/catalog.h"
+#include "../../storage/row.h"
+#include "../../storage/table.h"
+#include "../../system/mem_alloc.h"
+
+#include <cassert>
+#include <cstdlib>
+#include <cstring>
+
+mem_alloc mem_allocator;
+bool volatile warmup_done = false;
+UInt32 g_node_cnt = 1;
+UInt32 g_part_cnt = 1;
+UInt32 g_req_per_query = 3;
+
+void *mem_alloc::alloc(uint64_t size) { return std::malloc(size); }
+void *mem_alloc::align_alloc(uint64_t size) { return std::malloc(size); }
+void *mem_alloc::realloc(void *ptr, uint64_t size) {
+  return std::realloc(ptr, size);
+}
+void mem_alloc::free(void *ptr, uint64_t) { std::free(ptr); }
+
+void table_t::init(Catalog *host_schema) {
+  schema = host_schema;
+  table_name = host_schema->table_name;
+  table_id = host_schema->table_id;
+  cur_tab_size = new uint64_t(0);
+}
+
+RC row_t::init(table_t *host_table, uint64_t part_id, uint64_t row_id) {
+  table = host_table;
+  _part_id = part_id;
+  _row_id = row_id;
+  tuple_size = host_table->get_schema()->get_tuple_size();
+  data = static_cast<char *>(std::malloc(tuple_size));
+  std::memset(data, 0, tuple_size);
+  return RCOK;
+}
+
+table_t *row_t::get_table() { return table; }
+Catalog *row_t::get_schema() { return table->get_schema(); }
+uint64_t row_t::get_field_cnt() { return get_schema()->get_field_cnt(); }
+uint64_t row_t::get_tuple_size() { return get_schema()->get_tuple_size(); }
+char *row_t::get_data() { return data; }
+
+namespace {
+
+LifeTxnDescriptor descriptor(uint32_t worker_id, uint64_t time,
+                             uint64_t attempt, uint32_t state,
+                             uint64_t next_record_id) {
+  LifeTxnDescriptor tx = LifeTxnDescriptor();
+  tx.pid.node_id = 0;
+  tx.pid.worker_id = worker_id;
+  tx.tid.time = time;
+  tx.tid.attempt = attempt;
+  tx.ycsb.state = state;
+  tx.ycsb.next_record_id = next_record_id;
+
+  LifeYcsbRequest request = LifeYcsbRequest();
+  request.kind = LifeYcsbRequestKind::Read;
+  request.key = 7;
+  request.value = 11;
+  tx.ycsb.requests.push_back(request);
+  return tx;
+}
+
+LifeOperation operation(row_t &row, LifeOperationKind kind, uint64_t value) {
+  LifeOperation op = LifeOperation();
+  op.object.table_id = row.table->get_table_id();
+  op.object.partition_id = row.get_part_id();
+  op.object.primary_key = row.get_primary_key();
+  op.kind = kind;
+  op.field_id = 0;
+
+  if (kind == LifeOperationKind::WriteField) {
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&value);
+    op.argument.assign(bytes, bytes + sizeof(value));
+  }
+  return op;
+}
+
+void test_snapshot_is_owned() {
+  YCSBQuery query;
+  query.requests.init(3);
+
+  ycsb_request read;
+  read.acctype = RD;
+  read.key = 10;
+  read.value = 1;
+  query.requests.add(&read);
+
+  ycsb_request write;
+  write.acctype = WR;
+  write.key = 20;
+  write.value = 2;
+  query.requests.add(&write);
+
+  ycsb_request scan;
+  scan.acctype = SCAN;
+  scan.key = 30;
+  scan.value = 3;
+  query.requests.add(&scan);
+
+  const LifeYcsbSnapshot snapshot = make_life_ycsb_snapshot(query, YCSB_1, 2);
+
+  assert(snapshot.state == YCSB_1);
+  assert(snapshot.next_record_id == 2);
+  assert(snapshot.requests.size() == 3);
+  assert(snapshot.requests[0].kind == LifeYcsbRequestKind::Read);
+  assert(snapshot.requests[1].kind == LifeYcsbRequestKind::Write);
+  assert(snapshot.requests[2].kind == LifeYcsbRequestKind::Scan);
+
+  read.key = 999;
+  write.value = 99;
+  query.requests.clear();
+
+  assert(snapshot.requests[0].key == 10);
+  assert(snapshot.requests[1].value == 2);
+  assert(snapshot.requests.size() == 3);
+
+  query.requests.release();
+}
+
+void test_execute_stale_history_refresh_and_help() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+
+  row_t row;
+  row.init(&table, 4, 0);
+  row.set_primary_key(7);
+  const uint64_t initial_value = 42;
+  std::memcpy(row.data, &initial_value, sizeof(initial_value));
+
+  Row_life life_row;
+  life_row.init(&row);
+
+  LifeTxnDescriptor owner = descriptor(1, 10, 1, YCSB_0, 0);
+  const LifeOperation read = operation(row, LifeOperationKind::ReadField, 0);
+  const LifeExecuteResult first = life_row.execute(owner, read);
+  assert(first.code == LifeResultCode::Success);
+
+  LifeHistoryEntry read_entry;
+  read_entry.operation = read;
+  read_entry.response = first.response;
+  LifeTxnDescriptor stored = owner;
+  stored.history.push_back(read_entry);
+
+  owner.ycsb.requests[0].key = 999;
+  const LifeTxnDescriptor contender = descriptor(2, 20, 1, YCSB_0, 0);
+  const LifeExecuteResult help = life_row.execute(contender, read);
+  assert(help.code == LifeResultCode::Help);
+  assert(help.transaction == stored);
+
+  const LifeTxnDescriptor stale = descriptor(1, 10, 1, YCSB_0, 0);
+  const LifeExecuteResult replay = life_row.execute(stale, read);
+  assert(replay.code == LifeResultCode::Success);
+  assert(replay.response == first.response);
+
+  LifeTxnDescriptor continued = stored;
+  continued.ycsb.state = YCSB_1;
+  continued.ycsb.next_record_id = 1;
+  const LifeOperation write = operation(row, LifeOperationKind::WriteField, 84);
+  const LifeExecuteResult second = life_row.execute(continued, write);
+  assert(second.code == LifeResultCode::Success);
+
+  LifeHistoryEntry write_entry;
+  write_entry.operation = write;
+  write_entry.response = second.response;
+  LifeTxnDescriptor refreshed = continued;
+  refreshed.history.push_back(write_entry);
+
+  const LifeTxnDescriptor later = descriptor(3, 30, 1, YCSB_0, 0);
+  const LifeExecuteResult refreshed_help = life_row.execute(later, read);
+  assert(refreshed_help.code == LifeResultCode::Help);
+  assert(refreshed_help.transaction == refreshed);
+
+  std::free(row.data);
+}
+
+} // namespace
+
+int main() {
+  test_snapshot_is_owned();
+  test_execute_stale_history_refresh_and_help();
+  return 0;
+}

@@ -273,6 +273,12 @@ void Transaction::init() {
   DEBUG_M("Transaction::reset array accesses\n");
   accesses.init(MAX_ROW_PER_TXN);  
 
+  life_pid.node_id = 0;
+  life_pid.worker_id = 0;
+  life_tid.time = 0;
+  life_tid.attempt = 1;
+  life_status = LifeTxnStatus::Aborted;
+
   reset(0);
 }
 
@@ -285,6 +291,9 @@ void Transaction::reset(uint64_t thd_id) {
   row_cnt = 0;
   twopc_state = START;
   rc = RCOK;
+  life_status = LifeTxnStatus::Aborted;
+  life_history.clear();
+  life_objects.clear();
 }
 
 void Transaction::release_accesses(uint64_t thd_id) {
@@ -351,7 +360,18 @@ void TxnManager::init(uint64_t thd_id, Workload * h_wl) {
   txn_ready = true;
   twopl_wait_start = 0;
 
+  txn->life_pid.node_id = g_node_id;
+  txn->life_pid.worker_id = thd_id;
+
   txn_stats.init();
+}
+
+LifeTxnDescriptor TxnManager::life_descriptor() const {
+  LifeTxnDescriptor descriptor = LifeTxnDescriptor();
+  descriptor.pid = txn->life_pid;
+  descriptor.tid = txn->life_tid;
+  descriptor.history = txn->life_history;
+  return descriptor;
 }
 
 // reset after abort
@@ -614,6 +634,8 @@ void TxnManager::register_thread(Thread * h_thd) {
 
 void TxnManager::set_txn_id(txnid_t txn_id) {
 	txn->txn_id = txn_id;
+  txn->life_tid.time = txn_id;
+  txn->life_tid.attempt = 1;
 }
 
 txnid_t TxnManager::get_txn_id() {

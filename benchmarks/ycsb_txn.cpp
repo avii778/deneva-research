@@ -351,4 +351,3 @@ RC YCSBTxnManager::run_ycsb() {
   return rc;
 
 }
-

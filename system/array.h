@@ -124,8 +124,10 @@ public:
     items[j] = tmp;
   }
   T operator[](uint64_t idx) {assert(idx < count); return items[idx];}
+  T operator[](uint64_t idx) const {assert(idx < count); return items[idx];}
   uint64_t get_count() {return count;}
   uint64_t size() {return count;}
+  uint64_t size() const {return count;}
   bool is_full() { return count == capacity;}
   bool is_empty() { return count == 0;}
 private:

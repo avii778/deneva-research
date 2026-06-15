@@ -26,6 +26,10 @@ class YCSBQuery;
 class YCSBQueryMessage;
 class ycsb_request;
 
+LifeYcsbSnapshot make_life_ycsb_snapshot(const YCSBQuery &query,
+                                         uint32_t state,
+                                         uint64_t next_record_id);
+
 enum YCSBRemTxnType {
   YCSB_0,
   YCSB_1,
@@ -60,11 +64,12 @@ public:
 	void init(uint64_t thd_id, Workload * h_wl);
 	void reset();
 	void partial_reset();
-  RC acquire_locks(); 
+  RC acquire_locks();
 	RC run_txn();
-  RC run_txn_post_wait(); 
+  RC run_txn_post_wait();
 	RC run_calvin_txn();
-  void copy_remote_requests(YCSBQueryMessage * msg); 
+  LifeTxnDescriptor life_descriptor() const;
+  void copy_remote_requests(YCSBQueryMessage * msg);
 private:
   void next_ycsb_state();
   RC run_txn_state();

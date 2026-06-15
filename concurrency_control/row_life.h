@@ -1,37 +1,46 @@
 #ifndef ROW_LIFE_H
 #define ROW_LIFE_H
 
-#include "../storage/row.h"
-#include "../system/txn.h"
 #include "life_types.h"
+#include <pthread.h>
+#include <unordered_map>
 #include <vector>
 
-enum States { EXECUTING, ABORTED };
-enum RESTR { HELP, COMMITTED, RETRY, SUCCESS };
-
-struct RE {
-
-  TxnManager *txn;
-  RESTR stat;
-
-} typedef RE;
+class row_t;
 
 class Row_life {
-
 public:
   void init(row_t *row);
-  LifeExecuteResult execute(TxnManager *txn);
-  LifeResponse prepare(TxnManager *txn);
-  void commit(TxnManager *txn);
-  void rollback(const LifeTxnDescriptor &tx);
+
+  LifeExecuteResult execute(const LifeTxnDescriptor &tx,
+                            const LifeOperation &operation);
 
 private:
-  pthread_mutex_t *latch;
-  // placeholder for now
+  typedef std::unordered_map<LifeProcessId, LifeProcessRecord,
+                             LifeProcessIdHash>
+      ProcessMap;
+
+  static bool higher_priority(const LifeTxnId &lhs, const LifeTxnId &rhs);
+  static bool priority_less_equal(const LifeTxnId &lhs, const LifeTxnId &rhs);
+  static std::vector<LifeHistoryEntry>
+  object_history(const LifeTxnDescriptor &tx, const LifeObjectId &object);
+
+  LifeProcessRecord process_record(const LifeProcessId &pid) const;
+  LifeProcessRecord context_record() const;
+  LifeExecuteResult make_result(LifeResultCode code) const;
+  LifeObjectId object_id() const;
+  bool apply_operation(const LifeOperation &operation,
+                       std::vector<uint8_t> &state,
+                       LifeResponse &response) const;
+  bool replay_history(const std::vector<LifeHistoryEntry> &history,
+                      std::vector<uint8_t> &state) const;
+
+  pthread_mutex_t latch;
   row_t *_row;
-  Optional<LifeProcessId> active_process;
-  std::unordered_map<LifeProcessId, LifeProcssRecord> processes;
-  uint64_t proposed_action;
+  std::vector<uint8_t> committed_state;
+  LifeOptional<LifeProcessId> active_process;
+  ProcessMap processes;
+  LifeOptional<LifeInlineOperation> inline_operation;
 };
 
 #endif
