@@ -162,6 +162,7 @@ void * YCSBWorkload::init_table_slice() {
     ++key_cnt;
     if(key_cnt % 500000 == 0) {
       printf("Thd %d inserted %ld keys %f\n",tid,key_cnt,simulation->seconds_from_start(get_sys_clock()));
+      fflush(stdout);
     }
 //		printf("tid=%d. key=%ld\n", tid, key);
 		row_t * new_row = NULL;
@@ -199,6 +200,7 @@ void * YCSBWorkload::init_table_slice() {
     key += g_part_cnt;
 	}
   printf("Thd %d inserted %ld keys\n",tid,key_cnt);
+  fflush(stdout);
 	return NULL;
 }
 
@@ -210,4 +212,3 @@ RC YCSBWorkload::get_txn_man(TxnManager *& txn_manager){
 	//txn_manager->init(this); 
 	return RCOK;
 }
-

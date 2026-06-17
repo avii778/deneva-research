@@ -17,72 +17,86 @@
 #ifndef _SYNTH_BM_H_
 #define _SYNTH_BM_H_
 
-#include "wl.h"
-#include "txn.h"
 #include "global.h"
 #include "helper.h"
+#include "txn.h"
+#include "wl.h"
 
 class YCSBQuery;
 class YCSBQueryMessage;
 class ycsb_request;
 
-LifeYcsbSnapshot make_life_ycsb_snapshot(const YCSBQuery &query,
-                                         uint32_t state,
+LifeYcsbRequest make_life_ycsb_request(const ycsb_request &request);
+LifeYcsbSnapshot make_life_ycsb_snapshot(const YCSBQuery &query, uint32_t state,
                                          uint64_t next_record_id);
 
-enum YCSBRemTxnType {
-  YCSB_0,
-  YCSB_1,
-  YCSB_FIN,
-  YCSB_RDONE
-};
+enum YCSBRemTxnType { YCSB_0, YCSB_1, YCSB_FIN, YCSB_RDONE };
 
 class YCSBWorkload : public Workload {
-public :
-	RC init();
-	RC init_table();
-	RC init_schema(const char * schema_file);
-	RC get_txn_man(TxnManager *& txn_manager);
-	int key_to_part(uint64_t key);
-	INDEX * the_index;
-	table_t * the_table;
+public:
+  RC init();
+  RC init_table();
+  RC init_schema(const char *schema_file);
+  RC get_txn_man(TxnManager *&txn_manager);
+  int key_to_part(uint64_t key);
+  INDEX *the_index;
+  table_t *the_table;
+
 private:
-	void init_table_parallel();
-	void * init_table_slice();
-	static void * threadInitTable(void * This) {
-		((YCSBWorkload *)This)->init_table_slice(); 
-		return NULL;
-	}
-	pthread_mutex_t insert_lock;
-	//  For parallel initialization
-	static int next_tid;
+  void init_table_parallel();
+  void *init_table_slice();
+  static void *threadInitTable(void *This) {
+    ((YCSBWorkload *)This)->init_table_slice();
+    return NULL;
+  }
+  pthread_mutex_t insert_lock;
+  //  For parallel initialization
+  static int next_tid;
 };
 
-class YCSBTxnManager : public TxnManager
-{
+class YCSBTxnManager : public TxnManager {
 public:
-	void init(uint64_t thd_id, Workload * h_wl);
-	void reset();
-	void partial_reset();
+  void init(uint64_t thd_id, Workload *h_wl);
+  void reset();
+  void partial_reset();
   RC acquire_locks();
-	RC run_txn();
+  RC run_txn();
   RC run_txn_post_wait();
-	RC run_calvin_txn();
+  RC run_calvin_txn();
   LifeTxnDescriptor life_descriptor() const;
-  void copy_remote_requests(YCSBQueryMessage * msg);
+  void life_reset_workload();
+  void copy_remote_requests(YCSBQueryMessage *msg);
+
 private:
   void next_ycsb_state();
+  RC run_life_txn();
+  bool try_life_transactions(std::vector<LifeTxnDescriptor> &txns);
+  LifeExecuteResult execute_life_operation(LifeTxnDescriptor &descriptor,
+                                           LifeOperation &operation);
+  bool finalize_life_descriptor(LifeTxnDescriptor &descriptor);
+  void reset_life_descriptor(LifeTxnDescriptor &descriptor,
+                             uint64_t observed_attempt);
+  void append_life_success(LifeTxnDescriptor &descriptor,
+                           const LifeOperation &operation,
+                           const LifeResponse &response);
+  void rollback_life_descriptor(const LifeTxnDescriptor &descriptor);
+  void collect_life_rows(const LifeTxnDescriptor &descriptor,
+                         std::vector<Row_life *> &rows);
+  row_t *lookup_life_row(const LifeObjectId &object);
+  row_t *lookup_life_row(uint64_t key);
+  LifeOperation make_life_operation(row_t *row, ycsb_request *req);
+  LifeOperation make_life_operation(row_t *row, const LifeYcsbRequest &req);
   RC run_txn_state();
-  RC run_ycsb_0(ycsb_request * req,row_t *& row_local);
-  RC run_ycsb_1(access_t acctype, row_t * row_local);
+  RC run_ycsb_0(ycsb_request *req, row_t *&row_local);
+  RC run_ycsb_1(access_t acctype, row_t *row_local);
   RC run_ycsb();
-  bool is_done() ;
-  bool is_local_request(uint64_t idx) ;
-  RC send_remote_request() ;
+  bool is_done();
+  bool is_local_request(uint64_t idx);
+  RC send_remote_request();
 
-  row_t * row;
-	YCSBWorkload * _wl;
-	YCSBRemTxnType state;
+  row_t *row;
+  YCSBWorkload *_wl;
+  YCSBRemTxnType state;
   uint64_t next_record_id;
 };
 

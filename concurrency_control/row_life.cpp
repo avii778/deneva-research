@@ -2,9 +2,11 @@
 #include "../storage/catalog.h"
 #include "../storage/row.h"
 #include "../storage/table.h"
+#include "life_types.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace {
@@ -35,16 +37,13 @@ void Row_life::init(row_t *row) {
   active_process.reset();
 
   processes.clear();
-
-  processes.reserve(50);
   inline_operation.reset();
 
   pthread_mutex_init(&latch, NULL);
 }
 
 bool Row_life::higher_priority(const LifeTxnId &lhs, const LifeTxnId &rhs) {
-  return lhs.time < rhs.time ||
-         (lhs.time == rhs.time && lhs.attempt > rhs.attempt);
+  return lhs < rhs;
 }
 
 bool Row_life::priority_less_equal(const LifeTxnId &lhs, const LifeTxnId &rhs) {
@@ -67,6 +66,10 @@ Row_life::object_history(const LifeTxnDescriptor &tx,
   return history;
 }
 
+bool Row_life::pid_equals(const LifeProcessId &pid1,
+                          const LifeProcessId &pid2) {
+  return pid1.node_id == pid2.node_id && pid1.worker_id == pid2.worker_id;
+}
 // Returns the record of the last tx this process was running, with a special
 // value for none
 LifeProcessRecord Row_life::process_record(const LifeProcessId &pid) const {
@@ -191,8 +194,7 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 
   const bool must_defer =
       context.status == LifeTxnStatus::Prepared ||
-      higher_priority(context.transaction.tid, tx.tid) ||
-      tx.tid < local.transaction.tid ||
+      context.transaction.tid < tx.tid || tx.tid < local.transaction.tid ||
       (tx.tid == local.transaction.tid &&
        (local.status == LifeTxnStatus::Aborted ||
         tx.history.size() < local.transaction.history.size()));
@@ -232,13 +234,17 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 
     if (tx.history.size() < local.transaction.history.size()) {
       const uint64_t response_index = tx_object_history.size();
-      if (response_index >= local.object_history.size() ||
-          local.object_history[response_index].operation != operation) {
+      if (response_index >=
+              object_history(local.transaction, object_id()).size() ||
+          object_history(local.transaction, object_id())[response_index]
+                  .operation != operation) {
         return make_result(LifeResultCode::InvalidOperation);
       }
 
       LifeExecuteResult result = make_result(LifeResultCode::Success);
-      result.response = local.object_history[response_index].response;
+      result.response =
+          object_history(local.transaction, object_id())[response_index]
+              .response;
       return result;
     }
   }
@@ -266,8 +272,6 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   updated.transaction = tx;
   updated.transaction.history.push_back(entry);
   updated.status = LifeTxnStatus::Executing;
-  updated.object_history = tx_object_history;
-  updated.object_history.push_back(entry);
 
   active_process.set(tx.pid);
   processes[tx.pid] = updated;
@@ -275,4 +279,107 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   LifeExecuteResult result = make_result(LifeResultCode::Success);
   result.response = response;
   return result;
+}
+
+// the prepare protocol as described in the psuedocode
+LifeExecuteResult Row_life::prepare(const LifeTxnDescriptor &tx) {
+
+  LifeLatchGuard guard(&latch);
+  LifeProcessRecord local = process_record(tx.pid);
+
+  bool already_committed = (tx.tid.time < local.transaction.tid.time) ||
+                           (local.status == LifeTxnStatus::Committed);
+
+  if (already_committed) {
+    return make_result(LifeResultCode::Committed);
+  }
+
+  bool prepare_must_fail = (tx.tid.attempt < local.transaction.tid.attempt) ||
+                           (local.status == LifeTxnStatus::Aborted);
+
+  if (prepare_must_fail) {
+    LifeExecuteResult result = make_result(LifeResultCode::Retry);
+    result.observed_attempt = local.transaction.tid.attempt;
+    return result;
+  }
+
+  // we may prepare now
+
+  LifeProcessRecord updated;
+  updated.status = LifeTxnStatus::Prepared;
+  updated.transaction = tx;
+  processes[tx.pid] = updated;
+
+  return make_result(LifeResultCode::Success);
+}
+
+void Row_life::commit(const LifeTxnDescriptor &tx) {
+
+  {
+    LifeLatchGuard guard(&latch);
+    LifeProcessRecord local = process_record(tx.pid);
+
+    bool already_commited = (tx.tid.time < local.transaction.tid.time) ||
+                            (local.status == LifeTxnStatus::Committed);
+
+    if (already_commited) {
+      return;
+    }
+
+    // need to make sure that this is right
+    std::vector<uint8_t> final = committed_state;
+    if (!replay_history(object_history(tx, object_id()), final))
+      return;
+    committed_state = final;
+    std::memcpy(_row->get_data(), committed_state.data(),
+                committed_state.size());
+
+    LifeProcessRecord updated;
+    updated.transaction = tx;
+    updated.status = LifeTxnStatus::Committed;
+    processes[tx.pid] = updated;
+  }
+
+  help(tx);
+}
+
+void Row_life::rollback(const LifeTxnDescriptor &tx) {
+
+  {
+    LifeLatchGuard guard(&latch);
+
+    LifeProcessRecord local = process_record(tx.pid);
+
+    if (local.transaction.tid == tx.tid &&
+        local.status != LifeTxnStatus::Aborted &&
+        local.status != LifeTxnStatus::Committed) {
+      processes[tx.pid].status = LifeTxnStatus::Aborted;
+    }
+  }
+
+  help(tx);
+}
+
+void Row_life::help(const LifeTxnDescriptor &tx) {
+
+  LifeInlineOperation pending;
+  bool has_pending = false;
+
+  {
+    LifeLatchGuard guard(&latch);
+
+    if (!active_process.has_value || !pid_equals(active_process.value, tx.pid))
+      return;
+
+    active_process.reset();
+
+    if (inline_operation.has_value) {
+      pending = inline_operation.value;
+      has_pending = true;
+      inline_operation.reset();
+    }
+  }
+
+  if (has_pending)
+    execute(pending.transaction, pending.operation);
 }

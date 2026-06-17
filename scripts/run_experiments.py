@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-import os,sys,datetime,re
+import os,sys,datetime,re,time
 import shlex
 import subprocess
 from experiments import *
@@ -24,6 +24,76 @@ execute = True
 remote = False
 cluster = None
 skip = False
+
+PROGRESS_POLL_INTERVAL = 5
+
+
+def read_latest_counter(path, names):
+    try:
+        f = open(path, 'r')
+        data = f.read()
+        f.close()
+    except IOError:
+        return None
+
+    latest = None
+    for name in names:
+        matches = re.findall(r'(?:^|,)' + re.escape(name) + r'=([0-9]+)', data)
+        if matches:
+            latest = int(matches[-1])
+            break
+    return latest
+
+
+def file_has_output(path):
+    try:
+        return os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def print_transaction_progress(output_files, client_output_files, start_time,
+                               force=False, last_total=None):
+    # Client txn_cnt is closest to "completed user transactions"; fall back to
+    # server commit/txn counters for configurations without separate clients.
+    counters = []
+    for path in client_output_files:
+        value = read_latest_counter(path, ["txn_cnt"])
+        if value is not None:
+            counters.append(value)
+
+    source = "client txn_cnt"
+    if len(counters) == 0:
+        source = "server commits"
+        for path in output_files:
+            value = read_latest_counter(path, [
+                "total_txn_commit_cnt",
+                "local_txn_commit_cnt",
+                "txn_cnt",
+            ])
+            if value is not None:
+                counters.append(value)
+
+    if len(counters) == 0:
+        if any(file_has_output(path) for path in output_files):
+            total = 0
+            source = "no stats yet"
+            if force or total != last_total:
+                print("[progress] elapsed={}s completed_transactions={} source={}".format(
+                    int(time.time() - start_time), total, source))
+                sys.stdout.flush()
+            return total
+        if force:
+            print("[progress] elapsed={}s completed_transactions=unknown".format(
+                int(time.time() - start_time)))
+        return last_total
+
+    total = sum(counters)
+    if force or total != last_total:
+        print("[progress] elapsed={}s completed_transactions={} source={}".format(
+            int(time.time() - start_time), total, source))
+        sys.stdout.flush()
+    return total
 
 
 exps=[]
@@ -67,7 +137,7 @@ for exp in exps:
         if remote:
             cfgs["TPORT_TYPE"],cfgs["TPORT_TYPE_IPC"],cfgs["TPORT_PORT"]="\"tcp\"","false",7000
 
-        output_f = get_outfile_name(cfgs)
+        output_f = get_outfile_name(cfgs, fmt)
 
         # Check whether experiment has been already been run in this batch
         if skip:
@@ -180,11 +250,13 @@ for exp in exps:
 
 
             else:
-                nnodes = cfgs["NODE_CNT"]
-                nclnodes = cfgs["CLIENT_NODE_CNT"]
+                nnodes = int(cfgs["NODE_CNT"])
+                nclnodes = int(cfgs["CLIENT_NODE_CNT"])
                 pids = []
+                output_files = []
+                client_output_files = []
                 print("Deploying: {}".format(output_f))
-                for n in range(nnodes+nclnodes):
+                for n in range(nnodes + nclnodes):
                     if n < nnodes:
                         cmd = "./rundb -nid{}".format(n)
                     else:
@@ -192,9 +264,29 @@ for exp in exps:
                     print(cmd)
                     cmd = shlex.split(cmd)
                     ofile_n = "{}{}_{}.out".format(result_dir,n,output_f)
+                    output_files.append(ofile_n)
+                    if n >= nnodes:
+                        client_output_files.append(ofile_n)
                     ofile = open(ofile_n,'w')
                     p = subprocess.Popen(cmd,stdout=ofile,stderr=ofile)
+                    ofile.close()
                     pids.insert(0,p)
-                for n in range(nnodes + nclnodes):
-                    pids[n].wait()
-
+                start_time = time.time()
+                last_progress_total = None
+                last_progress_print = 0
+                while True:
+                    running = [p for p in pids if p.poll() is None]
+                    now = time.time()
+                    if now - last_progress_print >= PROGRESS_POLL_INTERVAL:
+                        last_progress_total = print_transaction_progress(
+                            output_files, client_output_files, start_time,
+                            force=True, last_total=last_progress_total)
+                        last_progress_print = now
+                    if len(running) == 0:
+                        break
+                    time.sleep(1)
+                for p in pids:
+                    p.wait()
+                print_transaction_progress(
+                    output_files, client_output_files, start_time,
+                    force=True, last_total=last_progress_total)

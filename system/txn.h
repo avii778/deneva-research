@@ -22,11 +22,13 @@
 #include "global.h"
 #include "helper.h"
 #include "semaphore.h"
+#include <cstdint>
 // #include "wl.h"
 
 class Workload;
 class Thread;
 class row_t;
+class Row_life;
 class table_t;
 class BaseQuery;
 class INDEX;
@@ -75,7 +77,10 @@ public:
   LifeTxnId life_tid;
   LifeTxnStatus life_status;
   std::vector<LifeHistoryEntry> life_history;
-  std::vector<LifeObjectId> life_objects;
+  std::vector<Row_life *> life_objects;
+  void life_reset_attempt(uint64_t observered_attempt);
+  void life_finalize();
+  void life_rollback();
 };
 
 class TxnStats {
@@ -156,8 +161,15 @@ public:
   bool is_multi_part();
 
   virtual LifeTxnDescriptor life_descriptor() const;
+  virtual void life_reset_workload();
+  bool life_finalize_descriptor(const LifeTxnDescriptor &descriptor,
+                                std::vector<Row_life *> &touched_rows,
+                                uint64_t *observed_attempt);
+  void life_rollback_descriptor(const LifeTxnDescriptor &descriptor,
+                                std::vector<Row_life *> &touched_rows);
   void life_reset_attempt(uint64_t observered_attempt);
   bool life_finalize();
+  void life_rollback();
 
   void set_timestamp(ts_t timestamp);
   ts_t get_timestamp();

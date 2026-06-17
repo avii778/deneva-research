@@ -188,6 +188,7 @@ lineconfig = {
     'TIMESTAMP'     : "ls='-', lw=2, marker='^', ms=8",
     'MVCC'          : "ls='--', lw=2,marker='o', ms=8", #, marker='+', ms=10",
     'OCC'           : "ls='--', lw=2, marker='+', ms=10",
+    'LIFE'          : "ls='-', lw=2, marker='v', ms=8",
     'HSTORE'        : "ls='-', lw=2, marker='x', ms=10",
     'HSTORE_SPEC'   : "ls='--', lw=2, marker='x', ms=10",
     'CALVIN'           : "ls='-', lw=2, marker='*', ms=8",

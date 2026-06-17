@@ -44,7 +44,7 @@ inline bool operator!=(const LifeTxnId &lhs, const LifeTxnId &rhs) {
 
 inline bool operator<(const LifeTxnId &lhs, const LifeTxnId &rhs) {
   return lhs.time < rhs.time ||
-         (lhs.time == rhs.time && lhs.attempt < rhs.attempt);
+         (lhs.time == rhs.time && lhs.attempt > rhs.attempt);
 }
 
 inline bool operator<=(const LifeTxnId &lhs, const LifeTxnId &rhs) {

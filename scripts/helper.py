@@ -1073,6 +1073,11 @@ def get_cfgs(fmt,e):
     cfgs = dict(configs)
     for f,n in zip(fmt,range(len(fmt))):
         cfgs[f] = e[n]
+    for c in cfgs.keys():
+        seen = set()
+        while isinstance(cfgs[c], str) and cfgs[c] in cfgs and cfgs[c] not in seen:
+            seen.add(cfgs[c])
+            cfgs[c] = cfgs[cfgs[c]]
     # For now, spawn NODE_CNT remote threads to avoid potential deadlock
     #if "REM_THREAD_CNT" not in fmt:
     #    cfgs["REM_THREAD_CNT"] = cfgs["NODE_CNT"] * cfgs["THREAD_CNT"]

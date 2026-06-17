@@ -190,10 +190,124 @@ void test_execute_stale_history_refresh_and_help() {
   std::free(row.data);
 }
 
+void test_rollback_runs_inline_help() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+
+  row_t row;
+  row.init(&table, 4, 0);
+  row.set_primary_key(7);
+  const uint64_t initial_value = 42;
+  std::memcpy(row.data, &initial_value, sizeof(initial_value));
+
+  Row_life life_row;
+  life_row.init(&row);
+
+  LifeTxnDescriptor owner = descriptor(1, 10, 1, YCSB_0, 0);
+  const LifeOperation owner_read =
+      operation(row, LifeOperationKind::ReadField, 0);
+  const LifeExecuteResult first = life_row.execute(owner, owner_read);
+  assert(first.code == LifeResultCode::Success);
+
+  LifeHistoryEntry owner_entry;
+  owner_entry.operation = owner_read;
+  owner_entry.response = first.response;
+  LifeTxnDescriptor prepared_owner = owner;
+  prepared_owner.history.push_back(owner_entry);
+
+  const LifeExecuteResult prepared = life_row.prepare(prepared_owner);
+  assert(prepared.code == LifeResultCode::Success);
+
+  LifeTxnDescriptor contender = descriptor(2, 20, 1, YCSB_0, 0);
+  const LifeOperation contender_read =
+      operation(row, LifeOperationKind::ReadField, 0);
+  const LifeExecuteResult finalize =
+      life_row.execute(contender, contender_read);
+  assert(finalize.code == LifeResultCode::Finalize);
+  assert(finalize.transaction == prepared_owner);
+
+  life_row.rollback(prepared_owner);
+
+  LifeHistoryEntry contender_entry;
+  contender_entry.operation = contender_read;
+  contender_entry.response = first.response;
+  LifeTxnDescriptor helped = contender;
+  helped.history.push_back(contender_entry);
+
+  const LifeTxnDescriptor later = descriptor(3, 30, 1, YCSB_0, 0);
+  const LifeExecuteResult help = life_row.execute(later, contender_read);
+  assert(help.code == LifeResultCode::Help);
+  assert(help.transaction == helped);
+
+  std::free(row.data);
+}
+
+void test_prepare_retry_and_commit_publish() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+
+  row_t row;
+  row.init(&table, 4, 0);
+  row.set_primary_key(7);
+  const uint64_t initial_value = 42;
+  std::memcpy(row.data, &initial_value, sizeof(initial_value));
+
+  Row_life life_row;
+  life_row.init(&row);
+
+  LifeTxnDescriptor tx = descriptor(1, 10, 1, YCSB_0, 0);
+  const LifeOperation write = operation(row, LifeOperationKind::WriteField, 84);
+  const LifeExecuteResult written = life_row.execute(tx, write);
+  assert(written.code == LifeResultCode::Success);
+
+  LifeHistoryEntry write_entry;
+  write_entry.operation = write;
+  write_entry.response = written.response;
+  LifeTxnDescriptor final_tx = tx;
+  final_tx.history.push_back(write_entry);
+
+  const LifeExecuteResult prepared = life_row.prepare(final_tx);
+  assert(prepared.code == LifeResultCode::Success);
+
+  life_row.commit(final_tx);
+
+  uint64_t committed_value = 0;
+  std::memcpy(&committed_value, row.data, sizeof(committed_value));
+  assert(committed_value == 84);
+
+  life_row.rollback(final_tx);
+  const LifeExecuteResult retry = life_row.prepare(final_tx);
+  assert(retry.code == LifeResultCode::Committed);
+
+  std::free(row.data);
+}
+
 } // namespace
 
 int main() {
   test_snapshot_is_owned();
   test_execute_stale_history_refresh_and_help();
+  test_rollback_runs_inline_help();
+  test_prepare_retry_and_commit_publish();
   return 0;
 }

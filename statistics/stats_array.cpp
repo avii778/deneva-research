@@ -22,7 +22,6 @@
 #include "work_queue.h"
 #include <time.h>
 #include <sys/times.h>
-#include <sys/vtimes.h>
 
 void StatsArr::quicksort(int low_idx, int high_idx) {
   int low = low_idx;
@@ -142,5 +141,4 @@ uint64_t StatsArr::get_avg() {
     return sum / cnt;
   return 0;
 }
-
 

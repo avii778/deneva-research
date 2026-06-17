@@ -23,7 +23,6 @@
 #include "stats_array.h"
 #include <time.h>
 #include <sys/times.h>
-#include <sys/vtimes.h>
 
 void Stats_thd::init(uint64_t thd_id) {
   DEBUG_M("Stats_thd::init part_cnt alloc\n");
@@ -1759,5 +1758,4 @@ void Stats::cpu_util(FILE * outf) {
   lastSysCPU = timeSample.tms_stime;
   lastUserCPU = timeSample.tms_utime;
 }
-
 

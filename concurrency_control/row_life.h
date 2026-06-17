@@ -15,6 +15,14 @@ public:
   LifeExecuteResult execute(const LifeTxnDescriptor &tx,
                             const LifeOperation &operation);
 
+  LifeExecuteResult prepare(const LifeTxnDescriptor &tx);
+
+  void commit(const LifeTxnDescriptor &tx);
+
+  void rollback(const LifeTxnDescriptor &tx);
+
+  void help(const LifeTxnDescriptor &tx);
+
 private:
   typedef std::unordered_map<LifeProcessId, LifeProcessRecord,
                              LifeProcessIdHash>
@@ -35,6 +43,7 @@ private:
   bool replay_history(const std::vector<LifeHistoryEntry> &history,
                       std::vector<uint8_t> &state) const;
 
+  bool pid_equals(const LifeProcessId &pid1, const LifeProcessId &pid2);
   pthread_mutex_t latch;
   row_t *_row;
   std::vector<uint8_t> committed_state;
