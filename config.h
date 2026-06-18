@@ -114,8 +114,8 @@
 // per-row lock/ts management or central lock/ts management
 #define CENTRAL_MAN false
 #define BUCKET_CNT 31
-#define ABORT_PENALTY 10 * 1000000UL   // in ns.
-#define ABORT_PENALTY_MAX 5 * 100 * 1000000UL   // in ns.
+#define ABORT_PENALTY 10 * 1000000UL          // in ns.
+#define ABORT_PENALTY_MAX 5 * 100 * 1000000UL // in ns.
 #define LIFE_HELP_WAIT_US 50
 #define BACKOFF true
 // [ INDEX ]
@@ -150,6 +150,8 @@
 /***********************************************/
 #define LOG_COMMAND false
 #define LOG_REDO false
+#define LOG_LIFE true
+#define LIFE_LOG_FILE "life_timing.log"
 #define LOGGING false
 #define LOG_BUF_MAX 10
 #define LOG_BUF_TIMEOUT 10 * 1000000UL // 10ms
@@ -173,8 +175,8 @@
 #define ACCESS_PERC 0.03
 #define INIT_PARALLELISM 8
 #define SYNTH_TABLE_SIZE 16777216
-#define ZIPF_THETA 0.6
-#define TXN_WRITE_PERC 0.5
+#define ZIPF_THETA 0.0
+#define TXN_WRITE_PERC 0.0
 #define TUP_WRITE_PERC 0.5
 #define SCAN_PERC 0
 #define SCAN_LEN 20
@@ -357,8 +359,8 @@ enum PPSTxnType {
 #define PROG_TIMER 10 * BILLION // in s
 #define BATCH_TIMER 0
 #define SEQ_BATCH_TIMER 5 * 1 * MILLION // ~5ms -- same as CALVIN paper
-#define DONE_TIMER 1 * 60 * BILLION // ~1 minutes
-#define WARMUP_TIMER 1 * 60 * BILLION // ~1 minutes
+#define DONE_TIMER 1 * 60 * BILLION     // ~1 minutes
+#define WARMUP_TIMER 1 * 60 * BILLION   // ~1 minutes
 
 #define SEED 0
 #define SHMEM_ENV false

@@ -35,7 +35,9 @@
 #include "ycsb.h"
 #include "ycsb_query.h"
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
+#include <fcntl.h>
 
 #if CC_ALG == LIFE
 namespace {
@@ -44,6 +46,57 @@ void wait_before_life_help() {
   if (LIFE_HELP_WAIT_US > 0)
     usleep(LIFE_HELP_WAIT_US);
 }
+
+#if LOG_LIFE
+pthread_mutex_t life_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+int life_log_fd() {
+  static const int fd =
+      open(LIFE_LOG_FILE, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+  if (fd < 0) {
+    fprintf(stderr, "Failed to open LIFE log %s: %s\n", LIFE_LOG_FILE,
+            strerror(errno));
+    abort();
+  }
+  return fd;
+}
+
+void persist_life_timing(uint64_t txn_id, uint64_t node_id,
+                         uint64_t worker_id, uint64_t attempts,
+                         uint64_t own_time, uint64_t help_time,
+                         uint64_t finalize_time) {
+  char record[256];
+  const int record_size =
+      snprintf(record, sizeof(record),
+               "LIFE_TIMING txn_id=%lu node_id=%lu worker_id=%lu attempts=%lu "
+               "own_ns=%lu helping_ns=%lu finalization_ns=%lu\n",
+               txn_id, node_id, worker_id, attempts, own_time, help_time,
+               finalize_time);
+  assert(record_size > 0 && static_cast<size_t>(record_size) < sizeof(record));
+
+  pthread_mutex_lock(&life_log_mutex);
+  const int fd = life_log_fd();
+  size_t written = 0;
+  while (written < static_cast<size_t>(record_size)) {
+    const ssize_t result =
+        write(fd, record + written, static_cast<size_t>(record_size) - written);
+    if (result < 0 && errno == EINTR)
+      continue;
+    if (result <= 0) {
+      fprintf(stderr, "Failed to write LIFE log %s: %s\n", LIFE_LOG_FILE,
+              strerror(errno));
+      abort();
+    }
+    written += static_cast<size_t>(result);
+  }
+  if (fdatasync(fd) != 0) {
+    fprintf(stderr, "Failed to sync LIFE log %s: %s\n", LIFE_LOG_FILE,
+            strerror(errno));
+    abort();
+  }
+  pthread_mutex_unlock(&life_log_mutex);
+}
+#endif
 
 } // namespace
 #endif
@@ -57,6 +110,11 @@ void YCSBTxnManager::init(uint64_t thd_id, Workload *h_wl) {
 void YCSBTxnManager::reset() {
   state = YCSB_0;
   next_record_id = 0;
+#if LOG_LIFE
+  life_help_time = 0;
+  life_own_time = 0;
+  life_finalize_time = 0;
+#endif
   TxnManager::reset();
 }
 
@@ -159,6 +217,11 @@ RC YCSBTxnManager::run_life_txn() {
   txn_stats.wait_starttime = get_sys_clock();
 
   txn->life_status = LifeTxnStatus::Committed;
+#if LOG_LIFE
+  persist_life_timing(get_txn_id(), g_node_id, get_thd_id(),
+                      txn->life_tid.attempt, life_own_time, life_help_time,
+                      life_finalize_time);
+#endif
   return commit();
 }
 
@@ -168,7 +231,14 @@ bool YCSBTxnManager::try_life_transactions(
     LifeTxnDescriptor &ctx = txns.back();
 
     if (ctx.ycsb.next_record_id >= ctx.ycsb.requests.size()) {
-      if (finalize_life_descriptor(ctx)) {
+#if LOG_LIFE
+      const uint64_t finalize_start = get_sys_clock();
+#endif
+      const bool finalized = finalize_life_descriptor(ctx);
+#if LOG_LIFE
+      life_finalize_time += get_sys_clock() - finalize_start;
+#endif
+      if (finalized) {
         if (ctx.pid == txn->life_pid && ctx.tid.time == txn->life_tid.time) {
           txn->life_tid = ctx.tid;
           txn->life_history = ctx.history;
@@ -182,12 +252,22 @@ bool YCSBTxnManager::try_life_transactions(
     }
 
     LifeOperation operation;
+#if LOG_LIFE
+    const uint64_t operation_start = get_sys_clock();
+#endif
     LifeExecuteResult result = execute_life_operation(ctx, operation);
     if (result.code == LifeResultCode::Help ||
         result.code == LifeResultCode::Finalize) {
       wait_before_life_help();
       result = execute_life_operation(ctx, operation);
     }
+#if LOG_LIFE
+    const uint64_t operation_time = get_sys_clock() - operation_start;
+    if (ctx.pid == txn->life_pid && ctx.tid.time == txn->life_tid.time)
+      life_own_time += operation_time;
+    else
+      life_help_time += operation_time;
+#endif
 
     switch (result.code) {
 
@@ -199,7 +279,13 @@ bool YCSBTxnManager::try_life_transactions(
       LifeTxnDescriptor response = result.transaction;
       const uint64_t response_time = response.tid.time;
       const uint64_t ctx_time = ctx.tid.time;
+#if LOG_LIFE
+      const uint64_t finalize_start = get_sys_clock();
+#endif
       finalize_life_descriptor(response);
+#if LOG_LIFE
+      life_finalize_time += get_sys_clock() - finalize_start;
+#endif
       if (response_time < ctx_time)
         txns.push_back(response);
       break;

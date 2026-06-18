@@ -98,6 +98,11 @@ private:
   YCSBWorkload *_wl;
   YCSBRemTxnType state;
   uint64_t next_record_id;
+#if LOG_LIFE
+  uint64_t life_help_time;
+  uint64_t life_own_time;
+  uint64_t life_finalize_time;
+#endif
 };
 
 #endif

@@ -100,6 +100,8 @@
 /***********************************************/
 #define LOG_COMMAND false
 #define LOG_REDO false
+#define LOG_LIFE false
+#define LIFE_LOG_FILE "life_timing.log"
 
 /***********************************************/
 // Benchmark
