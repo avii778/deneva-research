@@ -37,6 +37,17 @@
 #include <algorithm>
 #include <cstring>
 
+#if CC_ALG == LIFE
+namespace {
+
+void wait_before_life_help() {
+  if (LIFE_HELP_WAIT_US > 0)
+    usleep(LIFE_HELP_WAIT_US);
+}
+
+} // namespace
+#endif
+
 void YCSBTxnManager::init(uint64_t thd_id, Workload *h_wl) {
   TxnManager::init(thd_id, h_wl);
   _wl = (YCSBWorkload *)h_wl;
@@ -171,7 +182,12 @@ bool YCSBTxnManager::try_life_transactions(
     }
 
     LifeOperation operation;
-    const LifeExecuteResult result = execute_life_operation(ctx, operation);
+    LifeExecuteResult result = execute_life_operation(ctx, operation);
+    if (result.code == LifeResultCode::Help ||
+        result.code == LifeResultCode::Finalize) {
+      wait_before_life_help();
+      result = execute_life_operation(ctx, operation);
+    }
 
     switch (result.code) {
 

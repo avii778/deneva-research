@@ -214,7 +214,7 @@ int main(int argc, char* argv[])
     worker_thds = new WorkerThread[wthd_cnt];
     input_thds = new InputThread[rthd_cnt];
     output_thds = new OutputThread[sthd_cnt];
-    abort_thds = new AbortThread[1];
+    abort_thds = g_abort_thread_cnt > 0 ? new AbortThread[g_abort_thread_cnt] : NULL;
     log_thds = new LogThread[1];
 #if CC_ALG == CALVIN
     calvin_lock_thds = new CalvinLockThread[1];
@@ -284,8 +284,10 @@ int main(int argc, char* argv[])
 #endif
 
 #if CC_ALG != CALVIN
-  abort_thds[0].init(id,g_node_id,m_wl);
-  pthread_create(&p_thds[id++], NULL, run_thread, (void *)&abort_thds[0]);
+  for (uint64_t j = 0; j < g_abort_thread_cnt; j++) {
+    abort_thds[j].init(id,g_node_id,m_wl);
+    pthread_create(&p_thds[id++], NULL, run_thread, (void *)&abort_thds[j]);
+  }
 #endif
 
 #if CC_ALG == CALVIN

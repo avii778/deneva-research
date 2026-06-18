@@ -192,10 +192,16 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   const std::vector<LifeHistoryEntry> tx_object_history =
       object_history(tx, operation.object);
 
+  const bool same_process_txn_time =
+      tx.tid.time == local.transaction.tid.time;
+  const bool local_has_newer_attempt =
+      same_process_txn_time && tx.tid.attempt < local.transaction.tid.attempt;
+  const bool same_process_txn_attempt = tx.tid == local.transaction.tid;
+
   const bool must_defer =
       context.status == LifeTxnStatus::Prepared ||
-      context.transaction.tid < tx.tid || tx.tid < local.transaction.tid ||
-      (tx.tid == local.transaction.tid &&
+      context.transaction.tid < tx.tid || local_has_newer_attempt ||
+      (same_process_txn_attempt &&
        (local.status == LifeTxnStatus::Aborted ||
         tx.history.size() < local.transaction.history.size()));
 
@@ -225,8 +231,11 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
     if (tx.tid.time < local.transaction.tid.time)
       return make_result(LifeResultCode::Committed);
 
-    if (tx.tid < local.transaction.tid ||
-        local.status == LifeTxnStatus::Aborted) {
+    if (same_process_txn_time && local.status == LifeTxnStatus::Committed)
+      return make_result(LifeResultCode::Committed);
+
+    if (local_has_newer_attempt ||
+        (same_process_txn_attempt && local.status == LifeTxnStatus::Aborted)) {
       LifeExecuteResult result = make_result(LifeResultCode::Retry);
       result.observed_attempt = local.transaction.tid.attempt;
       return result;

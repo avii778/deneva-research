@@ -103,7 +103,11 @@ UInt32 g_thread_cnt = PART_CNT/NODE_CNT;
 UInt32 g_thread_cnt = THREAD_CNT;
 #endif
 UInt32 g_rem_thread_cnt = REM_THREAD_CNT;
+#if CC_ALG == CALVIN || CC_ALG == LIFE
+UInt32 g_abort_thread_cnt = 0;
+#else
 UInt32 g_abort_thread_cnt = 1;
+#endif
 #if LOGGING
 UInt32 g_logger_thread_cnt = 1;
 #else

@@ -9,6 +9,12 @@ from textwrap import wrap
 import latency_stats as ls
 import seaborn as sns
 
+FIG_DIR = os.environ.get("PLOT_FIG_DIR", os.path.join(os.path.dirname(__file__), "figs"))
+
+def _ensure_fig_dir():
+    if not os.path.isdir(FIG_DIR):
+        os.makedirs(FIG_DIR)
+
 
 rename = {
     "average": "   avg   "
@@ -284,7 +290,8 @@ def draw_bar(filename, data, label, names=None, dots=None,
     fig.legend([x[0] for x in bars], names, prop={'size':12}, 
         ncol=ncol, bbox_to_anchor=bbox, labelspacing=0.2) 
     subplots_adjust(left=left, bottom=bottom, right=right, top=top)
-    savefig('../figs/' + filename)
+    _ensure_fig_dir()
+    savefig(os.path.join(FIG_DIR, filename))
     plt.close()
 
 def draw_line2(fname, data, xticks, 
@@ -344,7 +351,7 @@ def draw_line2(fname, data, xticks,
     subplots_adjust(left=0.18, bottom=0.15, right=0.9, top=None)
     if title:
         ax.set_title("\n".join(wrap(title)))
-    axes = ax.get_axes()
+    axes = ax
     axes.yaxis.grid(True,
         linestyle='-',
         which='major',
@@ -352,7 +359,8 @@ def draw_line2(fname, data, xticks,
     )
     ax.set_axisbelow(True)
 
-    savefig('../figs/' + fname +'.pdf', bbox_inches='tight')
+    _ensure_fig_dir()
+    savefig(os.path.join(FIG_DIR, fname + '.pdf'), bbox_inches='tight')
     plt.close()
 
 
@@ -387,6 +395,14 @@ def draw_line(fname, data, xticks,
     if logscalex:
         ax.set_xscale('log',basex=base)
     n = 0
+    categorical_x = False
+    try:
+        plot_xticks = [float(x) for x in xticks]
+    except ValueError:
+        categorical_x = True
+        plot_xticks = list(range(len(xticks)))
+        ax.set_xticks(plot_xticks)
+        ax.set_xticklabels([str(x) for x in xticks])
     if xlabels != None :
         ax.set_xticklabels([x if i%2 else '' for x,i in zip(xlabels,range(len(xlabels)))]) 
     if linenames == None :
@@ -394,11 +410,7 @@ def draw_line(fname, data, xticks,
         linenames = sorted(data.keys())
     for i in range(0, len(linenames)) :
         key = linenames[i]
-        try:
-            intlab = [float(x) for x in xticks]
-        except ValueError:
-            print("ValError " + key)
-            intlab = [float(x[:-2]) for x in xticks]
+        intlab = plot_xticks
 
         style = None
         if styles != None :
@@ -418,7 +430,10 @@ def draw_line(fname, data, xticks,
     if xlimit != None:
         if not logscalex:
             xlim(xlimit)
-    ax.set_xlim([xticks[0],xticks[len(xticks)-1]])
+    if categorical_x:
+        ax.set_xlim([-0.1, len(xticks)-0.9])
+    else:
+        ax.set_xlim([plot_xticks[0],plot_xticks[len(plot_xticks)-1]])
 #    plt.gca().set_ylim(bottom=0)
     ylabel(ylab,fontsize=18)
     xlabel(xlab,fontsize=18)
@@ -437,7 +452,7 @@ def draw_line(fname, data, xticks,
 #        fig.legend(lines, linenames, loc='upper right',bbox_to_anchor = bbox, prop={'size':8},ncol=ncol,title=ltitle)
     if title:
         ax.set_title("\n".join(wrap(title)))
-    axes = ax.get_axes()
+    axes = ax
     axes.yaxis.grid(True,
         linestyle='-',
         which='major',
@@ -450,16 +465,17 @@ def draw_line(fname, data, xticks,
     ax.spines['bottom'].set_color('black')
     ax.spines['top'].set_color('black')
 
-    savefig('../figs/' + fname +'.pdf', bbox_inches='tight')
+    _ensure_fig_dir()
+    savefig(os.path.join(FIG_DIR, fname + '.pdf'), bbox_inches='tight')
     plt.close()
     if not legend:
         fig = figure(figsize=((7.2, 0.4)))
         fig.legend(lines, linenames,bbox_to_anchor = (1,1), prop={'size':10},frameon=False,ncol=len(linenames))
-        savefig('../figs/' + 'legend.pdf')
+        savefig(os.path.join(FIG_DIR, 'legend.pdf'))
         plt.close()
         fig = figure(figsize=((3.9, 0.6)))
         fig.legend(lines, linenames,bbox_to_anchor = (1,1), prop={'size':10},frameon=False,ncol=len(linenames)/2)
-        savefig('../figs/' + 'legend_half.pdf')
+        savefig(os.path.join(FIG_DIR, 'legend_half.pdf'))
         plt.close()
 #        fig = figure(figsize=((4.2, 0.4)))
 #        fig.legend(lines, linenames,bbox_to_anchor = (1,1), prop={'size':10},frameon=True,ncol=len(linenames))
@@ -498,7 +514,8 @@ def draw_bars_single(data, xlabels,
         ax.set_title("\n".join(wrap(title)))
     legend(plots, xlabels, bbox_to_anchor = bbox, prop={'size':11})
     subplots_adjust(bottom=0.25, right=0.7, top=None)
-    savefig('../figs/' + figname + '.pdf', bbox_inches='tight')
+    _ensure_fig_dir()
+    savefig(os.path.join(FIG_DIR, figname + '.pdf'), bbox_inches='tight')
     plt.close()
 
 
@@ -535,7 +552,8 @@ def draw_bars(data, xlabels,
         ax.set_title("\n".join(wrap(title)))
     legend(plots, sorted(data.keys()), bbox_to_anchor = bbox, prop={'size':11})
     subplots_adjust(bottom=0.25, right=0.7, top=None)
-    savefig('../figs/' + figname + '.pdf', bbox_inches='tight')
+    _ensure_fig_dir()
+    savefig(os.path.join(FIG_DIR, figname + '.pdf'), bbox_inches='tight')
     plt.close()
 
 
@@ -567,20 +585,21 @@ def draw_stack(data, xlabels, slabels, figname='stack', title=None, figsize=(8, 
     if legend:
         fig.legend(reversed(plots), tuple(slabels),loc='right',prop={'size':11})
     subplots_adjust(bottom=0.25, right=0.7, top=None)
-    savefig('../figs/' + figname + '.pdf', bbox_inches='tight')
+    _ensure_fig_dir()
+    savefig(os.path.join(FIG_DIR, figname + '.pdf'), bbox_inches='tight')
     plt.close()
     fig = figure(figsize=(5.4, 0.3))
     fig.legend(reversed(plots), tuple(slabels), prop={'size':8},ncol=len(slabels), columnspacing=1)
 #    fig.legend(reversed(plots), tuple(slabels), bbox_to_anchor = (1,1, 1, 1), prop={'size':10})
-    savefig('../figs/breakdown_legend.pdf')
+    savefig(os.path.join(FIG_DIR, 'breakdown_legend.pdf'))
     plt.close()
     fig = figure(figsize=((3.6, 0.6)))
     fig.legend(reversed(plots), tuple(slabels), prop={'size':8},ncol=3)
-    savefig('../figs/breakdown_legend_half.pdf')
+    savefig(os.path.join(FIG_DIR, 'breakdown_legend_half.pdf'))
     plt.close()
     fig = figure(figsize=((1.3, 2)))
     fig.legend(reversed(plots), tuple(slabels), prop={'size':8},ncol=1)
-    savefig('../figs/breakdown_legend_stacked.pdf')
+    savefig(os.path.join(FIG_DIR, 'breakdown_legend_stacked.pdf'))
     plt.close()
 
 
@@ -671,7 +690,7 @@ def draw_scatter(fname, data, xticks,
     if title:
         ax.set_title("\n".join(wrap(title)))
 
-    axes = ax.get_axes()
+    axes = ax
     axes.yaxis.grid(True,
         linestyle='-',
         which='major',
@@ -679,7 +698,8 @@ def draw_scatter(fname, data, xticks,
     )
     ax.set_axisbelow(True)
 
-    savefig('../figs/' + fname +'.pdf', bbox_inches='tight')
+    _ensure_fig_dir()
+    savefig(os.path.join(FIG_DIR, fname + '.pdf'), bbox_inches='tight')
     plt.close()
 
 def draw_lat_matrix(fname,data,title="",lat_type=None,lat_types=None,columns=[],rows=[]):
@@ -717,6 +737,7 @@ def draw_lat_matrix(fname,data,title="",lat_type=None,lat_types=None,columns=[],
 
     if title:
         ax.set_title("\n".join(wrap(title)), y=1.08)
-    savefig('../figs/' + fname +'.pdf', bbox_inches='tight')
+    _ensure_fig_dir()
+    savefig(os.path.join(FIG_DIR, fname + '.pdf'), bbox_inches='tight')
     plt.close()
 

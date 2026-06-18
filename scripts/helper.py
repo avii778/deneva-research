@@ -7,6 +7,8 @@ import pprint
 import latency_stats as ls
 import itertools
 
+FIG_DIR = os.environ.get("PLOT_FIG_DIR", os.path.join(os.path.dirname(__file__), "figs"))
+
 CONFIG_PARAMS = [
 #    "DEBUG_DISTR",
     "CC_ALG",
@@ -1157,14 +1159,19 @@ def get_summary_stats(stats,summary,summary_cl,x,v,cc):
    
 def write_summary_file(fname,stats,x_vals,v_vals):
 
-    with open('../figs/' + fname+'.csv','w') as f:
+    if not os.path.isdir(FIG_DIR):
+        os.makedirs(FIG_DIR)
+    with open(os.path.join(FIG_DIR, fname + '.csv'), 'w') as f:
         if v_vals == []:
             f.write(', ' + ', '.join(x_vals) +'\n')
             for p in stat_map.keys():
                 s = p + ', '
                 for x in x_vals:
                     k = (x)
-                    s += str(stats[k][p]) + ', '
+                    try:
+                        s += str(stats[k][p]) + ', '
+                    except KeyError:
+                        s += '--, '
                 f.write(s+'\n')
         else:
             for x in x_vals:
@@ -1207,7 +1214,7 @@ def write_summary_file(fname,stats,x_vals,v_vals):
             f.write('\n')
 
 def write_breakdown_file(fname,summary,summary_client):
-    with open('../figs/' + fname+'_breakdown.csv','w') as f:
+    with open(os.path.join(FIG_DIR, fname + '_breakdown.csv'), 'w') as f:
         thd_cnt = 1
         try:
             thd_cnt = len(summary['txn_cnt'])

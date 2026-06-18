@@ -13,6 +13,31 @@ import pprint
 plot_cnt = 0
 PATH=os.getcwd()
 
+def _plot_series_values(vval, vname):
+    if vname == '':
+        return ['']
+    return vval
+
+def _series_label(v, vname):
+    if vname == '':
+        return ''
+    if vname == 'MODE':
+        mode_nice = {"NOCC_MODE":"No CC","NORMAL_MODE":"Serializable Execution","QRY_ONLY_MODE":"No Concurrency Control"}
+        return mode_nice[v]
+    return v
+
+def _cfg_for_point(cfg_fmt, cfg, xname, x, vname, v, new_cfgs, extras):
+    my_cfg_fmt = cfg_fmt + [xname]
+    if new_cfgs != {}:
+        lookup_key = (x, 0) if vname == '' else (x, v)
+        my_cfg = new_cfgs[lookup_key] + [x]
+    else:
+        my_cfg = cfg + [x]
+    if vname != '':
+        my_cfg_fmt = my_cfg_fmt + [vname]
+        my_cfg = my_cfg + [v]
+    return apply_extras(my_cfg_fmt,my_cfg,extras,xname,vname)
+
 def apply_extras(my_cfg_fmt,my_cfg,extras,xname,vname):
     for e in extras.keys():
         if e in my_cfg_fmt:
@@ -346,12 +371,8 @@ def latency(xval,vval,summary,summary_cl,
             _xlab = xname
         else:
             _xlab = xlab
-    for v in vval:
-        if vname == 'MODE':
-            mode_nice = {"NOCC_MODE":"No CC","NORMAL_MODE":"Serializable Execution","QRY_ONLY_MODE":"No Concurrency Control"}
-            _v = mode_nice[v]
-        else:
-            _v = v
+    for v in _plot_series_values(vval,vname):
+        _v = _series_label(v,vname)
         ccl50[_v] = [0] * len(xval)
         ccl99[_v] = [0] * len(xval)
         fscl50[_v] = [0] * len(xval)
@@ -362,17 +383,14 @@ def latency(xval,vval,summary,summary_cl,
         sacl99[_v] = [0] * len(xval)
 
         for x,xi in zip(xval,range(len(xval))):
-            if new_cfgs != {}:
-                my_cfg_fmt = cfg_fmt + [xname] + [vname]
-                my_cfg = new_cfgs[(x,v)] + [x] + [v]
-                my_cfg,my_cfg_fmt = apply_extras(my_cfg_fmt,my_cfg,extras,xname,vname)
-            else:
-                my_cfg_fmt = cfg_fmt + [xname] + [vname]
-                my_cfg = cfg + [x] + [v]
-                my_cfg,my_cfg_fmt = apply_extras(my_cfg_fmt,my_cfg,extras,xname,vname)
+            my_cfg,my_cfg_fmt = _cfg_for_point(cfg_fmt,cfg,xname,x,vname,v,new_cfgs,extras)
             if lst != {}:
-                my_cfg_fmt = cfg_fmt + [xname] + [vname]
-                my_cfg = lst[(x,v)] + [x] + [v]
+                lookup_key = (x, 0) if vname == '' else (x, v)
+                my_cfg_fmt = cfg_fmt + [xname]
+                my_cfg = lst[lookup_key] + [x]
+                if vname != '':
+                    my_cfg_fmt = my_cfg_fmt + [vname]
+                    my_cfg = my_cfg + [v]
                 my_cfg,my_cfg_fmt = apply_extras(my_cfg_fmt,my_cfg,extras,xname,vname)
                 print("fmt ({},{}): {}".format(x,v,my_cfg_fmt))
                 print("lst ({},{}): {}".format(x,v,my_cfg))
@@ -390,14 +408,14 @@ def latency(xval,vval,summary,summary_cl,
             try:
                 s = summary
                 s2 = summary_cl
-#                ccl50[_v][xi] = min(avg(s2[cfgs]['ccl50']),60)
-#                ccl99[_v][xi] = min(avg(s2[cfgs]['ccl99']),60)
+                ccl50[_v][xi] = min(avg(s2[cfgs]['ccl50']),60)
+                ccl99[_v][xi] = min(avg(s2[cfgs]['ccl99']),60)
                 fscl50[_v][xi] = min(avg(s[cfgs]['fscl50']),60)
                 fscl99[_v][xi] = min(avg(s[cfgs]['fscl99']),60)
-#                lscl50[_v][xi] = min(avg(s[cfgs]['lscl50']),60)
-#                lscl99[_v][xi] = min(avg(s[cfgs]['lscl99']),60)
-#                sacl50[_v][xi] = min(avg(s[cfgs]['sacl50']),60)
-#                sacl99[_v][xi] = min(avg(s[cfgs]['sacl99']),60)
+                lscl50[_v][xi] = min(avg(s[cfgs]['lscl50']),60)
+                lscl99[_v][xi] = min(avg(s[cfgs]['lscl99']),60)
+                sacl50[_v][xi] = min(avg(s[cfgs]['sacl50']),60)
+                sacl99[_v][xi] = min(avg(s[cfgs]['sacl99']),60)
             except KeyError:
                 print("KeyError: {}, {} {} -- {}".format(tmp,v,x,cfgs))
                 ccl50[_v][xi] = 0
@@ -498,27 +516,20 @@ def tput(xval,vval,summary,summary_cl,
             _xlab = xname
         else:
             _xlab = xlab
-    for v in vval:
-        if vname == 'MODE':
-            mode_nice = {"NOCC_MODE":"No CC","NORMAL_MODE":"Serializable Execution","QRY_ONLY_MODE":"No Concurrency Control"}
-            _v = mode_nice[v]
-        else:
-            _v = v
+    for v in _plot_series_values(vval,vname):
+        _v = _series_label(v,vname)
         tpt[_v] = [0] * len(xval)
         pntpt[_v] = [0] * len(xval)
 
         for x,xi in zip(xval,range(len(xval))):
-            if new_cfgs != {}:
-                my_cfg_fmt = cfg_fmt + [xname] + [vname]
-                my_cfg = new_cfgs[(x,v)] + [x] + [v]
-                my_cfg,my_cfg_fmt = apply_extras(my_cfg_fmt,my_cfg,extras,xname,vname)
-            else:
-                my_cfg_fmt = cfg_fmt + [xname] + [vname]
-                my_cfg = cfg + [x] + [v]
-                my_cfg,my_cfg_fmt = apply_extras(my_cfg_fmt,my_cfg,extras,xname,vname)
+            my_cfg,my_cfg_fmt = _cfg_for_point(cfg_fmt,cfg,xname,x,vname,v,new_cfgs,extras)
             if lst != {}:
-                my_cfg_fmt = cfg_fmt + [xname] + [vname]
-                my_cfg = lst[(x,v)] + [x] + [v]
+                lookup_key = (x, 0) if vname == '' else (x, v)
+                my_cfg_fmt = cfg_fmt + [xname]
+                my_cfg = lst[lookup_key] + [x]
+                if vname != '':
+                    my_cfg_fmt = my_cfg_fmt + [vname]
+                    my_cfg = my_cfg + [v]
                 my_cfg,my_cfg_fmt = apply_extras(my_cfg_fmt,my_cfg,extras,xname,vname)
                 print("fmt ({},{}): {}".format(x,v,my_cfg_fmt))
                 print("lst ({},{}): {}".format(x,v,my_cfg))
@@ -920,7 +931,7 @@ def abort_rate(xval,
         name = 'abortrate_{}_{}_{}'.format(xname.lower(),vname.lower(),title.replace(" ","_").lower())
     _title = 'Abort Rate {}'.format(title)
 
-    for v in vval:
+    for v in _plot_series_values(vval,vname):
         if vname == "NETWORK_DELAY":
             _v = (float(v.replace("UL","")))/1000000
         else:
@@ -928,17 +939,14 @@ def abort_rate(xval,
         tpt[_v] = [0] * len(xval)
 
         for x,xi in zip(xval,range(len(xval))):
-            if new_cfgs != {}:
-                my_cfg_fmt = cfg_fmt + [xname] + [vname]
-                my_cfg = new_cfgs[(x,v)] + [x] + [v]
-                my_cfg,my_cfg_fmt = apply_extras(my_cfg_fmt,my_cfg,extras,xname,vname)
-            else:
-                my_cfg_fmt = cfg_fmt + [xname] + [vname]
-                my_cfg = cfg + [x] + [v]
-                my_cfg,my_cfg_fmt = apply_extras(my_cfg_fmt,my_cfg,extras,xname,vname)
+            my_cfg,my_cfg_fmt = _cfg_for_point(cfg_fmt,cfg,xname,x,vname,v,new_cfgs,extras)
             if lst != {}:
-                my_cfg_fmt = cfg_fmt + [xname] + [vname]
-                my_cfg = lst[(x,v)] + [x] + [v]
+                lookup_key = (x, 0) if vname == '' else (x, v)
+                my_cfg_fmt = cfg_fmt + [xname]
+                my_cfg = lst[lookup_key] + [x]
+                if vname != '':
+                    my_cfg_fmt = my_cfg_fmt + [vname]
+                    my_cfg = my_cfg + [v]
                 my_cfg,my_cfg_fmt = apply_extras(my_cfg_fmt,my_cfg,extras,xname,vname)
                 print("fmt ({},{}): {}".format(x,v,my_cfg_fmt))
                 print("lst ({},{}): {}".format(x,v,my_cfg))
@@ -955,8 +963,8 @@ def abort_rate(xval,
             try:
                 tot_txn_cnt = sum(summary[cfgs]['txn_cnt'])
                 avg_txn_cnt = avg(summary[cfgs]['txn_cnt'])
-                tot_abrt_cnt = sum(summary[cfgs]['abort_cnt'])
-                avg_abrt_cnt = avg(summary[cfgs]['abort_cnt'])
+                tot_abrt_cnt = sum(summary[cfgs]['total_txn_abort_cnt'])
+                avg_abrt_cnt = avg(summary[cfgs]['total_txn_abort_cnt'])
             except KeyError:
                 print("KeyError: {} {} {} -- {}".format(v,x,my_cfg,cfgs))
                 tpt[_v][xi] = 0
@@ -1945,5 +1953,3 @@ def plot_avg(mpr,nodes,algos,max_txn,summary,value='run_time'):
             avgs[x][i] = avg_
 
     draw_line(name,avgs,mpr,ylab='average ' + value,xlab='Multi-Partition Rate',title='Per Node Throughput',bbox=[0.5,0.95],ltitle=vname) 
-
-

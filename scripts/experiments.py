@@ -61,7 +61,7 @@ fmt_title = [
     "NUM_WH",
 ]
 YCSB_ALGOS = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP"]
-YCSB_SINGLE_NODE_ALGOS = ["LIFE"]
+YCSB_SINGLE_NODE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 
 ##############################
 # PLOTS

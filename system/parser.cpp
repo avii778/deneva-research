@@ -178,15 +178,16 @@ void parser(int argc, char * argv[]) {
 			assert(false);
     }
 	}
+#if CC_ALG == CALVIN || CC_ALG == LIFE
+  // Calvin and LIFE do not use the generic abort queue worker.
+  g_abort_thread_cnt = 0;
+#endif
   g_total_thread_cnt = g_thread_cnt + g_rem_thread_cnt + g_send_thread_cnt + g_abort_thread_cnt;
 #if LOGGING
   g_total_thread_cnt += g_logger_thread_cnt; // logger thread
 #endif
 #if CC_ALG == CALVIN
     g_total_thread_cnt += 2; // sequencer + scheduler thread
-  // Remove abort thread
-  g_abort_thread_cnt = 0;
-  g_total_thread_cnt -= 1;
 #endif
   g_total_client_thread_cnt = g_client_thread_cnt + g_client_rem_thread_cnt + g_client_send_thread_cnt;
   g_total_node_cnt = g_node_cnt + g_client_node_cnt + g_repl_cnt*g_node_cnt;

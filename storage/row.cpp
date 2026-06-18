@@ -27,6 +27,7 @@
 #include "row_ts.h"
 #include "table.h"
 #include "txn.h"
+#include <new>
 
 #define SIM_FULL_ROW true
 
@@ -59,7 +60,7 @@ void row_t::init_manager(row_t *row) {
   manager = (Row_lock *)mem_allocator.align_alloc(sizeof(Row_lock));
 
 #elif CC_ALG == LIFE
-  manager = (Row_life *)mem_allocator.align_alloc(sizeof(Row_life));
+  manager = new (mem_allocator.align_alloc(sizeof(Row_life))) Row_life();
 #elif CC_ALG == TIMESTAMP
   manager = (Row_ts *)mem_allocator.align_alloc(sizeof(Row_ts));
 #elif CC_ALG == MVCC

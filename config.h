@@ -116,6 +116,7 @@
 #define BUCKET_CNT 31
 #define ABORT_PENALTY 10 * 1000000UL   // in ns.
 #define ABORT_PENALTY_MAX 5 * 100 * 1000000UL   // in ns.
+#define LIFE_HELP_WAIT_US 50
 #define BACKOFF true
 // [ INDEX ]
 #define ENABLE_LATCH false
