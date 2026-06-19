@@ -43,5 +43,10 @@ LifeTxnDescriptor YCSBTxnManager::life_descriptor() const {
   descriptor.ycsb =
       make_life_ycsb_snapshot(*static_cast<const YCSBQuery *>(query),
                               static_cast<uint32_t>(state), next_record_id);
+  for (std::vector<LifeYcsbRequest>::iterator it =
+           descriptor.ycsb.requests.begin();
+       it != descriptor.ycsb.requests.end(); ++it) {
+    it->row = lookup_life_row(it->key);
+  }
   return descriptor;
 }

@@ -7,6 +7,9 @@
 #include <memory>
 #include <vector>
 
+class row_t;
+class Row_life;
+
 struct LifeProcessId {
   uint32_t node_id;
   uint32_t worker_id;
@@ -71,6 +74,7 @@ enum class LifeOperationKind { ReadField, WriteField };
 
 struct LifeOperation {
   LifeObjectId object;
+  Row_life *manager;
   LifeOperationKind kind;
   uint32_t field_id;
   std::vector<uint8_t> argument;
@@ -120,6 +124,7 @@ struct LifeYcsbRequest {
   LifeYcsbRequestKind kind;
   uint64_t key;
   uint8_t value;
+  row_t *row;
 };
 
 inline bool operator==(const LifeYcsbRequest &lhs, const LifeYcsbRequest &rhs) {
@@ -148,11 +153,45 @@ inline bool operator!=(const LifeYcsbSnapshot &lhs,
 }
 
 struct LifeTxnDescriptor {
+  struct TouchedObject {
+    LifeObjectId object;
+    Row_life *manager;
+    std::vector<size_t> history_indices;
+  };
+
   LifeProcessId pid;
   LifeTxnId tid;
   std::vector<LifeHistoryEntry> history;
   LifeYcsbSnapshot ycsb;
+  std::vector<TouchedObject> touched_objects;
 };
+
+inline void life_append_history(LifeTxnDescriptor &tx,
+                                const LifeHistoryEntry &entry) {
+  const size_t history_index = tx.history.size();
+  std::vector<LifeTxnDescriptor::TouchedObject>::iterator touched =
+      tx.touched_objects.begin();
+  for (; touched != tx.touched_objects.end(); ++touched) {
+    if ((entry.operation.manager != NULL &&
+         touched->manager == entry.operation.manager) ||
+        touched->object == entry.operation.object) {
+      break;
+    }
+  }
+
+  if (touched == tx.touched_objects.end()) {
+    LifeTxnDescriptor::TouchedObject added;
+    added.object = entry.operation.object;
+    added.manager = entry.operation.manager;
+    tx.touched_objects.push_back(added);
+    touched = tx.touched_objects.end() - 1;
+  } else if (touched->manager == NULL) {
+    touched->manager = entry.operation.manager;
+  }
+
+  touched->history_indices.push_back(history_index);
+  tx.history.push_back(entry);
+}
 
 typedef std::shared_ptr<const LifeTxnDescriptor> LifeTxnDescriptorPtr;
 

@@ -82,8 +82,8 @@ private:
   void rollback_life_descriptor(const LifeTxnDescriptor &descriptor);
   void collect_life_objects(const LifeTxnDescriptor &descriptor,
                             std::vector<LifeFinalizeObject> &objects);
-  row_t *lookup_life_row(const LifeObjectId &object);
-  row_t *lookup_life_row(uint64_t key);
+  row_t *lookup_life_row(const LifeObjectId &object) const;
+  row_t *lookup_life_row(uint64_t key) const;
   LifeOperation make_life_operation(row_t *row, ycsb_request *req);
   LifeOperation make_life_operation(row_t *row, const LifeYcsbRequest &req);
   RC run_txn_state();

@@ -113,6 +113,7 @@ void test_snapshot_is_owned() {
   assert(snapshot.requests[0].kind == LifeYcsbRequestKind::Read);
   assert(snapshot.requests[1].kind == LifeYcsbRequestKind::Write);
   assert(snapshot.requests[2].kind == LifeYcsbRequestKind::Scan);
+  assert(snapshot.requests[0].row == NULL);
 
   read.key = 999;
   write.value = 99;
@@ -417,6 +418,60 @@ void test_prepared_rows_share_one_frozen_descriptor() {
   std::free(second_row.data);
 }
 
+void test_local_row_cache_and_incremental_grouping() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+
+  row_t row;
+  row.init(&table, 4, 0);
+  Row_life life_row;
+  life_row.init(&row);
+
+  // Production rows install their manager before the workload sets the key.
+  row.set_primary_key(7);
+  const uint64_t initial_value = 42;
+  std::memcpy(row.data, &initial_value, sizeof(initial_value));
+
+  LifeTxnDescriptor tx = descriptor(1, 10, 1, YCSB_0, 0);
+  LifeOperation read = operation(row, LifeOperationKind::ReadField, 0);
+  read.manager = &life_row;
+  const LifeExecuteResult executed = life_row.execute(tx, read);
+  assert(executed.code == LifeResultCode::Success);
+
+  LifeHistoryEntry entry;
+  entry.operation = read;
+  entry.response = executed.response;
+  life_append_history(tx, entry);
+
+  assert(tx.history.size() == 1);
+  assert(tx.touched_objects.size() == 1);
+  assert(tx.touched_objects[0].manager == &life_row);
+  assert(tx.touched_objects[0].object == read.object);
+  assert(tx.touched_objects[0].history_indices.size() == 1);
+  assert(tx.touched_objects[0].history_indices[0] == 0);
+
+  LifeOperation second_read = read;
+  LifeHistoryEntry second_entry;
+  second_entry.operation = second_read;
+  second_entry.response = executed.response;
+  life_append_history(tx, second_entry);
+  assert(tx.touched_objects.size() == 1);
+  assert(tx.touched_objects[0].history_indices.size() == 2);
+  assert(tx.touched_objects[0].history_indices[1] == 1);
+
+  std::free(row.data);
+}
+
 } // namespace
 
 int main() {
@@ -426,5 +481,6 @@ int main() {
   test_prepare_retry_and_commit_publish();
   test_shared_prepare_owns_descriptor_and_read_commit_is_stable();
   test_prepared_rows_share_one_frozen_descriptor();
+  test_local_row_cache_and_incremental_grouping();
   return 0;
 }

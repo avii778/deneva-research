@@ -30,10 +30,7 @@ class Thread;
 class row_t;
 class Row_life;
 
-struct LifeFinalizeObject {
-  LifeObjectId object;
-  std::vector<size_t> history_indices;
-};
+typedef LifeTxnDescriptor::TouchedObject LifeFinalizeObject;
 class table_t;
 class BaseQuery;
 class INDEX;

@@ -13,14 +13,25 @@ namespace {
 
 class LifeLatchGuard {
 public:
-  explicit LifeLatchGuard(pthread_mutex_t *latch) : latch_(latch) {
+  explicit LifeLatchGuard(pthread_mutex_t *latch)
+      : latch_(latch), locked_(true) {
     pthread_mutex_lock(latch_);
   }
 
-  ~LifeLatchGuard() { pthread_mutex_unlock(latch_); }
+  ~LifeLatchGuard() {
+    if (locked_)
+      pthread_mutex_unlock(latch_);
+  }
+
+  void unlock() {
+    assert(locked_);
+    pthread_mutex_unlock(latch_);
+    locked_ = false;
+  }
 
 private:
   pthread_mutex_t *latch_;
+  bool locked_;
 };
 
 } // namespace
@@ -29,6 +40,13 @@ void Row_life::init(row_t *row) {
   assert(row != NULL);
 
   _row = row;
+  _schema = row->get_schema();
+  _object_id.table_id = row->get_table()->get_table_id();
+  _object_id.partition_id = row->get_part_id();
+  _object_id.primary_key = 0;
+  _primary_key_cached = false;
+  _tuple_size = row->get_tuple_size();
+  _field_count = row->get_field_cnt();
 
   active_process.reset();
 
@@ -46,20 +64,53 @@ bool Row_life::priority_less_equal(const LifeTxnId &lhs, const LifeTxnId &rhs) {
   return lhs == rhs || higher_priority(lhs, rhs);
 }
 
-std::vector<LifeHistoryEntry>
-Row_life::object_history(const LifeTxnDescriptor &tx,
-                         const LifeObjectId &object) {
+const LifeTxnDescriptor::TouchedObject *
+Row_life::touched_object(const LifeTxnDescriptor &tx) const {
+  for (std::vector<LifeTxnDescriptor::TouchedObject>::const_iterator it =
+           tx.touched_objects.begin();
+       it != tx.touched_objects.end(); ++it) {
+    if ((it->manager != NULL && it->manager == this) ||
+        it->object == object_id()) {
+      return &*it;
+    }
+  }
+  return NULL;
+}
 
-  std::vector<LifeHistoryEntry> history;
+size_t Row_life::object_history_size(const LifeTxnDescriptor &tx) const {
+  const LifeTxnDescriptor::TouchedObject *touched = touched_object(tx);
+  if (touched != NULL)
+    return touched->history_indices.size();
+
+  size_t count = 0;
+  for (std::vector<LifeHistoryEntry>::const_iterator it = tx.history.begin();
+       it != tx.history.end(); ++it) {
+    if (it->operation.object == object_id())
+      ++count;
+  }
+  return count;
+}
+
+const LifeHistoryEntry *
+Row_life::object_history_entry(const LifeTxnDescriptor &tx,
+                               size_t object_index) const {
+  const LifeTxnDescriptor::TouchedObject *touched = touched_object(tx);
+  if (touched != NULL) {
+    if (object_index >= touched->history_indices.size())
+      return NULL;
+    const size_t history_index = touched->history_indices[object_index];
+    return history_index < tx.history.size() ? &tx.history[history_index] : NULL;
+  }
 
   for (std::vector<LifeHistoryEntry>::const_iterator it = tx.history.begin();
        it != tx.history.end(); ++it) {
-    if (it->operation.object == object) {
-      history.push_back(*it);
-    }
+    if (it->operation.object != object_id())
+      continue;
+    if (object_index == 0)
+      return &*it;
+    --object_index;
   }
-
-  return history;
+  return NULL;
 }
 
 bool Row_life::pid_equals(const LifeProcessId &pid1,
@@ -74,19 +125,24 @@ Row_life::process_record(const LifeProcessId &pid) const {
   if (!processes)
     return NULL;
 
-  ProcessMap::const_iterator it = processes->find(pid);
-
-  if (it != processes->end())
-    return &it->second;
-
-  return NULL;
+  assert(pid.node_id < g_node_cnt);
+  const size_t index = static_cast<size_t>(pid.worker_id) * g_node_cnt +
+                       pid.node_id;
+  if (index >= processes->size() || !(*processes)[index].transaction)
+    return NULL;
+  return &(*processes)[index];
 }
 
 LifeProcessRecord &
 Row_life::mutable_process_record(const LifeProcessId &pid) {
   if (!processes)
-    processes.reset(new ProcessMap());
-  return (*processes)[pid];
+    processes.reset(new ProcessSlots());
+  assert(pid.node_id < g_node_cnt);
+  const size_t index = static_cast<size_t>(pid.worker_id) * g_node_cnt +
+                       pid.node_id;
+  if (index >= processes->size())
+    processes->resize(index + 1);
+  return (*processes)[index];
 }
 
 // Return the record of the current proposed action for the transaction
@@ -107,13 +163,12 @@ LifeExecuteResult Row_life::make_result(LifeResultCode code) const {
 }
 
 // Get the id of this object
-LifeObjectId Row_life::object_id() const {
-
-  LifeObjectId id;
-  id.table_id = _row->get_table()->get_table_id();
-  id.partition_id = _row->get_part_id();
-  id.primary_key = _row->get_primary_key();
-  return id;
+const LifeObjectId &Row_life::object_id() const {
+  if (!_primary_key_cached) {
+    _object_id.primary_key = _row->get_primary_key();
+    _primary_key_cached = true;
+  }
+  return _object_id;
 }
 
 // Updates state if this is a write, updates response if this is a read
@@ -125,15 +180,14 @@ bool Row_life::apply_operation(const LifeOperation &operation,
   response.value.clear();
 
   if (operation.object != object_id() ||
-      operation.field_id >= _row->get_field_cnt() ||
-      state.size() != _row->get_tuple_size()) {
+      operation.field_id >= _field_count || state.size() != _tuple_size) {
     return false;
   }
 
   const uint64_t field_offset =
-      _row->get_schema()->get_field_index(operation.field_id);
+      _schema->get_field_index(operation.field_id);
   const uint64_t field_size =
-      _row->get_schema()->get_field_size(operation.field_id);
+      _schema->get_field_size(operation.field_id);
 
   if (field_offset > state.size() || field_size > state.size() - field_offset)
     return false;
@@ -161,17 +215,33 @@ bool Row_life::apply_operation(const LifeOperation &operation,
   return false;
 }
 
-bool Row_life::replay_history(const std::vector<LifeHistoryEntry> &history,
+bool Row_life::replay_history(const LifeTxnDescriptor &tx,
                               std::vector<uint8_t> &state) const {
-
-  for (std::vector<LifeHistoryEntry>::const_iterator it = history.begin();
-       it != history.end(); ++it) {
-    LifeResponse replayed_response;
-
-    if (!apply_operation(it->operation, state, replayed_response) ||
-        replayed_response != it->response) {
-      return false;
+  const LifeTxnDescriptor::TouchedObject *touched = touched_object(tx);
+  if (touched != NULL) {
+    for (std::vector<size_t>::const_iterator it =
+             touched->history_indices.begin();
+         it != touched->history_indices.end(); ++it) {
+      if (*it >= tx.history.size())
+        return false;
+      const LifeHistoryEntry &entry = tx.history[*it];
+      LifeResponse replayed_response;
+      if (!apply_operation(entry.operation, state, replayed_response) ||
+          replayed_response != entry.response) {
+        return false;
+      }
     }
+    return true;
+  }
+
+  for (std::vector<LifeHistoryEntry>::const_iterator it = tx.history.begin();
+       it != tx.history.end(); ++it) {
+    if (it->operation.object != object_id())
+      continue;
+    LifeResponse replayed_response;
+    if (!apply_operation(it->operation, state, replayed_response) ||
+        replayed_response != it->response)
+      return false;
   }
   return true;
 }
@@ -179,16 +249,15 @@ bool Row_life::replay_history(const std::vector<LifeHistoryEntry> &history,
 bool Row_life::validate_committed_operation(
     const LifeOperation &operation) const {
   if (operation.object != object_id() ||
-      operation.field_id >= _row->get_field_cnt()) {
+      operation.field_id >= _field_count) {
     return false;
   }
 
   const uint64_t field_offset =
-      _row->get_schema()->get_field_index(operation.field_id);
+      _schema->get_field_index(operation.field_id);
   const uint64_t field_size =
-      _row->get_schema()->get_field_size(operation.field_id);
-  const uint64_t tuple_size = _row->get_tuple_size();
-  if (field_offset > tuple_size || field_size > tuple_size - field_offset)
+      _schema->get_field_size(operation.field_id);
+  if (field_offset > _tuple_size || field_size > _tuple_size - field_offset)
     return false;
 
   if (operation.kind == LifeOperationKind::ReadField)
@@ -206,9 +275,9 @@ bool Row_life::apply_committed_operation(const LifeOperation &operation) {
     return true;
 
   const uint64_t field_offset =
-      _row->get_schema()->get_field_index(operation.field_id);
+      _schema->get_field_index(operation.field_id);
   const uint64_t field_size =
-      _row->get_schema()->get_field_size(operation.field_id);
+      _schema->get_field_size(operation.field_id);
   std::memcpy(_row->get_data() + field_offset, operation.argument.data(),
               field_size);
   return true;
@@ -216,6 +285,13 @@ bool Row_life::apply_committed_operation(const LifeOperation &operation) {
 
 LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
                                     const LifeOperation &operation) {
+
+  // These allocations and the descriptor copy depend only on caller-owned
+  // state. Do them before taking the row latch so allocator and deep-copy
+  // latency do not serialize otherwise independent contenders on this row.
+  std::vector<uint8_t> speculative_state(_tuple_size);
+  std::shared_ptr<LifeTxnDescriptor> updated_transaction =
+      std::make_shared<LifeTxnDescriptor>(tx);
 
   LifeLatchGuard guard(&latch);
 
@@ -236,8 +312,7 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   const LifeTxnStatus context_status =
       context != NULL ? context->status : LifeTxnStatus::Aborted;
 
-  const std::vector<LifeHistoryEntry> tx_object_history =
-      object_history(tx, operation.object);
+  const size_t tx_object_history_size = object_history_size(tx);
 
   const bool same_process_txn_time =
       tx.tid.time == local_tid.time;
@@ -262,21 +337,25 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
           priority_less_equal(
               tx.tid, inline_operation->transaction->tid)) {
         LifeInlineOperation pending;
-        pending.transaction = std::make_shared<LifeTxnDescriptor>(tx);
+        pending.transaction = updated_transaction;
         pending.operation = operation;
         inline_operation.reset(new LifeInlineOperation(pending));
       }
 
       LifeExecuteResult result = make_result(LifeResultCode::Finalize);
       assert(context != NULL && context->transaction);
-      result.transaction = *context->transaction;
+      const LifeTxnDescriptorPtr context_transaction = context->transaction;
+      guard.unlock();
+      result.transaction = *context_transaction;
       return result;
     }
 
     if (higher_priority(context_tid, tx.tid)) {
       LifeExecuteResult result = make_result(LifeResultCode::Help);
       assert(context != NULL && context->transaction);
-      result.transaction = *context->transaction;
+      const LifeTxnDescriptorPtr context_transaction = context->transaction;
+      guard.unlock();
+      result.transaction = *context_transaction;
       return result;
     }
 
@@ -295,35 +374,31 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 
     if (tx.history.size() < local_history_size) {
       assert(local != NULL && local->transaction);
-      const uint64_t response_index = tx_object_history.size();
-      if (response_index >=
-              object_history(*local->transaction, object_id()).size() ||
-          object_history(*local->transaction, object_id())[response_index]
-                  .operation != operation) {
+      const LifeHistoryEntry *stored_entry =
+          object_history_entry(*local->transaction, tx_object_history_size);
+      if (stored_entry == NULL || stored_entry->operation != operation) {
         return make_result(LifeResultCode::InvalidOperation);
       }
 
       LifeExecuteResult result = make_result(LifeResultCode::Success);
-      result.response =
-          object_history(*local->transaction, object_id())[response_index]
-              .response;
+      result.response = stored_entry->response;
       return result;
     }
   }
 
   if (active_process.has_value) {
     assert(processes);
-    ProcessMap::iterator active = processes->find(active_process.value);
-    if (active != processes->end())
-      active->second.status = LifeTxnStatus::Aborted;
+    LifeProcessRecord *active = const_cast<LifeProcessRecord *>(
+        process_record(active_process.value));
+    if (active != NULL)
+      active->status = LifeTxnStatus::Aborted;
   }
 
   const uint8_t *committed =
       reinterpret_cast<const uint8_t *>(_row->get_data());
-  std::vector<uint8_t> speculative_state(
-      committed, committed + _row->get_tuple_size());
+  std::copy(committed, committed + _tuple_size, speculative_state.begin());
 
-  if (!replay_history(tx_object_history, speculative_state))
+  if (!replay_history(tx, speculative_state))
     return make_result(LifeResultCode::InvalidOperation);
 
   LifeResponse response;
@@ -335,16 +410,15 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   entry.response = response;
 
   LifeProcessRecord updated;
-  LifeTxnDescriptor updated_transaction = tx;
-  updated_transaction.history.push_back(entry);
-  updated.transaction =
-      std::make_shared<LifeTxnDescriptor>(std::move(updated_transaction));
+  life_append_history(*updated_transaction, entry);
+  updated.transaction = updated_transaction;
   updated.status = LifeTxnStatus::Executing;
 
   active_process.set(tx.pid);
   mutable_process_record(tx.pid) = updated;
 
   LifeExecuteResult result = make_result(LifeResultCode::Success);
+  guard.unlock();
   result.response = response;
   return result;
 }
@@ -405,6 +479,16 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
                       const std::vector<size_t> &history_indices) {
   assert(tx);
 
+  // Bounds checking only examines the immutable frozen descriptor and does
+  // not need to extend the row's critical section.
+  for (std::vector<size_t>::const_iterator it = history_indices.begin();
+       it != history_indices.end(); ++it) {
+    if (*it >= tx->history.size()) {
+      assert(false);
+      return;
+    }
+  }
+
   {
     LifeLatchGuard guard(&latch);
     const LifeProcessRecord *local = process_record(tx->pid);
@@ -423,8 +507,7 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
 
     for (std::vector<size_t>::const_iterator it = history_indices.begin();
          it != history_indices.end(); ++it) {
-      if (*it >= tx->history.size() || !validate_committed_operation(
-                                            tx->history[*it].operation)) {
+      if (!validate_committed_operation(tx->history[*it].operation)) {
         assert(false);
         return;
       }
@@ -464,8 +547,7 @@ void Row_life::rollback(const LifeTxnDescriptor &tx) {
 
 void Row_life::help(const LifeTxnDescriptor &tx) {
 
-  LifeInlineOperation pending;
-  bool has_pending = false;
+  std::unique_ptr<LifeInlineOperation> pending;
 
   {
     LifeLatchGuard guard(&latch);
@@ -475,13 +557,9 @@ void Row_life::help(const LifeTxnDescriptor &tx) {
 
     active_process.reset();
 
-    if (inline_operation) {
-      pending = *inline_operation;
-      has_pending = true;
-      inline_operation.reset();
-    }
+    pending = std::move(inline_operation);
   }
 
-  if (has_pending)
-    execute(*pending.transaction, pending.operation);
+  if (pending)
+    execute(*pending->transaction, pending->operation);
 }

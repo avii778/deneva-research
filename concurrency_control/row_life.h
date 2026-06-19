@@ -3,9 +3,9 @@
 
 #include "life_types.h"
 #include <pthread.h>
-#include <unordered_map>
 #include <vector>
 
+class Catalog;
 class row_t;
 
 class Row_life {
@@ -27,24 +27,25 @@ public:
   void help(const LifeTxnDescriptor &tx);
 
 private:
-  typedef std::unordered_map<LifeProcessId, LifeProcessRecord,
-                             LifeProcessIdHash>
-      ProcessMap;
+  typedef std::vector<LifeProcessRecord> ProcessSlots;
 
   static bool higher_priority(const LifeTxnId &lhs, const LifeTxnId &rhs);
   static bool priority_less_equal(const LifeTxnId &lhs, const LifeTxnId &rhs);
-  static std::vector<LifeHistoryEntry>
-  object_history(const LifeTxnDescriptor &tx, const LifeObjectId &object);
+  const LifeTxnDescriptor::TouchedObject *
+  touched_object(const LifeTxnDescriptor &tx) const;
+  size_t object_history_size(const LifeTxnDescriptor &tx) const;
+  const LifeHistoryEntry *object_history_entry(const LifeTxnDescriptor &tx,
+                                               size_t object_index) const;
 
   const LifeProcessRecord *process_record(const LifeProcessId &pid) const;
   const LifeProcessRecord *context_record() const;
   LifeProcessRecord &mutable_process_record(const LifeProcessId &pid);
   LifeExecuteResult make_result(LifeResultCode code) const;
-  LifeObjectId object_id() const;
+  const LifeObjectId &object_id() const;
   bool apply_operation(const LifeOperation &operation,
                        std::vector<uint8_t> &state,
                        LifeResponse &response) const;
-  bool replay_history(const std::vector<LifeHistoryEntry> &history,
+  bool replay_history(const LifeTxnDescriptor &tx,
                       std::vector<uint8_t> &state) const;
   bool validate_committed_operation(const LifeOperation &operation) const;
   bool apply_committed_operation(const LifeOperation &operation);
@@ -52,8 +53,13 @@ private:
   bool pid_equals(const LifeProcessId &pid1, const LifeProcessId &pid2);
   pthread_mutex_t latch;
   row_t *_row;
+  Catalog *_schema;
+  mutable LifeObjectId _object_id;
+  mutable bool _primary_key_cached;
+  uint64_t _tuple_size;
+  uint64_t _field_count;
   LifeOptional<LifeProcessId> active_process;
-  std::unique_ptr<ProcessMap> processes;
+  std::unique_ptr<ProcessSlots> processes;
   std::unique_ptr<LifeInlineOperation> inline_operation;
 };
 
