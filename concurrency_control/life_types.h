@@ -1,6 +1,7 @@
 #ifndef LIFE_TYPES_H
 #define LIFE_TYPES_H
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -72,17 +73,82 @@ inline bool operator!=(const LifeObjectId &lhs, const LifeObjectId &rhs) {
 
 enum class LifeOperationKind { ReadField, WriteField };
 
+static const size_t LIFE_INLINE_VALUE_CAPACITY = sizeof(uint64_t);
+
+class LifeBytes {
+public:
+  LifeBytes() : size_(0) {}
+
+  bool empty() const { return size_ == 0; }
+  size_t size() const { return size_; }
+  void clear() { size_ = 0; }
+
+  uint8_t *begin() { return bytes_; }
+  const uint8_t *begin() const { return bytes_; }
+  uint8_t *end() { return bytes_ + size_; }
+  const uint8_t *end() const { return bytes_ + size_; }
+  uint8_t *data() { return bytes_; }
+  const uint8_t *data() const { return bytes_; }
+
+  template <typename Iterator> void assign(Iterator first, Iterator last) {
+    size_ = 0;
+    while (first != last) {
+      if (size_ == LIFE_INLINE_VALUE_CAPACITY) {
+        assert(false);
+        size_ = 0;
+        return;
+      }
+      bytes_[size_++] = static_cast<uint8_t>(*first++);
+    }
+  }
+
+  void assign(size_t count, uint8_t value) {
+    if (count > LIFE_INLINE_VALUE_CAPACITY) {
+      assert(false);
+      size_ = 0;
+      return;
+    }
+    size_ = count;
+    for (size_t i = 0; i < count; ++i)
+      bytes_[i] = value;
+  }
+
+  friend bool operator==(const LifeBytes &lhs, const LifeBytes &rhs) {
+    if (lhs.size_ != rhs.size_)
+      return false;
+    for (size_t i = 0; i < lhs.size_; ++i) {
+      if (lhs.bytes_[i] != rhs.bytes_[i])
+        return false;
+    }
+    return true;
+  }
+
+  friend bool operator!=(const LifeBytes &lhs, const LifeBytes &rhs) {
+    return !(lhs == rhs);
+  }
+
+private:
+  uint8_t bytes_[LIFE_INLINE_VALUE_CAPACITY];
+  uint8_t size_;
+};
+
 struct LifeOperation {
+  LifeOperation()
+      : object(), manager(NULL), kind(LifeOperationKind::ReadField),
+        field_id(0), value_size(0), argument() {}
+
   LifeObjectId object;
   Row_life *manager;
   LifeOperationKind kind;
   uint32_t field_id;
-  std::vector<uint8_t> argument;
+  uint8_t value_size;
+  LifeBytes argument;
 };
 
 inline bool operator==(const LifeOperation &lhs, const LifeOperation &rhs) {
   return lhs.object == rhs.object && lhs.kind == rhs.kind &&
-         lhs.field_id == rhs.field_id && lhs.argument == rhs.argument;
+         lhs.field_id == rhs.field_id && lhs.value_size == rhs.value_size &&
+         lhs.argument == rhs.argument;
 }
 
 inline bool operator!=(const LifeOperation &lhs, const LifeOperation &rhs) {
@@ -90,7 +156,7 @@ inline bool operator!=(const LifeOperation &lhs, const LifeOperation &rhs) {
 }
 
 struct LifeResponse {
-  std::vector<uint8_t> value;
+  LifeBytes value;
 };
 
 inline bool operator==(const LifeResponse &lhs, const LifeResponse &rhs) {
@@ -193,6 +259,14 @@ inline void life_append_history(LifeTxnDescriptor &tx,
   tx.history.push_back(entry);
 }
 
+// Local protocol records may share an immutable descriptor instead of making
+// another deep copy. This is safe only because the shared_ptr owns the
+// descriptor independently of any pooled TxnManager that created it.
+//
+// This pointer is never a distributed reference. A remote LIFE message must
+// serialize the descriptor's value state and reconstruct a locally owned
+// descriptor before installing it in a row record. The embedded row/manager
+// pointers are local caches and must likewise be rebuilt from object IDs.
 typedef std::shared_ptr<const LifeTxnDescriptor> LifeTxnDescriptorPtr;
 
 inline bool operator==(const LifeTxnDescriptor &lhs,
@@ -207,8 +281,13 @@ inline bool operator!=(const LifeTxnDescriptor &lhs,
 }
 
 struct LifeProcessRecord {
+  LifeProcessRecord()
+      : transaction(), tid(), status(LifeTxnStatus::Aborted), has_value(false) {}
+
   LifeTxnDescriptorPtr transaction;
+  LifeTxnId tid;
   LifeTxnStatus status;
+  bool has_value;
 };
 
 struct LifeInlineOperation {

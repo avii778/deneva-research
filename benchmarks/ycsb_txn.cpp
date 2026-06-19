@@ -228,6 +228,12 @@ bool YCSBTxnManager::try_life_transactions(
   while (!txns.empty()) {
     LifeTxnDescriptor &ctx = txns.back();
 
+    // Row records append successful operations to history before the workload
+    // cursor is advanced. A helper must reconcile that cursor before deciding
+    // whether another request exists.
+    if (ctx.ycsb.next_record_id < ctx.history.size())
+      ctx.ycsb.next_record_id = ctx.history.size();
+
     if (ctx.ycsb.next_record_id >= ctx.ycsb.requests.size()) {
 #if LOG_LIFE
       const uint64_t finalize_start = get_sys_clock();
@@ -322,10 +328,6 @@ bool YCSBTxnManager::try_life_transactions(
 LifeExecuteResult
 YCSBTxnManager::execute_life_operation(LifeTxnDescriptor &descriptor,
                                        LifeOperation &operation) {
-
-  if (descriptor.ycsb.next_record_id < descriptor.history.size()) {
-    descriptor.ycsb.next_record_id = descriptor.history.size();
-  }
 
   const LifeYcsbRequest &request =
       descriptor.ycsb.requests[descriptor.ycsb.next_record_id];
@@ -492,6 +494,7 @@ YCSBTxnManager::make_life_operation(row_t *life_row,
   operation.object.partition_id = life_row->get_part_id();
   operation.object.primary_key = life_row->get_primary_key();
   operation.field_id = 0;
+  operation.value_size = sizeof(uint64_t);
 
   if (request.kind == LifeYcsbRequestKind::Read ||
       request.kind == LifeYcsbRequestKind::Scan) {
@@ -501,8 +504,9 @@ YCSBTxnManager::make_life_operation(row_t *life_row,
 
   assert(request.kind == LifeYcsbRequestKind::Write);
   operation.kind = LifeOperationKind::WriteField;
-  operation.argument.assign(life_row->get_schema()->get_field_size(0),
-                            request.value);
+  const uint64_t value = 0;
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&value);
+  operation.argument.assign(bytes, bytes + sizeof(value));
   return operation;
 }
 

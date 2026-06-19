@@ -75,6 +75,7 @@ LifeOperation operation(row_t &row, LifeOperationKind kind, uint64_t value) {
   op.object.primary_key = row.get_primary_key();
   op.kind = kind;
   op.field_id = 0;
+  op.value_size = sizeof(uint64_t);
 
   if (kind == LifeOperationKind::WriteField) {
     const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&value);
@@ -297,9 +298,75 @@ void test_prepare_retry_and_commit_publish() {
   std::memcpy(&committed_value, row.data, sizeof(committed_value));
   assert(committed_value == 84);
 
+  // A stale helper must not publish the transaction's write a second time.
+  const uint64_t later_value = 99;
+  std::memcpy(row.data, &later_value, sizeof(later_value));
+  life_row.commit(final_tx);
+  std::memcpy(&committed_value, row.data, sizeof(committed_value));
+  assert(committed_value == later_value);
+
+  // Admitting a higher transaction frees the committed descriptor but keeps
+  // its tombstone. The tombstone must still reject a stale helper commit.
+  const LifeTxnDescriptor higher = descriptor(2, 20, 1, YCSB_0, 0);
+  const LifeOperation higher_read =
+      operation(row, LifeOperationKind::ReadField, 0);
+  assert(life_row.execute(higher, higher_read).code == LifeResultCode::Success);
+  life_row.commit(final_tx);
+  std::memcpy(&committed_value, row.data, sizeof(committed_value));
+  assert(committed_value == later_value);
+
   life_row.rollback(final_tx);
   const LifeExecuteResult retry = life_row.prepare(final_tx);
   assert(retry.code == LifeResultCode::Committed);
+
+  std::free(row.data);
+}
+
+void test_eight_byte_operation_preserves_rest_of_ycsb_field() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = 100;
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = 100;
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+
+  row_t row;
+  row.init(&table, 4, 0);
+  row.set_primary_key(7);
+  std::memset(row.data, 0x5a, row.get_tuple_size());
+
+  Row_life life_row;
+  life_row.init(&row);
+
+  LifeTxnDescriptor tx = descriptor(1, 10, 1, YCSB_0, 0);
+  const LifeOperation write = operation(row, LifeOperationKind::WriteField, 84);
+  const LifeExecuteResult executed = life_row.execute(tx, write);
+  assert(executed.code == LifeResultCode::Success);
+
+  LifeHistoryEntry entry;
+  entry.operation = write;
+  entry.response = executed.response;
+  tx.history.push_back(entry);
+  assert(life_row.prepare(tx).code == LifeResultCode::Success);
+  life_row.commit(tx);
+
+  uint64_t committed_value = 0;
+  std::memcpy(&committed_value, row.data, sizeof(committed_value));
+  assert(committed_value == 84);
+  for (size_t i = sizeof(committed_value); i < row.get_tuple_size(); ++i)
+    assert(static_cast<uint8_t>(row.data[i]) == 0x5a);
+
+  const LifeTxnDescriptor read_tx = descriptor(2, 20, 1, YCSB_0, 0);
+  const LifeOperation read = operation(row, LifeOperationKind::ReadField, 0);
+  const LifeExecuteResult read_result = life_row.execute(read_tx, read);
+  assert(read_result.code == LifeResultCode::Success);
+  assert(read_result.response.value.size() == sizeof(uint64_t));
 
   std::free(row.data);
 }
@@ -338,12 +405,14 @@ void test_shared_prepare_owns_descriptor_and_read_commit_is_stable() {
   tx.history.push_back(entry);
 
   LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(tx);
+  std::weak_ptr<const LifeTxnDescriptor> retained = frozen;
   assert(life_row.prepare(frozen).code == LifeResultCode::Success);
   assert(frozen.use_count() == 2);
   std::vector<size_t> indices(1, 0);
   life_row.commit(frozen, indices);
   assert(frozen.use_count() == 2);
   frozen.reset();
+  assert(!retained.expired());
 
   uint64_t value_after_read_commit = 0;
   std::memcpy(&value_after_read_commit, row.data,
@@ -353,6 +422,10 @@ void test_shared_prepare_owns_descriptor_and_read_commit_is_stable() {
   const LifeTxnDescriptor same_tx = descriptor(1, 10, 1, YCSB_0, 0);
   const LifeExecuteResult committed = life_row.execute(same_tx, read);
   assert(committed.code == LifeResultCode::Committed);
+
+  const LifeTxnDescriptor replacement = descriptor(2, 11, 1, YCSB_0, 0);
+  assert(life_row.execute(replacement, read).code == LifeResultCode::Success);
+  assert(retained.expired());
 
   std::free(row.data);
 }
@@ -406,6 +479,7 @@ void test_prepared_rows_share_one_frozen_descriptor() {
   tx.history.push_back(second_entry);
 
   LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(tx);
+  std::weak_ptr<const LifeTxnDescriptor> retained = frozen;
   assert(first_life_row.prepare(frozen).code == LifeResultCode::Success);
   assert(second_life_row.prepare(frozen).code == LifeResultCode::Success);
   assert(frozen.use_count() == 3);
@@ -413,6 +487,7 @@ void test_prepared_rows_share_one_frozen_descriptor() {
   first_life_row.commit(frozen, std::vector<size_t>(1, 0));
   second_life_row.commit(frozen, std::vector<size_t>(1, 1));
   assert(frozen.use_count() == 3);
+  assert(!retained.expired());
 
   std::free(first_row.data);
   std::free(second_row.data);
@@ -475,10 +550,13 @@ void test_local_row_cache_and_incremental_grouping() {
 } // namespace
 
 int main() {
+  static_assert(sizeof(LifeBytes) <= 16,
+                "LIFE values must remain inline and compact");
   test_snapshot_is_owned();
   test_execute_stale_history_refresh_and_help();
   test_rollback_runs_inline_help();
   test_prepare_retry_and_commit_publish();
+  test_eight_byte_operation_preserves_rest_of_ycsb_field();
   test_shared_prepare_owns_descriptor_and_read_commit_is_stable();
   test_prepared_rows_share_one_frozen_descriptor();
   test_local_row_cache_and_incremental_grouping();

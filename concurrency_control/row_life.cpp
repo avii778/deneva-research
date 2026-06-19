@@ -99,7 +99,8 @@ Row_life::object_history_entry(const LifeTxnDescriptor &tx,
     if (object_index >= touched->history_indices.size())
       return NULL;
     const size_t history_index = touched->history_indices[object_index];
-    return history_index < tx.history.size() ? &tx.history[history_index] : NULL;
+    return history_index < tx.history.size() ? &tx.history[history_index]
+                                             : NULL;
   }
 
   for (std::vector<LifeHistoryEntry>::const_iterator it = tx.history.begin();
@@ -126,20 +127,19 @@ Row_life::process_record(const LifeProcessId &pid) const {
     return NULL;
 
   assert(pid.node_id < g_node_cnt);
-  const size_t index = static_cast<size_t>(pid.worker_id) * g_node_cnt +
-                       pid.node_id;
-  if (index >= processes->size() || !(*processes)[index].transaction)
+  const size_t index =
+      static_cast<size_t>(pid.worker_id) * g_node_cnt + pid.node_id;
+  if (index >= processes->size() || !(*processes)[index].has_value)
     return NULL;
   return &(*processes)[index];
 }
 
-LifeProcessRecord &
-Row_life::mutable_process_record(const LifeProcessId &pid) {
+LifeProcessRecord &Row_life::mutable_process_record(const LifeProcessId &pid) {
   if (!processes)
     processes.reset(new ProcessSlots());
   assert(pid.node_id < g_node_cnt);
-  const size_t index = static_cast<size_t>(pid.worker_id) * g_node_cnt +
-                       pid.node_id;
+  const size_t index =
+      static_cast<size_t>(pid.worker_id) * g_node_cnt + pid.node_id;
   if (index >= processes->size())
     processes->resize(index + 1);
   return (*processes)[index];
@@ -179,17 +179,18 @@ bool Row_life::apply_operation(const LifeOperation &operation,
 
   response.value.clear();
 
-  if (operation.object != object_id() ||
-      operation.field_id >= _field_count || state.size() != _tuple_size) {
+  if (operation.object != object_id() || operation.field_id >= _field_count ||
+      state.size() != _tuple_size) {
     return false;
   }
 
-  const uint64_t field_offset =
-      _schema->get_field_index(operation.field_id);
-  const uint64_t field_size =
-      _schema->get_field_size(operation.field_id);
+  const uint64_t field_offset = _schema->get_field_index(operation.field_id);
+  const uint64_t field_size = _schema->get_field_size(operation.field_id);
 
-  if (field_offset > state.size() || field_size > state.size() - field_offset)
+  if (operation.value_size == 0 ||
+      operation.value_size > LIFE_INLINE_VALUE_CAPACITY ||
+      operation.value_size > field_size || field_offset > state.size() ||
+      operation.value_size > state.size() - field_offset)
     return false;
 
   if (operation.kind == LifeOperationKind::ReadField) {
@@ -198,12 +199,12 @@ bool Row_life::apply_operation(const LifeOperation &operation,
       return false;
 
     response.value.assign(state.begin() + field_offset,
-                          state.begin() + field_offset + field_size);
+                          state.begin() + field_offset + operation.value_size);
     return true;
   }
 
   if (operation.kind == LifeOperationKind::WriteField) {
-    if (operation.argument.size() != field_size)
+    if (operation.argument.size() != operation.value_size)
       return false;
 
     std::copy(operation.argument.begin(), operation.argument.end(),
@@ -248,23 +249,23 @@ bool Row_life::replay_history(const LifeTxnDescriptor &tx,
 
 bool Row_life::validate_committed_operation(
     const LifeOperation &operation) const {
-  if (operation.object != object_id() ||
-      operation.field_id >= _field_count) {
+  if (operation.object != object_id() || operation.field_id >= _field_count) {
     return false;
   }
 
-  const uint64_t field_offset =
-      _schema->get_field_index(operation.field_id);
-  const uint64_t field_size =
-      _schema->get_field_size(operation.field_id);
-  if (field_offset > _tuple_size || field_size > _tuple_size - field_offset)
+  const uint64_t field_offset = _schema->get_field_index(operation.field_id);
+  const uint64_t field_size = _schema->get_field_size(operation.field_id);
+  if (operation.value_size == 0 ||
+      operation.value_size > LIFE_INLINE_VALUE_CAPACITY ||
+      operation.value_size > field_size || field_offset > _tuple_size ||
+      operation.value_size > _tuple_size - field_offset)
     return false;
 
   if (operation.kind == LifeOperationKind::ReadField)
     return operation.argument.empty();
 
   return operation.kind == LifeOperationKind::WriteField &&
-         operation.argument.size() == field_size;
+         operation.argument.size() == operation.value_size;
 }
 
 bool Row_life::apply_committed_operation(const LifeOperation &operation) {
@@ -274,12 +275,9 @@ bool Row_life::apply_committed_operation(const LifeOperation &operation) {
   if (operation.kind == LifeOperationKind::ReadField)
     return true;
 
-  const uint64_t field_offset =
-      _schema->get_field_index(operation.field_id);
-  const uint64_t field_size =
-      _schema->get_field_size(operation.field_id);
+  const uint64_t field_offset = _schema->get_field_index(operation.field_id);
   std::memcpy(_row->get_data() + field_offset, operation.argument.data(),
-              field_size);
+              operation.value_size);
   return true;
 }
 
@@ -303,10 +301,9 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   const LifeTxnId no_local_tid = {0, 0};
   const LifeTxnId no_context_tid = {std::numeric_limits<uint64_t>::max(),
                                     std::numeric_limits<uint64_t>::max()};
-  const LifeTxnId &local_tid =
-      local != NULL ? local->transaction->tid : no_local_tid;
+  const LifeTxnId &local_tid = local != NULL ? local->tid : no_local_tid;
   const LifeTxnId &context_tid =
-      context != NULL ? context->transaction->tid : no_context_tid;
+      context != NULL ? context->tid : no_context_tid;
   const LifeTxnStatus local_status =
       local != NULL ? local->status : LifeTxnStatus::Aborted;
   const LifeTxnStatus context_status =
@@ -314,28 +311,27 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 
   const size_t tx_object_history_size = object_history_size(tx);
 
-  const bool same_process_txn_time =
-      tx.tid.time == local_tid.time;
+  const bool same_process_txn_time = tx.tid.time == local_tid.time;
   const bool local_has_newer_attempt =
       same_process_txn_time && tx.tid.attempt < local_tid.attempt;
   const bool same_process_txn_attempt = tx.tid == local_tid;
-  const size_t local_history_size =
-      local != NULL ? local->transaction->history.size() : 0;
+  const size_t local_history_size = local != NULL && local->transaction
+                                        ? local->transaction->history.size()
+                                        : 0;
 
   const bool must_defer =
       context_status == LifeTxnStatus::Prepared || context_tid < tx.tid ||
-      local_has_newer_attempt ||
-      (same_process_txn_attempt &&
-       (local_status == LifeTxnStatus::Aborted ||
-        tx.history.size() < local_history_size));
+      tx.tid.time < local_tid.time || local_has_newer_attempt ||
+      (same_process_txn_attempt && (local_status == LifeTxnStatus::Aborted ||
+                                    local_status == LifeTxnStatus::Committed ||
+                                    tx.history.size() < local_history_size));
 
   if (must_defer) {
 
     if (context_status == LifeTxnStatus::Prepared) {
 
       if (!inline_operation ||
-          priority_less_equal(
-              tx.tid, inline_operation->transaction->tid)) {
+          priority_less_equal(tx.tid, inline_operation->transaction->tid)) {
         LifeInlineOperation pending;
         pending.transaction = updated_transaction;
         pending.operation = operation;
@@ -386,10 +382,24 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
     }
   }
 
+  // Keep committed descriptors helpable/idempotent until a later transaction
+  // is admitted on this row. Once that happens, their terminal ID/status is
+  // sufficient to reject stale execute/commit calls without retaining the
+  // full workload and history payload.
+  if (processes) {
+    for (ProcessSlots::iterator it = processes->begin(); it != processes->end();
+         ++it) {
+      if (it->has_value && it->status == LifeTxnStatus::Committed &&
+          it->tid < tx.tid) {
+        it->transaction.reset();
+      }
+    }
+  }
+
   if (active_process.has_value) {
     assert(processes);
-    LifeProcessRecord *active = const_cast<LifeProcessRecord *>(
-        process_record(active_process.value));
+    LifeProcessRecord *active =
+        const_cast<LifeProcessRecord *>(process_record(active_process.value));
     if (active != NULL)
       active->status = LifeTxnStatus::Aborted;
   }
@@ -412,7 +422,9 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   LifeProcessRecord updated;
   life_append_history(*updated_transaction, entry);
   updated.transaction = updated_transaction;
+  updated.tid = tx.tid;
   updated.status = LifeTxnStatus::Executing;
+  updated.has_value = true;
 
   active_process.set(tx.pid);
   mutable_process_record(tx.pid) = updated;
@@ -434,8 +446,7 @@ LifeExecuteResult Row_life::prepare(const LifeTxnDescriptorPtr &tx) {
   LifeLatchGuard guard(&latch);
   const LifeProcessRecord *local = process_record(tx->pid);
   const LifeTxnId no_local_tid = {0, 0};
-  const LifeTxnId &local_tid =
-      local != NULL ? local->transaction->tid : no_local_tid;
+  const LifeTxnId &local_tid = local != NULL ? local->tid : no_local_tid;
   const LifeTxnStatus local_status =
       local != NULL ? local->status : LifeTxnStatus::Aborted;
 
@@ -460,6 +471,8 @@ LifeExecuteResult Row_life::prepare(const LifeTxnDescriptorPtr &tx) {
   LifeProcessRecord updated;
   updated.status = LifeTxnStatus::Prepared;
   updated.transaction = tx;
+  updated.tid = tx->tid;
+  updated.has_value = true;
   mutable_process_record(tx->pid) = updated;
 
   return make_result(LifeResultCode::Success);
@@ -479,6 +492,8 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
                       const std::vector<size_t> &history_indices) {
   assert(tx);
 
+  std::unique_ptr<LifeInlineOperation> pending;
+
   // Bounds checking only examines the immutable frozen descriptor and does
   // not need to extend the row's critical section.
   for (std::vector<size_t>::const_iterator it = history_indices.begin();
@@ -493,8 +508,7 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
     LifeLatchGuard guard(&latch);
     const LifeProcessRecord *local = process_record(tx->pid);
     const LifeTxnId no_local_tid = {0, 0};
-    const LifeTxnId &local_tid =
-        local != NULL ? local->transaction->tid : no_local_tid;
+    const LifeTxnId &local_tid = local != NULL ? local->tid : no_local_tid;
     const LifeTxnStatus local_status =
         local != NULL ? local->status : LifeTxnStatus::Aborted;
 
@@ -521,11 +535,25 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
     }
 
     LifeProcessRecord &updated = mutable_process_record(tx->pid);
+    // Retain the committed descriptor until a later transaction is admitted
+    // on this row. The later execute path compacts it to an ID/status
+    // tombstone.
     updated.transaction = tx;
+    updated.tid = tx->tid;
     updated.status = LifeTxnStatus::Committed;
+    updated.has_value = true;
+
+    // Publish the terminal record and detach the active context atomically.
+    // A contender must never observe an active committed record whose full
+    // descriptor has already been released.
+    if (active_process.has_value && pid_equals(active_process.value, tx->pid)) {
+      active_process.reset();
+      pending = std::move(inline_operation);
+    }
   }
 
-  help(*tx);
+  if (pending)
+    execute(*pending->transaction, pending->operation);
 }
 
 void Row_life::rollback(const LifeTxnDescriptor &tx) {
@@ -535,7 +563,7 @@ void Row_life::rollback(const LifeTxnDescriptor &tx) {
 
     const LifeProcessRecord *local = process_record(tx.pid);
 
-    if (local != NULL && local->transaction->tid == tx.tid &&
+    if (local != NULL && local->tid == tx.tid &&
         local->status != LifeTxnStatus::Aborted &&
         local->status != LifeTxnStatus::Committed) {
       mutable_process_record(tx.pid).status = LifeTxnStatus::Aborted;

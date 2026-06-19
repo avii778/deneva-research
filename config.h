@@ -103,7 +103,7 @@
 // Concurrency Control
 /***********************************************/
 // WAIT_DIE, NO_WAIT, TIMESTAMP, MVCC, CALVIN, MAAT
-#define CC_ALG LIFE
+#define CC_ALG CALVIN
 #define ISOLATION_LEVEL SERIALIZABLE
 #define YCSB_ABORT_MODE false
 
@@ -114,9 +114,9 @@
 // per-row lock/ts management or central lock/ts management
 #define CENTRAL_MAN false
 #define BUCKET_CNT 31
-#define ABORT_PENALTY 10 * 1000000UL          // in ns.
-#define ABORT_PENALTY_MAX 5 * 100 * 1000000UL // in ns.
-#define LIFE_HELP_WAIT_US 100
+#define ABORT_PENALTY 10 * 1000000UL   // in ns.
+#define ABORT_PENALTY_MAX 5 * 100 * 1000000UL   // in ns.
+#define LIFE_HELP_WAIT_US 0
 #define BACKOFF true
 // [ INDEX ]
 #define ENABLE_LATCH false
@@ -359,8 +359,8 @@ enum PPSTxnType {
 #define PROG_TIMER 10 * BILLION // in s
 #define BATCH_TIMER 0
 #define SEQ_BATCH_TIMER 5 * 1 * MILLION // ~5ms -- same as CALVIN paper
-#define DONE_TIMER 1 * 60 * BILLION     // ~1 minutes
-#define WARMUP_TIMER 1 * 60 * BILLION   // ~1 minutes
+#define DONE_TIMER 1 * 60 * BILLION // ~1 minutes
+#define WARMUP_TIMER 1 * 60 * BILLION // ~1 minutes
 
 #define SEED 0
 #define SHMEM_ENV false

@@ -27,6 +27,7 @@
 #include "query.h"
 #include "msg_queue.h"
 #include "row.h"
+#include <new>
 
 #define TRY_LIMIT 10
 
@@ -103,7 +104,7 @@ void TxnPool::init(Workload * wl, uint64_t size) {
 #endif
     for(uint64_t i = 0; i < size; i++) {
     //put(items[i]);
-    txn = (Transaction*) mem_allocator.alloc(sizeof(Transaction));
+    txn = new (mem_allocator.alloc(sizeof(Transaction))) Transaction();
     txn->init();
     put(thd_id,txn);
     }
@@ -117,7 +118,7 @@ void TxnPool::get(uint64_t thd_id, Transaction *& item) {
   bool r = pool[thd_id]->pop(item);
 #endif
   if(!r) {
-    item = (Transaction*) mem_allocator.alloc(sizeof(Transaction));
+    item = new (mem_allocator.alloc(sizeof(Transaction))) Transaction();
     item->init();
   }
 }
@@ -133,19 +134,22 @@ void TxnPool::put(uint64_t thd_id,Transaction * item) {
 #endif
   if(tries >= TRY_LIMIT) {
     item->release(thd_id);
+    item->~Transaction();
     mem_allocator.free(item,sizeof(Transaction));
   }
 }
 
 void TxnPool::free_all() {
-  TxnManager * item;
+  Transaction * item;
     for(uint64_t thd_id = 0; thd_id < g_total_thread_cnt; thd_id++) {
 #if CC_ALG == CALVIN
   while(pool->pop(item)) {
 #else
   while(pool[thd_id]->pop(item)) {
 #endif
-    mem_allocator.free(item,sizeof(item));
+    item->release(thd_id);
+    item->~Transaction();
+    mem_allocator.free(item,sizeof(Transaction));
 
   }
     }
@@ -413,4 +417,3 @@ void RowPool::free_all() {
   }
   }
 }
-
