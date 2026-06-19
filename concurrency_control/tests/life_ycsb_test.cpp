@@ -9,6 +9,7 @@
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 
 mem_alloc mem_allocator;
 bool volatile warmup_done = false;
@@ -302,6 +303,120 @@ void test_prepare_retry_and_commit_publish() {
   std::free(row.data);
 }
 
+void test_shared_prepare_owns_descriptor_and_read_commit_is_stable() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+
+  row_t row;
+  row.init(&table, 4, 0);
+  row.set_primary_key(7);
+  const uint64_t initial_value = 42;
+  std::memcpy(row.data, &initial_value, sizeof(initial_value));
+
+  Row_life life_row;
+  life_row.init(&row);
+
+  LifeTxnDescriptor tx = descriptor(1, 10, 1, YCSB_0, 0);
+  const LifeOperation read = operation(row, LifeOperationKind::ReadField, 0);
+  const LifeExecuteResult executed = life_row.execute(tx, read);
+  assert(executed.code == LifeResultCode::Success);
+
+  LifeHistoryEntry entry;
+  entry.operation = read;
+  entry.response = executed.response;
+  tx.history.push_back(entry);
+
+  LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(tx);
+  assert(life_row.prepare(frozen).code == LifeResultCode::Success);
+  assert(frozen.use_count() == 2);
+  std::vector<size_t> indices(1, 0);
+  life_row.commit(frozen, indices);
+  assert(frozen.use_count() == 2);
+  frozen.reset();
+
+  uint64_t value_after_read_commit = 0;
+  std::memcpy(&value_after_read_commit, row.data,
+              sizeof(value_after_read_commit));
+  assert(value_after_read_commit == initial_value);
+
+  const LifeTxnDescriptor same_tx = descriptor(1, 10, 1, YCSB_0, 0);
+  const LifeExecuteResult committed = life_row.execute(same_tx, read);
+  assert(committed.code == LifeResultCode::Committed);
+
+  std::free(row.data);
+}
+
+void test_prepared_rows_share_one_frozen_descriptor() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+
+  row_t first_row;
+  first_row.init(&table, 4, 0);
+  first_row.set_primary_key(7);
+  row_t second_row;
+  second_row.init(&table, 4, 1);
+  second_row.set_primary_key(8);
+  const uint64_t initial_value = 42;
+  std::memcpy(first_row.data, &initial_value, sizeof(initial_value));
+  std::memcpy(second_row.data, &initial_value, sizeof(initial_value));
+
+  Row_life first_life_row;
+  first_life_row.init(&first_row);
+  Row_life second_life_row;
+  second_life_row.init(&second_row);
+
+  LifeTxnDescriptor tx = descriptor(1, 10, 1, YCSB_0, 0);
+  const LifeOperation first_read =
+      operation(first_row, LifeOperationKind::ReadField, 0);
+  const LifeExecuteResult first = first_life_row.execute(tx, first_read);
+  assert(first.code == LifeResultCode::Success);
+  LifeHistoryEntry first_entry;
+  first_entry.operation = first_read;
+  first_entry.response = first.response;
+  tx.history.push_back(first_entry);
+
+  const LifeOperation second_read =
+      operation(second_row, LifeOperationKind::ReadField, 0);
+  const LifeExecuteResult second = second_life_row.execute(tx, second_read);
+  assert(second.code == LifeResultCode::Success);
+  LifeHistoryEntry second_entry;
+  second_entry.operation = second_read;
+  second_entry.response = second.response;
+  tx.history.push_back(second_entry);
+
+  LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(tx);
+  assert(first_life_row.prepare(frozen).code == LifeResultCode::Success);
+  assert(second_life_row.prepare(frozen).code == LifeResultCode::Success);
+  assert(frozen.use_count() == 3);
+
+  first_life_row.commit(frozen, std::vector<size_t>(1, 0));
+  second_life_row.commit(frozen, std::vector<size_t>(1, 1));
+  assert(frozen.use_count() == 3);
+
+  std::free(first_row.data);
+  std::free(second_row.data);
+}
+
 } // namespace
 
 int main() {
@@ -309,5 +424,7 @@ int main() {
   test_execute_stale_history_refresh_and_help();
   test_rollback_runs_inline_help();
   test_prepare_retry_and_commit_publish();
+  test_shared_prepare_owns_descriptor_and_read_commit_is_stable();
+  test_prepared_rows_share_one_frozen_descriptor();
   return 0;
 }

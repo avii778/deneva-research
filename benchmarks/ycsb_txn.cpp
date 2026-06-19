@@ -61,17 +61,15 @@ int life_log_fd() {
   return fd;
 }
 
-void persist_life_timing(uint64_t txn_id, uint64_t node_id,
-                         uint64_t worker_id, uint64_t attempts,
-                         uint64_t own_time, uint64_t help_time,
-                         uint64_t finalize_time) {
+void persist_life_timing(uint64_t txn_id, uint64_t node_id, uint64_t worker_id,
+                         uint64_t attempts, uint64_t own_time,
+                         uint64_t help_time, uint64_t finalize_time) {
   char record[256];
-  const int record_size =
-      snprintf(record, sizeof(record),
-               "LIFE_TIMING txn_id=%lu node_id=%lu worker_id=%lu attempts=%lu "
-               "own_ns=%lu helping_ns=%lu finalization_ns=%lu\n",
-               txn_id, node_id, worker_id, attempts, own_time, help_time,
-               finalize_time);
+  const int record_size = snprintf(
+      record, sizeof(record),
+      "LIFE_TIMING txn_id=%lu node_id=%lu worker_id=%lu attempts=%lu "
+      "own_ns=%lu helping_ns=%lu finalization_ns=%lu\n",
+      txn_id, node_id, worker_id, attempts, own_time, help_time, finalize_time);
   assert(record_size > 0 && static_cast<size_t>(record_size) < sizeof(record));
 
   pthread_mutex_lock(&life_log_mutex);
@@ -338,38 +336,72 @@ YCSBTxnManager::execute_life_operation(LifeTxnDescriptor &descriptor,
   return life_row->execute_life(descriptor, operation);
 }
 
-void YCSBTxnManager::collect_life_rows(const LifeTxnDescriptor &descriptor,
-                                       std::vector<Row_life *> &rows) {
-  for (std::vector<LifeHistoryEntry>::const_iterator it =
-           descriptor.history.begin();
-       it != descriptor.history.end(); ++it) {
-    row_t *life_row = lookup_life_row(it->operation.object);
-    if (life_row->manager != NULL &&
-        std::find(rows.begin(), rows.end(), life_row->manager) == rows.end()) {
-      rows.push_back(life_row->manager);
+void YCSBTxnManager::collect_life_objects(
+    const LifeTxnDescriptor &descriptor,
+    std::vector<LifeFinalizeObject> &objects) {
+  for (size_t index = 0; index < descriptor.history.size(); ++index) {
+    const LifeObjectId &object_id =
+        descriptor.history[index].operation.object;
+
+    std::vector<LifeFinalizeObject>::iterator object = objects.begin();
+    for (; object != objects.end(); ++object) {
+      if (object->object == object_id)
+        break;
     }
+    if (object == objects.end()) {
+      LifeFinalizeObject added;
+      added.object = object_id;
+      objects.push_back(added);
+      object = objects.end() - 1;
+    }
+    object->history_indices.push_back(index);
   }
 }
 
 void YCSBTxnManager::rollback_life_descriptor(
     const LifeTxnDescriptor &descriptor) {
-  std::vector<Row_life *> rows;
-  rows.reserve(descriptor.history.size());
-  collect_life_rows(descriptor, rows);
-  life_rollback_descriptor(descriptor, rows);
+  std::vector<LifeFinalizeObject> objects;
+  objects.reserve(descriptor.history.size());
+  collect_life_objects(descriptor, objects);
+  for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
+       it != objects.end(); ++it) {
+    row_t *row = lookup_life_row(it->object);
+    assert(row->manager != NULL);
+    row->manager->rollback(descriptor);
+  }
 }
 
 bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
-  std::vector<Row_life *> rows;
-  rows.reserve(descriptor.history.size());
-  collect_life_rows(descriptor, rows);
+  LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(descriptor);
+  std::vector<LifeFinalizeObject> objects;
+  objects.reserve(descriptor.history.size());
+  collect_life_objects(*frozen, objects);
 
   uint64_t observed_attempt = descriptor.tid.attempt;
-  if (life_finalize_descriptor(descriptor, rows, &observed_attempt))
-    return true;
+  for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
+       it != objects.end(); ++it) {
+    row_t *row = lookup_life_row(it->object);
+    assert(row->manager != NULL);
+    const LifeExecuteResult result = row->manager->prepare(frozen);
+    if (result.code == LifeResultCode::Success ||
+        result.code == LifeResultCode::Committed) {
+      continue;
+    }
 
-  reset_life_descriptor(descriptor, observed_attempt);
-  return false;
+    if (result.code == LifeResultCode::Retry)
+      observed_attempt = result.observed_attempt;
+    reset_life_descriptor(descriptor, observed_attempt);
+    return false;
+  }
+
+  for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
+       it != objects.end(); ++it) {
+    row_t *row = lookup_life_row(it->object);
+    assert(row->manager != NULL);
+    row->manager->commit(frozen, it->history_indices);
+  }
+  return true;
+
 }
 
 void YCSBTxnManager::reset_life_descriptor(LifeTxnDescriptor &descriptor,

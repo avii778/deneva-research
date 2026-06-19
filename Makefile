@@ -1,5 +1,5 @@
 CC=g++
-CFLAGS=-Wall -g -gdwarf-3 -std=c++0x 
+CFLAGS=-Wall -g -gdwarf-3 -std=c++0x $(OPTFLAGS)
 #CFLAGS += -fsanitize=address -fno-omit-frame-pointer 
 JEMALLOC=./jemalloc-4.0.3
 NNMSG=./nanomsg-0.5-beta
@@ -33,6 +33,11 @@ OBJS_UNIT = $(addprefix obj/, $(notdir $(CPPS_UNIT:.cpp=.o)))
 
 all:rundb runcl 
 #unit_test
+
+.PHONY: release
+release:
+	$(MAKE) clean
+	$(MAKE) OPTFLAGS=-O2 all
 
 .PHONY: deps_db
 deps:$(CPPS_DB)

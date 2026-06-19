@@ -80,8 +80,8 @@ private:
                            const LifeOperation &operation,
                            const LifeResponse &response);
   void rollback_life_descriptor(const LifeTxnDescriptor &descriptor);
-  void collect_life_rows(const LifeTxnDescriptor &descriptor,
-                         std::vector<Row_life *> &rows);
+  void collect_life_objects(const LifeTxnDescriptor &descriptor,
+                            std::vector<LifeFinalizeObject> &objects);
   row_t *lookup_life_row(const LifeObjectId &object);
   row_t *lookup_life_row(uint64_t key);
   LifeOperation make_life_operation(row_t *row, ycsb_request *req);

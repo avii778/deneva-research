@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 struct LifeProcessId {
@@ -153,6 +154,8 @@ struct LifeTxnDescriptor {
   LifeYcsbSnapshot ycsb;
 };
 
+typedef std::shared_ptr<const LifeTxnDescriptor> LifeTxnDescriptorPtr;
+
 inline bool operator==(const LifeTxnDescriptor &lhs,
                        const LifeTxnDescriptor &rhs) {
   return lhs.pid == rhs.pid && lhs.tid == rhs.tid &&
@@ -165,12 +168,12 @@ inline bool operator!=(const LifeTxnDescriptor &lhs,
 }
 
 struct LifeProcessRecord {
-  LifeTxnDescriptor transaction;
+  LifeTxnDescriptorPtr transaction;
   LifeTxnStatus status;
 };
 
 struct LifeInlineOperation {
-  LifeTxnDescriptor transaction;
+  LifeTxnDescriptorPtr transaction;
   LifeOperation operation;
 };
 

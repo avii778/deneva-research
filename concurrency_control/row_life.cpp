@@ -30,13 +30,9 @@ void Row_life::init(row_t *row) {
 
   _row = row;
 
-  committed_state.assign(reinterpret_cast<const uint8_t *>(row->get_data()),
-                         reinterpret_cast<const uint8_t *>(row->get_data()) +
-                             row->get_tuple_size());
-
   active_process.reset();
 
-  processes.clear();
+  processes.reset();
   inline_operation.reset();
 
   pthread_mutex_init(&latch, NULL);
@@ -72,32 +68,34 @@ bool Row_life::pid_equals(const LifeProcessId &pid1,
 }
 // Returns the record of the last tx this process was running, with a special
 // value for none
-LifeProcessRecord Row_life::process_record(const LifeProcessId &pid) const {
+const LifeProcessRecord *
+Row_life::process_record(const LifeProcessId &pid) const {
 
-  ProcessMap::const_iterator it = processes.find(pid);
+  if (!processes)
+    return NULL;
 
-  if (it != processes.end())
-    return it->second;
+  ProcessMap::const_iterator it = processes->find(pid);
 
-  LifeProcessRecord record = LifeProcessRecord();
-  record.transaction.pid = pid;
-  record.transaction.tid.time = 0;
-  record.transaction.tid.attempt = 0;
-  record.status = LifeTxnStatus::Aborted;
-  return record;
+  if (it != processes->end())
+    return &it->second;
+
+  return NULL;
+}
+
+LifeProcessRecord &
+Row_life::mutable_process_record(const LifeProcessId &pid) {
+  if (!processes)
+    processes.reset(new ProcessMap());
+  return (*processes)[pid];
 }
 
 // Return the record of the current proposed action for the transaction
-LifeProcessRecord Row_life::context_record() const {
+const LifeProcessRecord *Row_life::context_record() const {
 
   if (active_process.has_value)
     return process_record(active_process.value);
 
-  LifeProcessRecord record = LifeProcessRecord();
-  record.transaction.tid.time = std::numeric_limits<uint64_t>::max();
-  record.transaction.tid.attempt = std::numeric_limits<uint64_t>::max();
-  record.status = LifeTxnStatus::Aborted;
-  return record;
+  return NULL;
 }
 
 // Make a LifeExecuteResult object
@@ -178,6 +176,44 @@ bool Row_life::replay_history(const std::vector<LifeHistoryEntry> &history,
   return true;
 }
 
+bool Row_life::validate_committed_operation(
+    const LifeOperation &operation) const {
+  if (operation.object != object_id() ||
+      operation.field_id >= _row->get_field_cnt()) {
+    return false;
+  }
+
+  const uint64_t field_offset =
+      _row->get_schema()->get_field_index(operation.field_id);
+  const uint64_t field_size =
+      _row->get_schema()->get_field_size(operation.field_id);
+  const uint64_t tuple_size = _row->get_tuple_size();
+  if (field_offset > tuple_size || field_size > tuple_size - field_offset)
+    return false;
+
+  if (operation.kind == LifeOperationKind::ReadField)
+    return operation.argument.empty();
+
+  return operation.kind == LifeOperationKind::WriteField &&
+         operation.argument.size() == field_size;
+}
+
+bool Row_life::apply_committed_operation(const LifeOperation &operation) {
+  if (!validate_committed_operation(operation))
+    return false;
+
+  if (operation.kind == LifeOperationKind::ReadField)
+    return true;
+
+  const uint64_t field_offset =
+      _row->get_schema()->get_field_index(operation.field_id);
+  const uint64_t field_size =
+      _row->get_schema()->get_field_size(operation.field_id);
+  std::memcpy(_row->get_data() + field_offset, operation.argument.data(),
+              field_size);
+  return true;
+}
+
 LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
                                     const LifeOperation &operation) {
 
@@ -186,85 +222,106 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   if (operation.object != object_id())
     return make_result(LifeResultCode::InvalidOperation);
 
-  const LifeProcessRecord context = context_record();
-  const LifeProcessRecord local = process_record(tx.pid);
+  const LifeProcessRecord *context = context_record();
+  const LifeProcessRecord *local = process_record(tx.pid);
+  const LifeTxnId no_local_tid = {0, 0};
+  const LifeTxnId no_context_tid = {std::numeric_limits<uint64_t>::max(),
+                                    std::numeric_limits<uint64_t>::max()};
+  const LifeTxnId &local_tid =
+      local != NULL ? local->transaction->tid : no_local_tid;
+  const LifeTxnId &context_tid =
+      context != NULL ? context->transaction->tid : no_context_tid;
+  const LifeTxnStatus local_status =
+      local != NULL ? local->status : LifeTxnStatus::Aborted;
+  const LifeTxnStatus context_status =
+      context != NULL ? context->status : LifeTxnStatus::Aborted;
 
   const std::vector<LifeHistoryEntry> tx_object_history =
       object_history(tx, operation.object);
 
   const bool same_process_txn_time =
-      tx.tid.time == local.transaction.tid.time;
+      tx.tid.time == local_tid.time;
   const bool local_has_newer_attempt =
-      same_process_txn_time && tx.tid.attempt < local.transaction.tid.attempt;
-  const bool same_process_txn_attempt = tx.tid == local.transaction.tid;
+      same_process_txn_time && tx.tid.attempt < local_tid.attempt;
+  const bool same_process_txn_attempt = tx.tid == local_tid;
+  const size_t local_history_size =
+      local != NULL ? local->transaction->history.size() : 0;
 
   const bool must_defer =
-      context.status == LifeTxnStatus::Prepared ||
-      context.transaction.tid < tx.tid || local_has_newer_attempt ||
+      context_status == LifeTxnStatus::Prepared || context_tid < tx.tid ||
+      local_has_newer_attempt ||
       (same_process_txn_attempt &&
-       (local.status == LifeTxnStatus::Aborted ||
-        tx.history.size() < local.transaction.history.size()));
+       (local_status == LifeTxnStatus::Aborted ||
+        tx.history.size() < local_history_size));
 
   if (must_defer) {
 
-    if (context.status == LifeTxnStatus::Prepared) {
+    if (context_status == LifeTxnStatus::Prepared) {
 
-      if (!inline_operation.has_value ||
-          priority_less_equal(tx.tid, inline_operation.value.transaction.tid)) {
+      if (!inline_operation ||
+          priority_less_equal(
+              tx.tid, inline_operation->transaction->tid)) {
         LifeInlineOperation pending;
-        pending.transaction = tx;
+        pending.transaction = std::make_shared<LifeTxnDescriptor>(tx);
         pending.operation = operation;
-        inline_operation.set(pending);
+        inline_operation.reset(new LifeInlineOperation(pending));
       }
 
       LifeExecuteResult result = make_result(LifeResultCode::Finalize);
-      result.transaction = context.transaction;
+      assert(context != NULL && context->transaction);
+      result.transaction = *context->transaction;
       return result;
     }
 
-    if (higher_priority(context.transaction.tid, tx.tid)) {
+    if (higher_priority(context_tid, tx.tid)) {
       LifeExecuteResult result = make_result(LifeResultCode::Help);
-      result.transaction = context.transaction;
+      assert(context != NULL && context->transaction);
+      result.transaction = *context->transaction;
       return result;
     }
 
-    if (tx.tid.time < local.transaction.tid.time)
+    if (tx.tid.time < local_tid.time)
       return make_result(LifeResultCode::Committed);
 
-    if (same_process_txn_time && local.status == LifeTxnStatus::Committed)
+    if (same_process_txn_time && local_status == LifeTxnStatus::Committed)
       return make_result(LifeResultCode::Committed);
 
     if (local_has_newer_attempt ||
-        (same_process_txn_attempt && local.status == LifeTxnStatus::Aborted)) {
+        (same_process_txn_attempt && local_status == LifeTxnStatus::Aborted)) {
       LifeExecuteResult result = make_result(LifeResultCode::Retry);
-      result.observed_attempt = local.transaction.tid.attempt;
+      result.observed_attempt = local_tid.attempt;
       return result;
     }
 
-    if (tx.history.size() < local.transaction.history.size()) {
+    if (tx.history.size() < local_history_size) {
+      assert(local != NULL && local->transaction);
       const uint64_t response_index = tx_object_history.size();
       if (response_index >=
-              object_history(local.transaction, object_id()).size() ||
-          object_history(local.transaction, object_id())[response_index]
+              object_history(*local->transaction, object_id()).size() ||
+          object_history(*local->transaction, object_id())[response_index]
                   .operation != operation) {
         return make_result(LifeResultCode::InvalidOperation);
       }
 
       LifeExecuteResult result = make_result(LifeResultCode::Success);
       result.response =
-          object_history(local.transaction, object_id())[response_index]
+          object_history(*local->transaction, object_id())[response_index]
               .response;
       return result;
     }
   }
 
   if (active_process.has_value) {
-    ProcessMap::iterator active = processes.find(active_process.value);
-    if (active != processes.end())
+    assert(processes);
+    ProcessMap::iterator active = processes->find(active_process.value);
+    if (active != processes->end())
       active->second.status = LifeTxnStatus::Aborted;
   }
 
-  std::vector<uint8_t> speculative_state = committed_state;
+  const uint8_t *committed =
+      reinterpret_cast<const uint8_t *>(_row->get_data());
+  std::vector<uint8_t> speculative_state(
+      committed, committed + _row->get_tuple_size());
 
   if (!replay_history(tx_object_history, speculative_state))
     return make_result(LifeResultCode::InvalidOperation);
@@ -278,12 +335,14 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   entry.response = response;
 
   LifeProcessRecord updated;
-  updated.transaction = tx;
-  updated.transaction.history.push_back(entry);
+  LifeTxnDescriptor updated_transaction = tx;
+  updated_transaction.history.push_back(entry);
+  updated.transaction =
+      std::make_shared<LifeTxnDescriptor>(std::move(updated_transaction));
   updated.status = LifeTxnStatus::Executing;
 
   active_process.set(tx.pid);
-  processes[tx.pid] = updated;
+  mutable_process_record(tx.pid) = updated;
 
   LifeExecuteResult result = make_result(LifeResultCode::Success);
   result.response = response;
@@ -292,23 +351,33 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 
 // the prepare protocol as described in the psuedocode
 LifeExecuteResult Row_life::prepare(const LifeTxnDescriptor &tx) {
+  return prepare(std::make_shared<LifeTxnDescriptor>(tx));
+}
+
+LifeExecuteResult Row_life::prepare(const LifeTxnDescriptorPtr &tx) {
+  assert(tx);
 
   LifeLatchGuard guard(&latch);
-  LifeProcessRecord local = process_record(tx.pid);
+  const LifeProcessRecord *local = process_record(tx->pid);
+  const LifeTxnId no_local_tid = {0, 0};
+  const LifeTxnId &local_tid =
+      local != NULL ? local->transaction->tid : no_local_tid;
+  const LifeTxnStatus local_status =
+      local != NULL ? local->status : LifeTxnStatus::Aborted;
 
-  bool already_committed = (tx.tid.time < local.transaction.tid.time) ||
-                           (local.status == LifeTxnStatus::Committed);
+  bool already_committed = (tx->tid.time < local_tid.time) ||
+                           (local_status == LifeTxnStatus::Committed);
 
   if (already_committed) {
     return make_result(LifeResultCode::Committed);
   }
 
-  bool prepare_must_fail = (tx.tid.attempt < local.transaction.tid.attempt) ||
-                           (local.status == LifeTxnStatus::Aborted);
+  bool prepare_must_fail = (tx->tid.attempt < local_tid.attempt) ||
+                           (local_status == LifeTxnStatus::Aborted);
 
   if (prepare_must_fail) {
     LifeExecuteResult result = make_result(LifeResultCode::Retry);
-    result.observed_attempt = local.transaction.tid.attempt;
+    result.observed_attempt = local_tid.attempt;
     return result;
   }
 
@@ -317,39 +386,63 @@ LifeExecuteResult Row_life::prepare(const LifeTxnDescriptor &tx) {
   LifeProcessRecord updated;
   updated.status = LifeTxnStatus::Prepared;
   updated.transaction = tx;
-  processes[tx.pid] = updated;
+  mutable_process_record(tx->pid) = updated;
 
   return make_result(LifeResultCode::Success);
 }
 
 void Row_life::commit(const LifeTxnDescriptor &tx) {
+  LifeTxnDescriptorPtr shared = std::make_shared<LifeTxnDescriptor>(tx);
+  std::vector<size_t> history_indices;
+  for (size_t i = 0; i < tx.history.size(); ++i) {
+    if (tx.history[i].operation.object == object_id())
+      history_indices.push_back(i);
+  }
+  commit(shared, history_indices);
+}
+
+void Row_life::commit(const LifeTxnDescriptorPtr &tx,
+                      const std::vector<size_t> &history_indices) {
+  assert(tx);
 
   {
     LifeLatchGuard guard(&latch);
-    LifeProcessRecord local = process_record(tx.pid);
+    const LifeProcessRecord *local = process_record(tx->pid);
+    const LifeTxnId no_local_tid = {0, 0};
+    const LifeTxnId &local_tid =
+        local != NULL ? local->transaction->tid : no_local_tid;
+    const LifeTxnStatus local_status =
+        local != NULL ? local->status : LifeTxnStatus::Aborted;
 
-    bool already_commited = (tx.tid.time < local.transaction.tid.time) ||
-                            (local.status == LifeTxnStatus::Committed);
+    bool already_commited = (tx->tid.time < local_tid.time) ||
+                            (local_status == LifeTxnStatus::Committed);
 
     if (already_commited) {
       return;
     }
 
-    // need to make sure that this is right
-    std::vector<uint8_t> final = committed_state;
-    if (!replay_history(object_history(tx, object_id()), final))
-      return;
-    committed_state = final;
-    std::memcpy(_row->get_data(), committed_state.data(),
-                committed_state.size());
+    for (std::vector<size_t>::const_iterator it = history_indices.begin();
+         it != history_indices.end(); ++it) {
+      if (*it >= tx->history.size() || !validate_committed_operation(
+                                            tx->history[*it].operation)) {
+        assert(false);
+        return;
+      }
+    }
+    for (std::vector<size_t>::const_iterator it = history_indices.begin();
+         it != history_indices.end(); ++it) {
+      const bool applied =
+          apply_committed_operation(tx->history[*it].operation);
+      assert(applied);
+      (void)applied;
+    }
 
-    LifeProcessRecord updated;
+    LifeProcessRecord &updated = mutable_process_record(tx->pid);
     updated.transaction = tx;
     updated.status = LifeTxnStatus::Committed;
-    processes[tx.pid] = updated;
   }
 
-  help(tx);
+  help(*tx);
 }
 
 void Row_life::rollback(const LifeTxnDescriptor &tx) {
@@ -357,12 +450,12 @@ void Row_life::rollback(const LifeTxnDescriptor &tx) {
   {
     LifeLatchGuard guard(&latch);
 
-    LifeProcessRecord local = process_record(tx.pid);
+    const LifeProcessRecord *local = process_record(tx.pid);
 
-    if (local.transaction.tid == tx.tid &&
-        local.status != LifeTxnStatus::Aborted &&
-        local.status != LifeTxnStatus::Committed) {
-      processes[tx.pid].status = LifeTxnStatus::Aborted;
+    if (local != NULL && local->transaction->tid == tx.tid &&
+        local->status != LifeTxnStatus::Aborted &&
+        local->status != LifeTxnStatus::Committed) {
+      mutable_process_record(tx.pid).status = LifeTxnStatus::Aborted;
     }
   }
 
@@ -382,13 +475,13 @@ void Row_life::help(const LifeTxnDescriptor &tx) {
 
     active_process.reset();
 
-    if (inline_operation.has_value) {
-      pending = inline_operation.value;
+    if (inline_operation) {
+      pending = *inline_operation;
       has_pending = true;
       inline_operation.reset();
     }
   }
 
   if (has_pending)
-    execute(pending.transaction, pending.operation);
+    execute(*pending.transaction, pending.operation);
 }

@@ -16,8 +16,11 @@ public:
                             const LifeOperation &operation);
 
   LifeExecuteResult prepare(const LifeTxnDescriptor &tx);
+  LifeExecuteResult prepare(const LifeTxnDescriptorPtr &tx);
 
   void commit(const LifeTxnDescriptor &tx);
+  void commit(const LifeTxnDescriptorPtr &tx,
+              const std::vector<size_t> &history_indices);
 
   void rollback(const LifeTxnDescriptor &tx);
 
@@ -33,8 +36,9 @@ private:
   static std::vector<LifeHistoryEntry>
   object_history(const LifeTxnDescriptor &tx, const LifeObjectId &object);
 
-  LifeProcessRecord process_record(const LifeProcessId &pid) const;
-  LifeProcessRecord context_record() const;
+  const LifeProcessRecord *process_record(const LifeProcessId &pid) const;
+  const LifeProcessRecord *context_record() const;
+  LifeProcessRecord &mutable_process_record(const LifeProcessId &pid);
   LifeExecuteResult make_result(LifeResultCode code) const;
   LifeObjectId object_id() const;
   bool apply_operation(const LifeOperation &operation,
@@ -42,14 +46,15 @@ private:
                        LifeResponse &response) const;
   bool replay_history(const std::vector<LifeHistoryEntry> &history,
                       std::vector<uint8_t> &state) const;
+  bool validate_committed_operation(const LifeOperation &operation) const;
+  bool apply_committed_operation(const LifeOperation &operation);
 
   bool pid_equals(const LifeProcessId &pid1, const LifeProcessId &pid2);
   pthread_mutex_t latch;
   row_t *_row;
-  std::vector<uint8_t> committed_state;
   LifeOptional<LifeProcessId> active_process;
-  ProcessMap processes;
-  LifeOptional<LifeInlineOperation> inline_operation;
+  std::unique_ptr<ProcessMap> processes;
+  std::unique_ptr<LifeInlineOperation> inline_operation;
 };
 
 #endif
