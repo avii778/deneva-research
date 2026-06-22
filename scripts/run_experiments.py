@@ -162,7 +162,7 @@ for exp in exps:
                         break
                 if not found_cfg: f_cfg.write(line)
 
-        cmd = "make clean; make -j"
+        cmd = "make release"
         os.system(cmd)
         if not execute:
             exit()

@@ -1,4 +1,5 @@
 CC=g++
+OPTFLAGS ?= -O2
 CFLAGS=-Wall -g -gdwarf-3 -std=c++0x $(OPTFLAGS)
 #CFLAGS += -fsanitize=address -fno-omit-frame-pointer 
 JEMALLOC=./jemalloc-4.0.3

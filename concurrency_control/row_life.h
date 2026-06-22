@@ -20,6 +20,8 @@ public:
 
   void commit(const LifeTxnDescriptor &tx);
   void commit(const LifeTxnDescriptorPtr &tx,
+              const LifeHistoryIndices &history_indices);
+  void commit(const LifeTxnDescriptorPtr &tx,
               const std::vector<size_t> &history_indices);
 
   void rollback(const LifeTxnDescriptor &tx);
@@ -29,11 +31,10 @@ public:
 private:
   typedef std::vector<LifeProcessRecord> ProcessSlots;
 
-  static bool higher_priority(const LifeTxnId &lhs, const LifeTxnId &rhs);
-  static bool priority_less_equal(const LifeTxnId &lhs, const LifeTxnId &rhs);
   const LifeTxnDescriptor::TouchedObject *
   touched_object(const LifeTxnDescriptor &tx) const;
-  size_t object_history_size(const LifeTxnDescriptor &tx) const;
+  const LifeHistoryIndices *object_history_indices(
+      const LifeTxnDescriptor &tx) const;
   const LifeHistoryEntry *object_history_entry(const LifeTxnDescriptor &tx,
                                                size_t object_index) const;
 
@@ -43,14 +44,16 @@ private:
   LifeExecuteResult make_result(LifeResultCode code) const;
   const LifeObjectId &object_id() const;
   bool apply_operation(const LifeOperation &operation,
-                       std::vector<uint8_t> &state,
+                       uint8_t *state, size_t state_size,
                        LifeResponse &response) const;
   bool replay_history(const LifeTxnDescriptor &tx,
-                      std::vector<uint8_t> &state) const;
+                      const LifeHistoryIndices *history_indices,
+                      uint8_t *state, size_t state_size) const;
   bool validate_committed_operation(const LifeOperation &operation) const;
+  bool evaluate_committed_operation(const LifeOperation &operation,
+                                    LifeResponse &response) const;
   bool apply_committed_operation(const LifeOperation &operation);
 
-  bool pid_equals(const LifeProcessId &pid1, const LifeProcessId &pid2);
   pthread_mutex_t latch;
   row_t *_row;
   Catalog *_schema;

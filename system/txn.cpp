@@ -262,6 +262,8 @@ void Transaction::init() {
   life_tid.time = 0;
   life_tid.attempt = 1;
   life_status = LifeTxnStatus::Aborted;
+  life_history.reserve(g_req_per_query);
+  life_objects.reserve(g_req_per_query);
 
   reset(0);
 }

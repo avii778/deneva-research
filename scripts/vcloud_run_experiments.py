@@ -105,7 +105,7 @@ for e in experiments[1:]:
                     break
             if not found_cfg: f_cfg.write(line)
 
-    cmd = "make clean; make -j"
+    cmd = "make release"
     os.system(cmd)
 
     if execute:
@@ -183,4 +183,3 @@ for e in experiments[1:]:
 #if not execute:
 #    cmd = "tar -czvf tests.tgz {}".format(test_dir_name,test_dir_name)
 #    os.system(cmd)
-

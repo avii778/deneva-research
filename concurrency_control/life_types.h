@@ -218,11 +218,37 @@ inline bool operator!=(const LifeYcsbSnapshot &lhs,
   return !(lhs == rhs);
 }
 
+class LifeHistoryIndices {
+public:
+  LifeHistoryIndices() : first_(0), has_first_(false), overflow_() {}
+
+  size_t size() const { return has_first_ ? overflow_.size() + 1 : 0; }
+
+  size_t operator[](size_t index) const {
+    assert(index < size());
+    return index == 0 ? first_ : overflow_[index - 1];
+  }
+
+  void push_back(size_t index) {
+    if (!has_first_) {
+      first_ = index;
+      has_first_ = true;
+      return;
+    }
+    overflow_.push_back(index);
+  }
+
+private:
+  size_t first_;
+  bool has_first_;
+  std::vector<size_t> overflow_;
+};
+
 struct LifeTxnDescriptor {
   struct TouchedObject {
     LifeObjectId object;
     Row_life *manager;
-    std::vector<size_t> history_indices;
+    LifeHistoryIndices history_indices;
   };
 
   LifeProcessId pid;

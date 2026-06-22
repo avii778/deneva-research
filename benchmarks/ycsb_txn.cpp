@@ -205,6 +205,7 @@ RC YCSBTxnManager::run_life_txn() {
   uint64_t starttime = get_sys_clock();
 
   std::vector<LifeTxnDescriptor> txns;
+  txns.reserve(g_req_per_query);
   txns.push_back(life_descriptor());
 
   try_life_transactions(txns);
@@ -280,7 +281,7 @@ bool YCSBTxnManager::try_life_transactions(
       break;
 
     case LifeResultCode::Finalize: {
-      LifeTxnDescriptor response = result.transaction;
+      LifeTxnDescriptor response = std::move(result.transaction);
       const uint64_t response_time = response.tid.time;
       const uint64_t ctx_time = ctx.tid.time;
 #if LOG_LIFE
@@ -296,7 +297,7 @@ bool YCSBTxnManager::try_life_transactions(
     }
 
     case LifeResultCode::Help: {
-      LifeTxnDescriptor response = result.transaction;
+      LifeTxnDescriptor response = std::move(result.transaction);
       for (std::vector<LifeTxnDescriptor>::iterator it = txns.begin();
            it != txns.end();) {
         if (it->tid.time == response.tid.time)
@@ -343,6 +344,9 @@ YCSBTxnManager::execute_life_operation(LifeTxnDescriptor &descriptor,
 void YCSBTxnManager::collect_life_objects(
     const LifeTxnDescriptor &descriptor,
     std::vector<LifeFinalizeObject> &objects) {
+  if (objects.capacity() < descriptor.history.size())
+    objects.reserve(descriptor.history.size());
+
   for (size_t index = 0; index < descriptor.history.size(); ++index) {
     const LifeObjectId &object_id =
         descriptor.history[index].operation.object;
