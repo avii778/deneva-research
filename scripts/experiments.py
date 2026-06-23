@@ -60,8 +60,9 @@ fmt_title = [
     "ZIPF_THETA",
     "NUM_WH",
 ]
-YCSB_ALGOS = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP"]
+YCSB_ALGOS = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP", "LIFE"]
 YCSB_SINGLE_NODE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
+YCSB_LIFE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 
 ##############################
 # PLOTS
@@ -81,7 +82,7 @@ def pps_scaling():
 def ycsb_scaling():
     wl = "YCSB"
     nnodes = [1, 2, 4, 8, 16, 32, 64]
-    algos = YCSB_ALGOS
+    algos = YCSB_LIFE_ALGOS
     base_table_size = 2097152 * 8
     txn_write_perc = [0.5]
     tup_write_perc = [0.5]

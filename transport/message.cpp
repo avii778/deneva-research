@@ -441,6 +441,15 @@ Message * Message::create_message(RemReqType rtype) {
     case RLIFE_FINISH_RSP:
       msg = new LifeFinishResponseMessage;
       break;
+    case RLIFE_HELP:
+      msg = new LifeHelpMessage;
+      break;
+    case RLIFE_HELP_APPLY:
+      msg = new LifeHelpApplyMessage;
+      break;
+    case RLIFE_FINALIZE:
+      msg = new LifeFinalizeMessage;
+      break;
     case RFWD:
       msg = new ForwardMessage;
       break;
@@ -660,6 +669,24 @@ void Message::release_message(Message * msg) {
     }
     case RLIFE_FINISH_RSP: {
       LifeFinishResponseMessage *m_msg = (LifeFinishResponseMessage *)msg;
+      m_msg->release();
+      delete m_msg;
+      break;
+    }
+    case RLIFE_HELP: {
+      LifeHelpMessage *m_msg = (LifeHelpMessage *)msg;
+      m_msg->release();
+      delete m_msg;
+      break;
+    }
+    case RLIFE_HELP_APPLY: {
+      LifeHelpApplyMessage *m_msg = (LifeHelpApplyMessage *)msg;
+      m_msg->release();
+      delete m_msg;
+      break;
+    }
+    case RLIFE_FINALIZE: {
+      LifeFinalizeMessage *m_msg = (LifeFinalizeMessage *)msg;
       m_msg->release();
       delete m_msg;
       break;
@@ -1474,6 +1501,84 @@ void LifePrepareResponseMessage::copy_to_buf(char *buf) {
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   life_write_result(buf, ptr, result);
+  assert(ptr == get_size());
+}
+
+uint64_t LifeHelpMessage::get_size() {
+  return Message::mget_size() + life_descriptor_size(descriptor);
+}
+
+void LifeHelpMessage::copy_from_txn(TxnManager *txn) {
+  (void)txn;
+}
+
+void LifeHelpMessage::copy_to_txn(TxnManager *txn) {
+  Message::mcopy_to_txn(txn);
+}
+
+void LifeHelpMessage::copy_from_buf(char *buf) {
+  Message::mcopy_from_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_read_descriptor(buf, ptr, descriptor);
+  assert(ptr == get_size());
+}
+
+void LifeHelpMessage::copy_to_buf(char *buf) {
+  Message::mcopy_to_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_write_descriptor(buf, ptr, descriptor);
+  assert(ptr == get_size());
+}
+
+uint64_t LifeHelpApplyMessage::get_size() {
+  return Message::mget_size() + life_descriptor_size(descriptor);
+}
+
+void LifeHelpApplyMessage::copy_from_txn(TxnManager *txn) {
+  (void)txn;
+}
+
+void LifeHelpApplyMessage::copy_to_txn(TxnManager *txn) {
+  Message::mcopy_to_txn(txn);
+}
+
+void LifeHelpApplyMessage::copy_from_buf(char *buf) {
+  Message::mcopy_from_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_read_descriptor(buf, ptr, descriptor);
+  assert(ptr == get_size());
+}
+
+void LifeHelpApplyMessage::copy_to_buf(char *buf) {
+  Message::mcopy_to_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_write_descriptor(buf, ptr, descriptor);
+  assert(ptr == get_size());
+}
+
+uint64_t LifeFinalizeMessage::get_size() {
+  return Message::mget_size() + life_descriptor_size(descriptor);
+}
+
+void LifeFinalizeMessage::copy_from_txn(TxnManager *txn) {
+  (void)txn;
+}
+
+void LifeFinalizeMessage::copy_to_txn(TxnManager *txn) {
+  Message::mcopy_to_txn(txn);
+}
+
+void LifeFinalizeMessage::copy_from_buf(char *buf) {
+  Message::mcopy_from_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_read_descriptor(buf, ptr, descriptor);
+  assert(ptr == get_size());
+}
+
+void LifeFinalizeMessage::copy_to_buf(char *buf) {
+  Message::mcopy_to_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_write_descriptor(buf, ptr, descriptor);
   assert(ptr == get_size());
 }
 

@@ -24,6 +24,7 @@
 
 class YCSBQuery;
 class YCSBQueryMessage;
+class Message;
 class ycsb_request;
 
 LifeYcsbRequest make_life_ycsb_request(const ycsb_request &request);
@@ -64,6 +65,7 @@ public:
   RC run_txn_post_wait();
   RC run_calvin_txn();
   LifeTxnDescriptor life_descriptor() const;
+#if CC_ALG == LIFE
   void life_reset_workload();
   RC send_life_execute(const LifeTxnDescriptor &descriptor,
                        const LifeOperation &operation);
@@ -73,12 +75,18 @@ public:
   LifeExecuteResult prepare_life_remote(const LifeTxnDescriptor &descriptor);
   LifeExecuteResult finish_life_remote(const LifeTxnDescriptor &descriptor,
                                        RC decision);
+  RC apply_life_help_request(const LifeTxnDescriptor &descriptor,
+                             uint64_t requester_node_id);
+  RC help_life_remote(const LifeTxnDescriptor &descriptor);
+  RC apply_life_finalize_request(const LifeTxnDescriptor &descriptor);
   RC apply_life_prepare_response(const LifeExecuteResult &result);
   RC apply_life_finish_response(const LifeExecuteResult &result);
+#endif
   void copy_remote_requests(YCSBQueryMessage *msg);
 
 private:
   void next_ycsb_state();
+#if CC_ALG == LIFE
   RC run_life_txn();
   bool try_life_transactions(std::vector<LifeTxnDescriptor> &txns);
   LifeExecuteResult execute_life_operation(LifeTxnDescriptor &descriptor,
@@ -98,11 +106,18 @@ private:
   LifeOperation make_life_operation(row_t *row, ycsb_request *req);
   LifeOperation make_life_operation(row_t *row, const LifeYcsbRequest &req);
   void reset_pending_life_finalize();
+  void send_life_message_to_node(Message *msg, uint64_t node_id);
+  void send_life_help_request(const LifeTxnDescriptor &descriptor);
+  void send_life_help_apply_messages(const LifeTxnDescriptor &descriptor,
+                                     const std::vector<uint64_t> &nodes,
+                                     uint64_t requester_node_id);
+  void send_life_finalize_request(const LifeTxnDescriptor &descriptor);
   void send_life_prepare_messages(const LifeTxnDescriptor &descriptor,
                                   const std::vector<uint64_t> &nodes);
   void send_life_finish_messages(const LifeTxnDescriptor &descriptor,
                                  const std::vector<uint64_t> &nodes,
                                  RC decision);
+#endif
   RC run_txn_state();
   RC run_ycsb_0(ycsb_request *req, row_t *&row_local);
   RC run_ycsb_1(access_t acctype, row_t *row_local);

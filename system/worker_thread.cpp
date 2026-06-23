@@ -87,6 +87,15 @@ void WorkerThread::process(Message * msg) {
       case RLIFE_FINISH_RSP:
         rc = process_life_finish_rsp(msg);
         break;
+      case RLIFE_HELP:
+        rc = process_life_help(msg);
+        break;
+      case RLIFE_HELP_APPLY:
+        rc = process_life_help_apply(msg);
+        break;
+      case RLIFE_FINALIZE:
+        rc = process_life_finalize(msg);
+        break;
 #endif
 			case RFIN: 
         rc = process_rfin(msg);
@@ -544,6 +553,37 @@ RC WorkerThread::process_life_finish_rsp(Message *msg) {
   LifeFinishResponseMessage *life_msg = (LifeFinishResponseMessage *)msg;
   RC rc = ((YCSBTxnManager *)txn_man)
               ->apply_life_finish_response(life_msg->result);
+  check_if_done(rc);
+  return rc;
+}
+
+RC WorkerThread::process_life_help(Message *msg) {
+  DEBUG("RLIFE_HELP %ld\n", msg->get_txn_id());
+  assert(CC_ALG == LIFE);
+  assert(IS_LOCAL(msg->get_txn_id()));
+
+  LifeHelpMessage *life_msg = (LifeHelpMessage *)msg;
+  return ((YCSBTxnManager *)txn_man)
+      ->apply_life_help_request(life_msg->descriptor, msg->return_node_id);
+}
+
+RC WorkerThread::process_life_help_apply(Message *msg) {
+  DEBUG("RLIFE_HELP_APPLY %ld\n", msg->get_txn_id());
+  assert(CC_ALG == LIFE);
+  assert(!IS_LOCAL(msg->get_txn_id()));
+
+  LifeHelpApplyMessage *life_msg = (LifeHelpApplyMessage *)msg;
+  return ((YCSBTxnManager *)txn_man)->help_life_remote(life_msg->descriptor);
+}
+
+RC WorkerThread::process_life_finalize(Message *msg) {
+  DEBUG("RLIFE_FINALIZE %ld\n", msg->get_txn_id());
+  assert(CC_ALG == LIFE);
+  assert(IS_LOCAL(msg->get_txn_id()));
+
+  LifeFinalizeMessage *life_msg = (LifeFinalizeMessage *)msg;
+  RC rc = ((YCSBTxnManager *)txn_man)
+              ->apply_life_finalize_request(life_msg->descriptor);
   check_if_done(rc);
   return rc;
 }

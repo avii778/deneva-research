@@ -32,10 +32,12 @@
 #include "table.h"
 #include "thread.h"
 #include "wl.h"
+#include "work_queue.h"
 #include "ycsb.h"
 #include "ycsb_query.h"
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <set>
@@ -109,7 +111,9 @@ void YCSBTxnManager::init(uint64_t thd_id, Workload *h_wl) {
 void YCSBTxnManager::reset() {
   state = YCSB_0;
   next_record_id = 0;
+#if CC_ALG == LIFE
   reset_pending_life_finalize();
+#endif
 #if LOG_LIFE
   life_help_time = 0;
   life_own_time = 0;
@@ -118,11 +122,13 @@ void YCSBTxnManager::reset() {
   TxnManager::reset();
 }
 
+#if CC_ALG == LIFE
 void YCSBTxnManager::life_reset_workload() {
   state = YCSB_0;
   next_record_id = 0;
   reset_pending_life_finalize();
 }
+#endif
 
 RC YCSBTxnManager::acquire_locks() {
   uint64_t starttime = get_sys_clock();
@@ -220,6 +226,9 @@ RC YCSBTxnManager::run_life_txn() {
 
   if (!complete)
     return WAIT_REM;
+
+  if (query == NULL || query->partitions_touched.size() == 0)
+    return RCOK;
 
   txn->life_status = LifeTxnStatus::Committed;
 #if LOG_LIFE
@@ -332,6 +341,10 @@ bool YCSBTxnManager::try_life_transactions(
 
     case LifeResultCode::Help: {
       LifeTxnDescriptor response = std::move(result.transaction);
+      const bool owns_response = response.pid == txn->life_pid &&
+                                 response.tid.time == txn->life_tid.time;
+      if (!owns_response)
+        send_life_help_request(response);
       for (std::vector<LifeTxnDescriptor>::iterator it = txns.begin();
            it != txns.end();) {
         if (it->tid.time == response.tid.time)
@@ -367,7 +380,9 @@ YCSBTxnManager::execute_life_operation(LifeTxnDescriptor &descriptor,
   const LifeYcsbRequest &request =
       descriptor.ycsb.requests[descriptor.ycsb.next_record_id];
 
-  row_t *life_row = request.row;
+  const bool owns_descriptor = descriptor.pid == txn->life_pid &&
+                               descriptor.tid.time == txn->life_tid.time;
+  row_t *life_row = owns_descriptor ? request.row : NULL;
   if (life_row == NULL)
     life_row = lookup_life_row(request.key);
   operation = make_life_operation(life_row, request);
@@ -465,6 +480,82 @@ YCSBTxnManager::finish_life_remote(const LifeTxnDescriptor &descriptor,
   return response;
 }
 
+RC YCSBTxnManager::help_life_remote(const LifeTxnDescriptor &descriptor) {
+  std::vector<LifeFinalizeObject> objects = descriptor.touched_objects;
+  if (objects.empty())
+    collect_life_objects(descriptor, objects);
+
+  for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
+       it != objects.end(); ++it) {
+    if (GET_NODE_ID(it->object.partition_id) != g_node_id)
+      continue;
+
+    Row_life *manager = it->manager;
+    if (manager == NULL)
+      manager = lookup_life_row(it->object)->manager;
+    assert(manager != NULL);
+    manager->help(descriptor);
+  }
+
+  return RCOK;
+}
+
+RC YCSBTxnManager::apply_life_help_request(const LifeTxnDescriptor &descriptor,
+                                           uint64_t requester_node_id) {
+  std::vector<LifeFinalizeObject> objects = descriptor.touched_objects;
+  if (objects.empty())
+    collect_life_objects(descriptor, objects);
+
+  std::set<uint64_t> remote_nodes;
+  for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
+       it != objects.end(); ++it) {
+    const uint64_t node_id = GET_NODE_ID(it->object.partition_id);
+    if (node_id == g_node_id)
+      continue;
+    if (node_id == requester_node_id)
+      continue;
+    remote_nodes.insert(node_id);
+  }
+
+  if (requester_node_id != g_node_id)
+    help_life_remote(descriptor);
+  if (!remote_nodes.empty()) {
+    std::vector<uint64_t> nodes(remote_nodes.begin(), remote_nodes.end());
+    send_life_help_apply_messages(descriptor, nodes, requester_node_id);
+  }
+
+  return RCOK;
+}
+
+RC YCSBTxnManager::apply_life_finalize_request(
+    const LifeTxnDescriptor &descriptor) {
+  if (life_finalize_waiting)
+    return WAIT_REM;
+
+  LifeTxnDescriptor finalize = descriptor;
+  const bool finalized = finalize_life_descriptor(finalize);
+  if (life_finalize_waiting)
+    return WAIT_REM;
+
+  const bool owns_descriptor =
+      finalize.pid == txn->life_pid && finalize.tid.time == txn->life_tid.time;
+  if (finalized) {
+    if (!owns_descriptor || query == NULL ||
+        query->partitions_touched.size() == 0)
+      return RCOK;
+
+    copy_life_descriptor_to_workload(finalize);
+    txn->life_status = LifeTxnStatus::Committed;
+    return commit();
+  }
+
+  if (!owns_descriptor || query == NULL)
+    return RCOK;
+
+  copy_life_descriptor_to_workload(finalize);
+  return run_life_txn();
+}
+
 void YCSBTxnManager::copy_life_descriptor_to_workload(
     const LifeTxnDescriptor &descriptor) {
   txn->life_tid = descriptor.tid;
@@ -482,6 +573,47 @@ void YCSBTxnManager::reset_pending_life_finalize() {
   life_pending_finalize = LifeTxnDescriptor();
   life_pending_objects.clear();
   life_pending_remote_nodes.clear();
+}
+
+void YCSBTxnManager::send_life_message_to_node(Message *msg, uint64_t node_id) {
+  if (node_id == g_node_id) {
+    work_queue.enqueue(get_thd_id(), msg, false);
+    return;
+  }
+  msg_queue.enqueue(get_thd_id(), msg, node_id);
+}
+
+void YCSBTxnManager::send_life_help_request(
+    const LifeTxnDescriptor &descriptor) {
+  LifeHelpMessage *msg = (LifeHelpMessage *)Message::create_message(RLIFE_HELP);
+  msg->txn_id = descriptor.tid.time;
+  msg->return_node_id = g_node_id;
+  msg->descriptor = descriptor;
+  send_life_message_to_node(msg, GET_NODE_ID(descriptor.tid.time));
+}
+
+void YCSBTxnManager::send_life_help_apply_messages(
+    const LifeTxnDescriptor &descriptor, const std::vector<uint64_t> &nodes,
+    uint64_t requester_node_id) {
+  for (std::vector<uint64_t>::const_iterator it = nodes.begin();
+       it != nodes.end(); ++it) {
+    if (*it == requester_node_id)
+      continue;
+    LifeHelpApplyMessage *msg =
+        (LifeHelpApplyMessage *)Message::create_message(RLIFE_HELP_APPLY);
+    msg->txn_id = descriptor.tid.time;
+    msg->descriptor = descriptor;
+    send_life_message_to_node(msg, *it);
+  }
+}
+
+void YCSBTxnManager::send_life_finalize_request(
+    const LifeTxnDescriptor &descriptor) {
+  LifeFinalizeMessage *msg =
+      (LifeFinalizeMessage *)Message::create_message(RLIFE_FINALIZE);
+  msg->txn_id = descriptor.tid.time;
+  msg->descriptor = descriptor;
+  send_life_message_to_node(msg, GET_NODE_ID(descriptor.tid.time));
 }
 
 void YCSBTxnManager::send_life_prepare_messages(
@@ -513,8 +645,8 @@ void YCSBTxnManager::send_life_finish_messages(
 RC YCSBTxnManager::apply_life_execute_response(
     const LifeExecuteResult &result) {
   LifeTxnDescriptor descriptor = life_descriptor();
-  descriptor.ycsb = make_life_ycsb_snapshot(*(YCSBQuery *)query, state,
-                                            next_record_id);
+  descriptor.ycsb =
+      make_life_ycsb_snapshot(*(YCSBQuery *)query, state, next_record_id);
 
   switch (result.code) {
 
@@ -523,12 +655,29 @@ RC YCSBTxnManager::apply_life_execute_response(
     break;
 
   case LifeResultCode::Committed:
-  case LifeResultCode::Help:
-  case LifeResultCode::Finalize:
-    // Distributed helping/finalization and stale remote completion handling are
-    // intentionally not wired yet.
     rollback_life_descriptor(descriptor);
-    return Abort;
+    return run_life_txn();
+
+  case LifeResultCode::Help: {
+    LifeTxnDescriptor helped = result.transaction;
+    const bool owns_helped =
+        helped.pid == txn->life_pid && helped.tid.time == txn->life_tid.time;
+    if (!owns_helped)
+      send_life_help_request(helped);
+    return run_life_txn();
+  }
+
+  case LifeResultCode::Finalize: {
+    LifeTxnDescriptor finalize = result.transaction;
+    const bool finalized = finalize_life_descriptor(finalize);
+    if (life_finalize_waiting)
+      return WAIT_REM;
+    if (!finalized)
+      return run_life_txn();
+    if (finalize.tid.time < descriptor.tid.time)
+      send_life_help_request(finalize);
+    return run_life_txn();
+  }
 
   case LifeResultCode::Retry:
     rollback_life_descriptor(descriptor);
@@ -568,8 +717,7 @@ RC YCSBTxnManager::apply_life_prepare_response(
   if (life_prepare_failed) {
     send_life_finish_messages(life_pending_finalize, life_pending_remote_nodes,
                               Abort);
-    reset_life_descriptor(life_pending_finalize,
-                          life_prepare_observed_attempt);
+    reset_life_descriptor(life_pending_finalize, life_prepare_observed_attempt);
     copy_life_descriptor_to_workload(life_pending_finalize);
     life_finish_pending = life_pending_remote_nodes.size();
     return life_finish_pending > 0 ? WAIT_REM : run_life_txn();
@@ -593,11 +741,11 @@ RC YCSBTxnManager::apply_life_prepare_response(
   send_life_finish_messages(life_pending_finalize, life_pending_remote_nodes,
                             Commit);
   life_finish_pending = life_pending_remote_nodes.size();
-  return life_finish_pending > 0 ? WAIT_REM : apply_life_finish_response(result);
+  return life_finish_pending > 0 ? WAIT_REM
+                                 : apply_life_finish_response(result);
 }
 
-RC YCSBTxnManager::apply_life_finish_response(
-    const LifeExecuteResult &result) {
+RC YCSBTxnManager::apply_life_finish_response(const LifeExecuteResult &result) {
   (void)result;
   if (!life_finalize_waiting || life_finish_pending == 0)
     return WAIT_REM;
@@ -610,6 +758,10 @@ RC YCSBTxnManager::apply_life_finish_response(
   if (committed) {
     copy_life_descriptor_to_workload(life_pending_finalize);
     txn->life_status = LifeTxnStatus::Committed;
+    if (query == NULL || query->partitions_touched.size() == 0) {
+      reset_pending_life_finalize();
+      return RCOK;
+    }
     reset_pending_life_finalize();
     return commit();
   }
@@ -625,8 +777,7 @@ void YCSBTxnManager::collect_life_objects(
     objects.reserve(descriptor.history.size());
 
   for (size_t index = 0; index < descriptor.history.size(); ++index) {
-    const LifeObjectId &object_id =
-        descriptor.history[index].operation.object;
+    const LifeObjectId &object_id = descriptor.history[index].operation.object;
 
     std::vector<LifeFinalizeObject>::iterator object = objects.begin();
     for (; object != objects.end(); ++object) {
@@ -719,11 +870,11 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
   }
 
   if (!remote_nodes.empty()) {
-    const bool owns_descriptor =
-        descriptor.pid == txn->life_pid &&
-        descriptor.tid.time == txn->life_tid.time;
+    const bool owns_descriptor = descriptor.pid == txn->life_pid &&
+                                 descriptor.tid.time == txn->life_tid.time;
     if (!owns_descriptor) {
       rollback_life_descriptor(descriptor);
+      send_life_finalize_request(descriptor);
       return false;
     }
 
@@ -736,7 +887,8 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
     life_pending_finalize.touched_objects = objects;
     life_pending_objects = objects;
     life_pending_remote_nodes.assign(remote_nodes.begin(), remote_nodes.end());
-    send_life_prepare_messages(life_pending_finalize, life_pending_remote_nodes);
+    send_life_prepare_messages(life_pending_finalize,
+                               life_pending_remote_nodes);
     return false;
   }
 
@@ -749,7 +901,6 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
     manager->commit(frozen, it->history_indices);
   }
   return true;
-
 }
 
 void YCSBTxnManager::reset_life_descriptor(LifeTxnDescriptor &descriptor,
@@ -778,9 +929,8 @@ void YCSBTxnManager::append_life_success(LifeTxnDescriptor &descriptor,
 }
 
 row_t *YCSBTxnManager::lookup_life_row(const LifeObjectId &object) const {
-  itemid_t *item =
-      const_cast<YCSBTxnManager *>(this)->index_read(
-          _wl->the_index, object.primary_key, object.partition_id);
+  itemid_t *item = const_cast<YCSBTxnManager *>(this)->index_read(
+      _wl->the_index, object.primary_key, object.partition_id);
   assert(item != NULL);
   return (row_t *)item->location;
 }
@@ -788,9 +938,8 @@ row_t *YCSBTxnManager::lookup_life_row(const LifeObjectId &object) const {
 row_t *YCSBTxnManager::lookup_life_row(uint64_t key) const {
   const int part_id = _wl->key_to_part(key);
   assert(GET_NODE_ID(part_id) == g_node_id);
-  itemid_t *item =
-      const_cast<YCSBTxnManager *>(this)->index_read(_wl->the_index, key,
-                                                     part_id);
+  itemid_t *item = const_cast<YCSBTxnManager *>(this)->index_read(
+      _wl->the_index, key, part_id);
   assert(item != NULL);
   return (row_t *)item->location;
 }

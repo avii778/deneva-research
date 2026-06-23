@@ -250,6 +250,45 @@ public:
   LifeExecuteResult result;
 };
 
+class LifeHelpMessage : public Message {
+public:
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *txn);
+  void copy_to_txn(TxnManager *txn);
+  uint64_t get_size();
+  void init() {}
+  void release() {}
+
+  LifeTxnDescriptor descriptor;
+};
+
+class LifeHelpApplyMessage : public Message {
+public:
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *txn);
+  void copy_to_txn(TxnManager *txn);
+  uint64_t get_size();
+  void init() {}
+  void release() {}
+
+  LifeTxnDescriptor descriptor;
+};
+
+class LifeFinalizeMessage : public Message {
+public:
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *txn);
+  void copy_to_txn(TxnManager *txn);
+  uint64_t get_size();
+  void init() {}
+  void release() {}
+
+  LifeTxnDescriptor descriptor;
+};
+
 class LifeFinishMessage : public Message {
 public:
   void copy_from_buf(char *buf);
