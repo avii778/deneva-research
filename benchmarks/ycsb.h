@@ -70,6 +70,11 @@ public:
   LifeExecuteResult execute_life_remote(const LifeTxnDescriptor &descriptor,
                                         const LifeOperation &operation);
   RC apply_life_execute_response(const LifeExecuteResult &result);
+  LifeExecuteResult prepare_life_remote(const LifeTxnDescriptor &descriptor);
+  LifeExecuteResult finish_life_remote(const LifeTxnDescriptor &descriptor,
+                                       RC decision);
+  RC apply_life_prepare_response(const LifeExecuteResult &result);
+  RC apply_life_finish_response(const LifeExecuteResult &result);
   void copy_remote_requests(YCSBQueryMessage *msg);
 
 private:
@@ -92,6 +97,12 @@ private:
   row_t *lookup_life_row(uint64_t key) const;
   LifeOperation make_life_operation(row_t *row, ycsb_request *req);
   LifeOperation make_life_operation(row_t *row, const LifeYcsbRequest &req);
+  void reset_pending_life_finalize();
+  void send_life_prepare_messages(const LifeTxnDescriptor &descriptor,
+                                  const std::vector<uint64_t> &nodes);
+  void send_life_finish_messages(const LifeTxnDescriptor &descriptor,
+                                 const std::vector<uint64_t> &nodes,
+                                 RC decision);
   RC run_txn_state();
   RC run_ycsb_0(ycsb_request *req, row_t *&row_local);
   RC run_ycsb_1(access_t acctype, row_t *row_local);
@@ -104,6 +115,14 @@ private:
   YCSBWorkload *_wl;
   YCSBRemTxnType state;
   uint64_t next_record_id;
+  bool life_finalize_waiting;
+  uint64_t life_prepare_pending;
+  uint64_t life_finish_pending;
+  bool life_prepare_failed;
+  uint64_t life_prepare_observed_attempt;
+  LifeTxnDescriptor life_pending_finalize;
+  std::vector<LifeFinalizeObject> life_pending_objects;
+  std::vector<uint64_t> life_pending_remote_nodes;
 #if LOG_LIFE
   uint64_t life_help_time;
   uint64_t life_own_time;

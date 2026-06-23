@@ -43,6 +43,7 @@ Client_query_queue::init(Workload * h_wl) {
     std::vector<BaseQuery*> new_queries(g_max_txn_per_part+4,NULL);
     queries.push_back(new_queries);
     query_cnt[id] = (uint64_t*)mem_allocator.align_alloc(sizeof(uint64_t));
+    *query_cnt[id] = 0;
   }
   next_tid = 0;
 
@@ -119,5 +120,4 @@ Client_query_queue::get_next_query(uint64_t server_id,uint64_t thread_id) {
 	BaseQuery * query = queries[server_id][query_id];
 	return query;
 }
-
 

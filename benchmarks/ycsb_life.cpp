@@ -49,7 +49,9 @@ LifeTxnDescriptor YCSBTxnManager::life_descriptor() const {
   for (std::vector<LifeYcsbRequest>::iterator it =
            descriptor.ycsb.requests.begin();
        it != descriptor.ycsb.requests.end(); ++it) {
-    it->row = lookup_life_row(it->key);
+    const int part_id = _wl->key_to_part(it->key);
+    if (GET_NODE_ID(part_id) == g_node_id)
+      it->row = lookup_life_row(it->key);
   }
 #endif
   return descriptor;

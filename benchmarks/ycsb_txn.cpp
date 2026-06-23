@@ -38,6 +38,7 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <set>
 
 #if CC_ALG == LIFE
 namespace {
@@ -108,6 +109,7 @@ void YCSBTxnManager::init(uint64_t thd_id, Workload *h_wl) {
 void YCSBTxnManager::reset() {
   state = YCSB_0;
   next_record_id = 0;
+  reset_pending_life_finalize();
 #if LOG_LIFE
   life_help_time = 0;
   life_own_time = 0;
@@ -119,6 +121,7 @@ void YCSBTxnManager::reset() {
 void YCSBTxnManager::life_reset_workload() {
   state = YCSB_0;
   next_record_id = 0;
+  reset_pending_life_finalize();
 }
 
 RC YCSBTxnManager::acquire_locks() {
@@ -246,6 +249,9 @@ bool YCSBTxnManager::try_life_transactions(
 #if LOG_LIFE
       life_finalize_time += get_sys_clock() - finalize_start;
 #endif
+      if (life_finalize_waiting)
+        return false;
+
       if (finalized) {
         if (ctx.pid == txn->life_pid && ctx.tid.time == txn->life_tid.time) {
           txn->life_tid = ctx.tid;
@@ -313,11 +319,13 @@ bool YCSBTxnManager::try_life_transactions(
 #if LOG_LIFE
       const uint64_t finalize_start = get_sys_clock();
 #endif
-      finalize_life_descriptor(response);
+      const bool finalized = finalize_life_descriptor(response);
 #if LOG_LIFE
       life_finalize_time += get_sys_clock() - finalize_start;
 #endif
-      if (response_time < ctx_time)
+      if (life_finalize_waiting)
+        return false;
+      if (finalized && response_time < ctx_time)
         txns.push_back(response);
       break;
     }
@@ -396,12 +404,110 @@ YCSBTxnManager::execute_life_remote(const LifeTxnDescriptor &descriptor,
   return manager->execute(local_descriptor, local_operation);
 }
 
+LifeExecuteResult
+YCSBTxnManager::prepare_life_remote(const LifeTxnDescriptor &descriptor) {
+  LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(descriptor);
+  LifeExecuteResult response;
+  response.code = LifeResultCode::Success;
+  response.transaction = descriptor;
+  response.observed_attempt = descriptor.tid.attempt;
+
+  for (std::vector<LifeFinalizeObject>::const_iterator it =
+           descriptor.touched_objects.begin();
+       it != descriptor.touched_objects.end(); ++it) {
+    if (GET_NODE_ID(it->object.partition_id) != g_node_id)
+      continue;
+
+    Row_life *manager = it->manager;
+    if (manager == NULL)
+      manager = lookup_life_row(it->object)->manager;
+    assert(manager != NULL);
+
+    const LifeExecuteResult result = manager->prepare(frozen);
+    if (result.code == LifeResultCode::Success ||
+        result.code == LifeResultCode::Committed) {
+      continue;
+    }
+
+    if (result.code == LifeResultCode::Retry)
+      response.observed_attempt = result.observed_attempt;
+    response.code = result.code;
+    return response;
+  }
+
+  return response;
+}
+
+LifeExecuteResult
+YCSBTxnManager::finish_life_remote(const LifeTxnDescriptor &descriptor,
+                                   RC decision) {
+  LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(descriptor);
+  for (std::vector<LifeFinalizeObject>::const_iterator it =
+           descriptor.touched_objects.begin();
+       it != descriptor.touched_objects.end(); ++it) {
+    if (GET_NODE_ID(it->object.partition_id) != g_node_id)
+      continue;
+
+    Row_life *manager = it->manager;
+    if (manager == NULL)
+      manager = lookup_life_row(it->object)->manager;
+    assert(manager != NULL);
+
+    if (decision == Commit)
+      manager->commit(frozen, it->history_indices);
+    else
+      manager->rollback(descriptor);
+  }
+
+  LifeExecuteResult response;
+  response.code = LifeResultCode::Success;
+  response.transaction = descriptor;
+  return response;
+}
+
 void YCSBTxnManager::copy_life_descriptor_to_workload(
     const LifeTxnDescriptor &descriptor) {
   txn->life_tid = descriptor.tid;
   txn->life_history = descriptor.history;
   state = static_cast<YCSBRemTxnType>(descriptor.ycsb.state);
   next_record_id = descriptor.ycsb.next_record_id;
+}
+
+void YCSBTxnManager::reset_pending_life_finalize() {
+  life_finalize_waiting = false;
+  life_prepare_pending = 0;
+  life_finish_pending = 0;
+  life_prepare_failed = false;
+  life_prepare_observed_attempt = 0;
+  life_pending_finalize = LifeTxnDescriptor();
+  life_pending_objects.clear();
+  life_pending_remote_nodes.clear();
+}
+
+void YCSBTxnManager::send_life_prepare_messages(
+    const LifeTxnDescriptor &descriptor, const std::vector<uint64_t> &nodes) {
+  for (std::vector<uint64_t>::const_iterator it = nodes.begin();
+       it != nodes.end(); ++it) {
+    LifePrepareMessage *msg =
+        (LifePrepareMessage *)Message::create_message(RLIFE_PREPARE);
+    msg->txn_id = get_txn_id();
+    msg->descriptor = descriptor;
+    msg_queue.enqueue(get_thd_id(), msg, *it);
+  }
+}
+
+void YCSBTxnManager::send_life_finish_messages(
+    const LifeTxnDescriptor &descriptor, const std::vector<uint64_t> &nodes,
+    RC decision) {
+  for (std::vector<uint64_t>::const_iterator it = nodes.begin();
+       it != nodes.end(); ++it) {
+    LifeFinishMessage *msg =
+        (LifeFinishMessage *)Message::create_message(RLIFE_FINISH);
+    msg->txn_id = get_txn_id();
+    msg->descriptor = descriptor;
+    msg->decision = decision;
+    msg_queue.enqueue(get_thd_id(), msg, *it);
+  }
 }
 
 RC YCSBTxnManager::apply_life_execute_response(
@@ -440,6 +546,75 @@ RC YCSBTxnManager::apply_life_execute_response(
     return Abort;
   }
 
+  return run_life_txn();
+}
+
+RC YCSBTxnManager::apply_life_prepare_response(
+    const LifeExecuteResult &result) {
+  if (!life_finalize_waiting || life_prepare_pending == 0)
+    return WAIT_REM;
+
+  if (result.code != LifeResultCode::Success &&
+      result.code != LifeResultCode::Committed) {
+    life_prepare_failed = true;
+    if (result.code == LifeResultCode::Retry)
+      life_prepare_observed_attempt = result.observed_attempt;
+  }
+
+  --life_prepare_pending;
+  if (life_prepare_pending > 0)
+    return WAIT_REM;
+
+  if (life_prepare_failed) {
+    send_life_finish_messages(life_pending_finalize, life_pending_remote_nodes,
+                              Abort);
+    reset_life_descriptor(life_pending_finalize,
+                          life_prepare_observed_attempt);
+    copy_life_descriptor_to_workload(life_pending_finalize);
+    life_finish_pending = life_pending_remote_nodes.size();
+    return life_finish_pending > 0 ? WAIT_REM : run_life_txn();
+  }
+
+  LifeTxnDescriptorPtr frozen =
+      std::make_shared<LifeTxnDescriptor>(life_pending_finalize);
+  for (std::vector<LifeFinalizeObject>::const_iterator it =
+           life_pending_objects.begin();
+       it != life_pending_objects.end(); ++it) {
+    if (GET_NODE_ID(it->object.partition_id) != g_node_id)
+      continue;
+
+    Row_life *manager = it->manager;
+    if (manager == NULL)
+      manager = lookup_life_row(it->object)->manager;
+    assert(manager != NULL);
+    manager->commit(frozen, it->history_indices);
+  }
+
+  send_life_finish_messages(life_pending_finalize, life_pending_remote_nodes,
+                            Commit);
+  life_finish_pending = life_pending_remote_nodes.size();
+  return life_finish_pending > 0 ? WAIT_REM : apply_life_finish_response(result);
+}
+
+RC YCSBTxnManager::apply_life_finish_response(
+    const LifeExecuteResult &result) {
+  (void)result;
+  if (!life_finalize_waiting || life_finish_pending == 0)
+    return WAIT_REM;
+
+  --life_finish_pending;
+  if (life_finish_pending > 0)
+    return WAIT_REM;
+
+  const bool committed = !life_prepare_failed;
+  if (committed) {
+    copy_life_descriptor_to_workload(life_pending_finalize);
+    txn->life_status = LifeTxnStatus::Committed;
+    reset_pending_life_finalize();
+    return commit();
+  }
+
+  reset_pending_life_finalize();
   return run_life_txn();
 }
 
@@ -488,6 +663,9 @@ void YCSBTxnManager::rollback_life_descriptor(
 
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects->begin();
        it != objects->end(); ++it) {
+    if (GET_NODE_ID(it->object.partition_id) != g_node_id)
+      continue;
+
     Row_life *manager = it->manager;
     if (manager == NULL)
       manager = lookup_life_row(it->object)->manager;
@@ -497,6 +675,8 @@ void YCSBTxnManager::rollback_life_descriptor(
 }
 
 bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
+  reset_pending_life_finalize();
+
   size_t cached_indices = 0;
   for (std::vector<LifeFinalizeObject>::const_iterator it =
            descriptor.touched_objects.begin();
@@ -513,8 +693,15 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
   const std::vector<LifeFinalizeObject> &objects = frozen->touched_objects;
 
   uint64_t observed_attempt = descriptor.tid.attempt;
+  std::set<uint64_t> remote_nodes;
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
        it != objects.end(); ++it) {
+    const uint64_t node_id = GET_NODE_ID(it->object.partition_id);
+    if (node_id != g_node_id) {
+      remote_nodes.insert(node_id);
+      continue;
+    }
+
     Row_life *manager = it->manager;
     if (manager == NULL)
       manager = lookup_life_row(it->object)->manager;
@@ -528,6 +715,28 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
     if (result.code == LifeResultCode::Retry)
       observed_attempt = result.observed_attempt;
     reset_life_descriptor(descriptor, observed_attempt);
+    return false;
+  }
+
+  if (!remote_nodes.empty()) {
+    const bool owns_descriptor =
+        descriptor.pid == txn->life_pid &&
+        descriptor.tid.time == txn->life_tid.time;
+    if (!owns_descriptor) {
+      rollback_life_descriptor(descriptor);
+      return false;
+    }
+
+    life_finalize_waiting = true;
+    life_prepare_pending = remote_nodes.size();
+    life_finish_pending = 0;
+    life_prepare_failed = false;
+    life_prepare_observed_attempt = descriptor.tid.attempt;
+    life_pending_finalize = descriptor;
+    life_pending_finalize.touched_objects = objects;
+    life_pending_objects = objects;
+    life_pending_remote_nodes.assign(remote_nodes.begin(), remote_nodes.end());
+    send_life_prepare_messages(life_pending_finalize, life_pending_remote_nodes);
     return false;
   }
 
