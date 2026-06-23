@@ -197,6 +197,86 @@ public:
   uint64_t txn_id;
 };
 
+class LifeExecuteMessage : public Message {
+public:
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *txn);
+  void copy_to_txn(TxnManager *txn);
+  uint64_t get_size();
+  void init() {}
+  void release() {}
+
+  LifeTxnDescriptor descriptor;
+  LifeOperation operation;
+};
+
+class LifeExecuteResponseMessage : public Message {
+public:
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *txn);
+  void copy_to_txn(TxnManager *txn);
+  uint64_t get_size();
+  void init() {}
+  void release() {}
+
+  LifeExecuteResult result;
+};
+
+class LifePrepareMessage : public Message {
+public:
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *txn);
+  void copy_to_txn(TxnManager *txn);
+  uint64_t get_size();
+  void init() {}
+  void release() {}
+
+  LifeTxnDescriptor descriptor;
+};
+
+class LifePrepareResponseMessage : public Message {
+public:
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *txn);
+  void copy_to_txn(TxnManager *txn);
+  uint64_t get_size();
+  void init() {}
+  void release() {}
+
+  LifeExecuteResult result;
+};
+
+class LifeFinishMessage : public Message {
+public:
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *txn);
+  void copy_to_txn(TxnManager *txn);
+  uint64_t get_size();
+  void init() {}
+  void release() {}
+
+  LifeTxnDescriptor descriptor;
+  RC decision;
+};
+
+class LifeFinishResponseMessage : public Message {
+public:
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *txn);
+  void copy_to_txn(TxnManager *txn);
+  uint64_t get_size();
+  void init() {}
+  void release() {}
+
+  LifeExecuteResult result;
+};
+
 class ForwardMessage : public Message {
 public:
   void copy_from_buf(char * buf);

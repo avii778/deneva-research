@@ -17,37 +17,38 @@
 #ifndef _GLOBAL_H_
 #define _GLOBAL_H_
 
+#include "life_types.h"
 #define __STDC_LIMIT_MACROS
-#include <stdint.h>
-#include <unistd.h>
+#include <cassert>
 #include <cstddef>
 #include <cstdlib>
-#include <cassert>
-#include <stdio.h>
-#include <iostream>
 #include <fstream>
-#include <string.h>
-#include <typeinfo>
+#include <iostream>
 #include <list>
 #include <map>
-#include <set>
-#include <queue>
-#include <string>
-#include <vector>
-#include <sstream>
-#include <time.h> 
-#include <sys/time.h>
 #include <math.h>
+#include <queue>
+#include <set>
+#include <sstream>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <string>
+#include <sys/time.h>
+#include <time.h>
+#include <typeinfo>
+#include <unistd.h>
+#include <vector>
 
-#include "pthread.h"
 #include "config.h"
+#include "pthread.h"
 #include "stats.h"
-//#include "work_queue.h"
-#include "pool.h"
-#include "txn_table.h"
+// #include "work_queue.h"
 #include "logger.h"
+#include "pool.h"
 #include "sim_manager.h"
-//#include "maat.h"
+#include "txn_table.h"
+// #include "maat.h"
 
 using namespace std;
 
@@ -85,11 +86,11 @@ typedef int64_t SInt64;
 typedef uint64_t ts_t; // time stamp type
 
 /******************************************/
-// Global Data Structure 
+// Global Data Structure
 /******************************************/
 extern mem_alloc mem_allocator;
 extern Stats stats;
-extern SimManager * simulation;
+extern SimManager *simulation;
 extern Manager glob_manager;
 extern Query_queue query_queue;
 extern Client_query_queue client_query_queue;
@@ -117,7 +118,7 @@ extern bool volatile enable_thread_mem_pool;
 extern pthread_barrier_t warmup_bar;
 
 /******************************************/
-// Client Global Params 
+// Client Global Params
 /******************************************/
 extern UInt32 g_client_thread_cnt;
 extern UInt32 g_client_rem_thread_cnt;
@@ -151,8 +152,8 @@ extern UInt32 g_abort_thread_cnt;
 extern UInt32 g_logger_thread_cnt;
 extern UInt32 g_send_thread_cnt;
 extern UInt32 g_rem_thread_cnt;
-extern ts_t g_abort_penalty; 
-extern ts_t g_abort_penalty_max; 
+extern ts_t g_abort_penalty;
+extern ts_t g_abort_penalty_max;
 extern bool g_central_man;
 extern UInt32 g_ts_alloc;
 extern bool g_key_order;
@@ -204,9 +205,9 @@ extern double g_mpitem;
 extern UInt32 g_num_wh;
 extern double g_perc_payment;
 extern bool g_wh_update;
-extern char * output_file;
-extern char * input_file;
-extern char * txn_file;
+extern char *output_file;
+extern char *input_file;
+extern char *txn_file;
 extern UInt32 g_max_items;
 extern UInt32 g_dist_per_wh;
 extern UInt32 g_cust_per_dist;
@@ -233,36 +234,68 @@ extern UInt32 g_seq_thread_cnt;
 extern UInt32 g_repl_type;
 extern UInt32 g_repl_cnt;
 
-enum RC { RCOK=0, Commit, Abort, WAIT, WAIT_REM, ERROR, FINISH, NONE };
-enum RemReqType {INIT_DONE=0,
-    RLK,
-    RULK,
-    CL_QRY,
-    RQRY,
-    RQRY_CONT,
-    RFIN,
-    RLK_RSP,
-    RULK_RSP,
-    RQRY_RSP,
-    RACK,
-    RACK_PREP,
-    RACK_FIN,
-    RTXN,
-    RTXN_CONT,
-    RINIT,
-    RPREPARE,
-    RPASS,
-    RFWD,
-    RDONE,
-    CL_RSP,
-    LOG_MSG,
-    LOG_MSG_RSP,
-    LOG_FLUSHED,
-    CALVIN_ACK,
-    NO_MSG};
+enum RC { RCOK = 0, Commit, Abort, WAIT, WAIT_REM, ERROR, FINISH, NONE };
+enum RemReqType {
+  INIT_DONE = 0,
+  RLK,
+  RULK,
+  CL_QRY,
+  RQRY,
+  RQRY_CONT,
+  RFIN,
+  RLK_RSP,
+  RULK_RSP,
+  RQRY_RSP,
+  RACK,
+  RACK_PREP,
+  RACK_FIN,
+  RTXN,
+  RTXN_CONT,
+  RINIT,
+  RPREPARE,
+  RPASS,
+  RFWD,
+  RDONE,
+  CL_RSP,
+  LOG_MSG,
+  LOG_MSG_RSP,
+  LOG_FLUSHED,
+  CALVIN_ACK,
+  RLIFE_EXECUTE,
+  RLIFE_EXECUTE_RSP,
+  RLIFE_PREPARE,
+  RLIFE_PREPARE_RSP,
+  RLIFE_FINISH,
+  RLIFE_FINISH_RSP,
+  NO_MSG
+};
 
 // Calvin
-enum CALVIN_PHASE {CALVIN_RW_ANALYSIS=0,CALVIN_LOC_RD,CALVIN_SERVE_RD,CALVIN_COLLECT_RD,CALVIN_EXEC_WR,CALVIN_DONE};
+enum CALVIN_PHASE {
+  CALVIN_RW_ANALYSIS = 0,
+  CALVIN_LOC_RD,
+  CALVIN_SERVE_RD,
+  CALVIN_COLLECT_RD,
+  CALVIN_EXEC_WR,
+  CALVIN_DONE
+};
+
+// LIFE
+
+struct LifeRemoteExecuteMsg {
+  LifeTxnId txn_id;
+  LifeTxnDescriptor txn_desc;
+};
+
+struct LifeRemotePrepareMsg {
+  LifeTxnId txn_id;
+  LifeTxnDescriptor txn_desc;
+};
+
+struct LifeRemoteCommitMsg {
+  LifeTxnId txn_id;
+  LifeTxnDescriptor txn_desc;
+};
 
 /* Thread */
 typedef uint64_t txnid_t;
@@ -271,35 +304,38 @@ typedef uint64_t txnid_t;
 typedef uint64_t txn_t;
 
 /* Table and Row */
-typedef uint64_t rid_t; // row id
+typedef uint64_t rid_t;  // row id
 typedef uint64_t pgid_t; // page id
 
-
-
 /* INDEX */
-enum latch_t {LATCH_EX, LATCH_SH, LATCH_NONE};
+enum latch_t { LATCH_EX, LATCH_SH, LATCH_NONE };
 // accessing type determines the latch type on nodes
-enum idx_acc_t {INDEX_INSERT, INDEX_READ, INDEX_NONE};
-typedef uint64_t idx_key_t; // key id for index
-typedef uint64_t (*func_ptr)(idx_key_t);	// part_id func_ptr(index_key);
+enum idx_acc_t { INDEX_INSERT, INDEX_READ, INDEX_NONE };
+typedef uint64_t idx_key_t;              // key id for index
+typedef uint64_t (*func_ptr)(idx_key_t); // part_id func_ptr(index_key);
 
 /* general concurrency control */
-enum access_t {RD, WR, XP, SCAN};
+enum access_t { RD, WR, XP, SCAN };
 /* LOCK */
-enum lock_t {LOCK_EX = 0, LOCK_SH, LOCK_NONE };
+enum lock_t { LOCK_EX = 0, LOCK_SH, LOCK_NONE };
 /* TIMESTAMP */
-enum TsType {R_REQ = 0, W_REQ, P_REQ, XP_REQ}; 
+enum TsType { R_REQ = 0, W_REQ, P_REQ, XP_REQ };
 
-#define GET_THREAD_ID(id)	(id % g_thread_cnt)
-#define GET_NODE_ID(id)	(id % g_node_cnt)
-#define GET_PART_ID(t,n)	(n) 
-#define GET_PART_ID_FROM_IDX(idx)	(g_node_id + idx * g_node_cnt) 
-#define GET_PART_ID_IDX(p)	(p / g_node_cnt) 
+#define GET_THREAD_ID(id) (id % g_thread_cnt)
+#define GET_NODE_ID(id) (id % g_node_cnt)
+#define GET_PART_ID(t, n) (n)
+#define GET_PART_ID_FROM_IDX(idx) (g_node_id + idx * g_node_cnt)
+#define GET_PART_ID_IDX(p) (p / g_node_cnt)
 #define ISSERVER (g_node_id < g_node_cnt)
 #define ISSERVERN(id) (id < g_node_cnt)
-#define ISCLIENT (g_node_id >= g_node_cnt && g_node_id < g_node_cnt + g_client_node_cnt)
-#define ISREPLICA (g_node_id >= g_node_cnt + g_client_node_cnt && g_node_id < g_node_cnt + g_client_node_cnt + g_repl_cnt * g_node_cnt)
-#define ISREPLICAN(id) (id >= g_node_cnt + g_client_node_cnt && id < g_node_cnt + g_client_node_cnt + g_repl_cnt * g_node_cnt)
+#define ISCLIENT                                                               \
+  (g_node_id >= g_node_cnt && g_node_id < g_node_cnt + g_client_node_cnt)
+#define ISREPLICA                                                              \
+  (g_node_id >= g_node_cnt + g_client_node_cnt &&                              \
+   g_node_id < g_node_cnt + g_client_node_cnt + g_repl_cnt * g_node_cnt)
+#define ISREPLICAN(id)                                                         \
+  (id >= g_node_cnt + g_client_node_cnt &&                                     \
+   id < g_node_cnt + g_client_node_cnt + g_repl_cnt * g_node_cnt)
 #define ISCLIENTN(id) (id >= g_node_cnt && id < g_node_cnt + g_client_node_cnt)
 #define IS_LOCAL(tid) (tid % g_node_cnt == g_node_id || CC_ALG == CALVIN)
 #define IS_REMOTE(tid) (tid % g_node_cnt != g_node_id || CC_ALG == CALVIN)
@@ -308,26 +344,29 @@ enum TsType {R_REQ = 0, W_REQ, P_REQ, XP_REQ};
 /*
 #define GET_THREAD_ID(id)	(id % g_thread_cnt)
 #define GET_NODE_ID(id)	(id / g_thread_cnt)
-#define GET_PART_ID(t,n)	(n*g_thread_cnt + t) 
+#define GET_PART_ID(t,n)	(n*g_thread_cnt + t)
 */
 
-#define MSG(str, args...) { \
-	printf("[%s : %d] " str, __FILE__, __LINE__, args); } \
+#define MSG(str, args...)                                                      \
+  {                                                                            \
+    printf("[%s : %d] " str, __FILE__, __LINE__, args);                        \
+  }                                                                            \
 //	printf(args); }
 
-// principal index structure. The workload may decide to use a different 
-// index structure for specific purposes. (e.g. non-primary key access should use hash)
+// principal index structure. The workload may decide to use a different
+// index structure for specific purposes. (e.g. non-primary key access should
+// use hash)
 #if (INDEX_STRUCT == IDX_BTREE)
-#define INDEX		index_btree
-#else  // IDX_HASH
-#define INDEX		IndexHash
+#define INDEX index_btree
+#else // IDX_HASH
+#define INDEX IndexHash
 #endif
 
 /************************************************/
 // constants
 /************************************************/
 #ifndef UINT64_MAX
-#define UINT64_MAX 		18446744073709551615UL
+#define UINT64_MAX 18446744073709551615UL
 #endif // UINT64_MAX
 
 #endif

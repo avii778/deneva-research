@@ -26,6 +26,268 @@
 #include "message.h"
 #include "maat.h"
 
+namespace {
+
+uint64_t life_bytes_size(const LifeBytes &bytes) {
+  return sizeof(uint8_t) + bytes.size();
+}
+
+void life_write_bytes(char *buf, uint64_t &ptr, const LifeBytes &bytes) {
+  const uint8_t size = static_cast<uint8_t>(bytes.size());
+  COPY_BUF(buf, size, ptr);
+  if (size > 0) {
+    memcpy(&buf[ptr], bytes.data(), size);
+    ptr += size;
+  }
+}
+
+void life_read_bytes(char *buf, uint64_t &ptr, LifeBytes &bytes) {
+  uint8_t size;
+  COPY_VAL(size, buf, ptr);
+  assert(size <= LIFE_INLINE_VALUE_CAPACITY);
+
+  uint8_t data[LIFE_INLINE_VALUE_CAPACITY];
+  if (size > 0) {
+    memcpy(data, &buf[ptr], size);
+    ptr += size;
+  }
+  bytes.assign(data, data + size);
+}
+
+uint64_t life_object_id_size() {
+  return sizeof(uint64_t) * 3;
+}
+
+void life_write_object_id(char *buf, uint64_t &ptr,
+                          const LifeObjectId &object) {
+  COPY_BUF(buf, object.table_id, ptr);
+  COPY_BUF(buf, object.partition_id, ptr);
+  COPY_BUF(buf, object.primary_key, ptr);
+}
+
+void life_read_object_id(char *buf, uint64_t &ptr, LifeObjectId &object) {
+  COPY_VAL(object.table_id, buf, ptr);
+  COPY_VAL(object.partition_id, buf, ptr);
+  COPY_VAL(object.primary_key, buf, ptr);
+}
+
+uint64_t life_operation_size(const LifeOperation &operation) {
+  return life_object_id_size() + sizeof(uint32_t) + sizeof(uint32_t) +
+         sizeof(uint8_t) + life_bytes_size(operation.argument);
+}
+
+void life_write_operation(char *buf, uint64_t &ptr,
+                          const LifeOperation &operation) {
+  life_write_object_id(buf, ptr, operation.object);
+  const uint32_t kind = static_cast<uint32_t>(operation.kind);
+  COPY_BUF(buf, kind, ptr);
+  COPY_BUF(buf, operation.field_id, ptr);
+  COPY_BUF(buf, operation.value_size, ptr);
+  life_write_bytes(buf, ptr, operation.argument);
+}
+
+void life_read_operation(char *buf, uint64_t &ptr, LifeOperation &operation) {
+  life_read_object_id(buf, ptr, operation.object);
+  uint32_t kind;
+  COPY_VAL(kind, buf, ptr);
+  operation.kind = static_cast<LifeOperationKind>(kind);
+  COPY_VAL(operation.field_id, buf, ptr);
+  COPY_VAL(operation.value_size, buf, ptr);
+  life_read_bytes(buf, ptr, operation.argument);
+  operation.manager = NULL;
+}
+
+uint64_t life_response_size(const LifeResponse &response) {
+  return life_bytes_size(response.value);
+}
+
+void life_write_response(char *buf, uint64_t &ptr,
+                         const LifeResponse &response) {
+  life_write_bytes(buf, ptr, response.value);
+}
+
+void life_read_response(char *buf, uint64_t &ptr, LifeResponse &response) {
+  life_read_bytes(buf, ptr, response.value);
+}
+
+uint64_t life_history_entry_size(const LifeHistoryEntry &entry) {
+  return life_operation_size(entry.operation) + life_response_size(entry.response);
+}
+
+void life_write_history_entry(char *buf, uint64_t &ptr,
+                              const LifeHistoryEntry &entry) {
+  life_write_operation(buf, ptr, entry.operation);
+  life_write_response(buf, ptr, entry.response);
+}
+
+void life_read_history_entry(char *buf, uint64_t &ptr,
+                             LifeHistoryEntry &entry) {
+  life_read_operation(buf, ptr, entry.operation);
+  life_read_response(buf, ptr, entry.response);
+}
+
+uint64_t life_ycsb_request_size() {
+  return sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint8_t);
+}
+
+void life_write_ycsb_request(char *buf, uint64_t &ptr,
+                             const LifeYcsbRequest &request) {
+  const uint32_t kind = static_cast<uint32_t>(request.kind);
+  COPY_BUF(buf, kind, ptr);
+  COPY_BUF(buf, request.key, ptr);
+  COPY_BUF(buf, request.value, ptr);
+}
+
+void life_read_ycsb_request(char *buf, uint64_t &ptr,
+                            LifeYcsbRequest &request) {
+  uint32_t kind;
+  COPY_VAL(kind, buf, ptr);
+  request.kind = static_cast<LifeYcsbRequestKind>(kind);
+  COPY_VAL(request.key, buf, ptr);
+  COPY_VAL(request.value, buf, ptr);
+  request.row = NULL;
+}
+
+uint64_t life_history_indices_size(const LifeHistoryIndices &indices) {
+  return sizeof(size_t) + sizeof(size_t) * indices.size();
+}
+
+void life_write_history_indices(char *buf, uint64_t &ptr,
+                                const LifeHistoryIndices &indices) {
+  const size_t size = indices.size();
+  COPY_BUF(buf, size, ptr);
+  for (size_t i = 0; i < size; ++i) {
+    const size_t index = indices[i];
+    COPY_BUF(buf, index, ptr);
+  }
+}
+
+void life_read_history_indices(char *buf, uint64_t &ptr,
+                               LifeHistoryIndices &indices) {
+  size_t size;
+  COPY_VAL(size, buf, ptr);
+  indices = LifeHistoryIndices();
+  for (size_t i = 0; i < size; ++i) {
+    size_t index;
+    COPY_VAL(index, buf, ptr);
+    indices.push_back(index);
+  }
+}
+
+uint64_t life_touched_object_size(
+    const LifeTxnDescriptor::TouchedObject &object) {
+  return life_object_id_size() + life_history_indices_size(object.history_indices);
+}
+
+void life_write_touched_object(
+    char *buf, uint64_t &ptr, const LifeTxnDescriptor::TouchedObject &object) {
+  life_write_object_id(buf, ptr, object.object);
+  life_write_history_indices(buf, ptr, object.history_indices);
+}
+
+void life_read_touched_object(char *buf, uint64_t &ptr,
+                              LifeTxnDescriptor::TouchedObject &object) {
+  life_read_object_id(buf, ptr, object.object);
+  life_read_history_indices(buf, ptr, object.history_indices);
+  object.manager = NULL;
+}
+
+uint64_t life_descriptor_size(const LifeTxnDescriptor &descriptor) {
+  uint64_t size = sizeof(uint32_t) * 2 + sizeof(uint64_t) * 2;
+  size += sizeof(uint32_t) + sizeof(uint64_t);
+
+  size += sizeof(size_t);
+  for (size_t i = 0; i < descriptor.history.size(); ++i)
+    size += life_history_entry_size(descriptor.history[i]);
+
+  size += sizeof(size_t);
+  for (size_t i = 0; i < descriptor.ycsb.requests.size(); ++i)
+    size += life_ycsb_request_size();
+
+  size += sizeof(size_t);
+  for (size_t i = 0; i < descriptor.touched_objects.size(); ++i)
+    size += life_touched_object_size(descriptor.touched_objects[i]);
+
+  return size;
+}
+
+void life_write_descriptor(char *buf, uint64_t &ptr,
+                           const LifeTxnDescriptor &descriptor) {
+  COPY_BUF(buf, descriptor.pid.node_id, ptr);
+  COPY_BUF(buf, descriptor.pid.worker_id, ptr);
+  COPY_BUF(buf, descriptor.tid.time, ptr);
+  COPY_BUF(buf, descriptor.tid.attempt, ptr);
+  COPY_BUF(buf, descriptor.ycsb.state, ptr);
+  COPY_BUF(buf, descriptor.ycsb.next_record_id, ptr);
+
+  size_t size = descriptor.history.size();
+  COPY_BUF(buf, size, ptr);
+  for (size_t i = 0; i < descriptor.history.size(); ++i)
+    life_write_history_entry(buf, ptr, descriptor.history[i]);
+
+  size = descriptor.ycsb.requests.size();
+  COPY_BUF(buf, size, ptr);
+  for (size_t i = 0; i < descriptor.ycsb.requests.size(); ++i)
+    life_write_ycsb_request(buf, ptr, descriptor.ycsb.requests[i]);
+
+  size = descriptor.touched_objects.size();
+  COPY_BUF(buf, size, ptr);
+  for (size_t i = 0; i < descriptor.touched_objects.size(); ++i)
+    life_write_touched_object(buf, ptr, descriptor.touched_objects[i]);
+}
+
+void life_read_descriptor(char *buf, uint64_t &ptr,
+                          LifeTxnDescriptor &descriptor) {
+  descriptor = LifeTxnDescriptor();
+  COPY_VAL(descriptor.pid.node_id, buf, ptr);
+  COPY_VAL(descriptor.pid.worker_id, buf, ptr);
+  COPY_VAL(descriptor.tid.time, buf, ptr);
+  COPY_VAL(descriptor.tid.attempt, buf, ptr);
+  COPY_VAL(descriptor.ycsb.state, buf, ptr);
+  COPY_VAL(descriptor.ycsb.next_record_id, buf, ptr);
+
+  size_t size;
+  COPY_VAL(size, buf, ptr);
+  descriptor.history.resize(size);
+  for (size_t i = 0; i < size; ++i)
+    life_read_history_entry(buf, ptr, descriptor.history[i]);
+
+  COPY_VAL(size, buf, ptr);
+  descriptor.ycsb.requests.resize(size);
+  for (size_t i = 0; i < size; ++i)
+    life_read_ycsb_request(buf, ptr, descriptor.ycsb.requests[i]);
+
+  COPY_VAL(size, buf, ptr);
+  descriptor.touched_objects.resize(size);
+  for (size_t i = 0; i < size; ++i)
+    life_read_touched_object(buf, ptr, descriptor.touched_objects[i]);
+}
+
+uint64_t life_result_size(const LifeExecuteResult &result) {
+  return sizeof(uint32_t) + life_response_size(result.response) +
+         life_descriptor_size(result.transaction) + sizeof(uint64_t);
+}
+
+void life_write_result(char *buf, uint64_t &ptr,
+                       const LifeExecuteResult &result) {
+  const uint32_t code = static_cast<uint32_t>(result.code);
+  COPY_BUF(buf, code, ptr);
+  life_write_response(buf, ptr, result.response);
+  life_write_descriptor(buf, ptr, result.transaction);
+  COPY_BUF(buf, result.observed_attempt, ptr);
+}
+
+void life_read_result(char *buf, uint64_t &ptr, LifeExecuteResult &result) {
+  uint32_t code;
+  COPY_VAL(code, buf, ptr);
+  result.code = static_cast<LifeResultCode>(code);
+  life_read_response(buf, ptr, result.response);
+  life_read_descriptor(buf, ptr, result.transaction);
+  COPY_VAL(result.observed_attempt, buf, ptr);
+}
+
+} // namespace
+
 std::vector<Message*> * Message::create_messages(char * buf) {
   std::vector<Message*> * all_msgs = new std::vector<Message*>;
   char * data = buf;
@@ -160,6 +422,24 @@ Message * Message::create_message(RemReqType rtype) {
       break;
     case RPREPARE:
       msg = new PrepareMessage;
+      break;
+    case RLIFE_EXECUTE:
+      msg = new LifeExecuteMessage;
+      break;
+    case RLIFE_EXECUTE_RSP:
+      msg = new LifeExecuteResponseMessage;
+      break;
+    case RLIFE_PREPARE:
+      msg = new LifePrepareMessage;
+      break;
+    case RLIFE_PREPARE_RSP:
+      msg = new LifePrepareResponseMessage;
+      break;
+    case RLIFE_FINISH:
+      msg = new LifeFinishMessage;
+      break;
+    case RLIFE_FINISH_RSP:
+      msg = new LifeFinishResponseMessage;
       break;
     case RFWD:
       msg = new ForwardMessage;
@@ -348,6 +628,42 @@ void Message::release_message(Message * msg) {
       delete m_msg;
       break;
                    }
+    case RLIFE_EXECUTE: {
+      LifeExecuteMessage *m_msg = (LifeExecuteMessage *)msg;
+      m_msg->release();
+      delete m_msg;
+      break;
+    }
+    case RLIFE_EXECUTE_RSP: {
+      LifeExecuteResponseMessage *m_msg = (LifeExecuteResponseMessage *)msg;
+      m_msg->release();
+      delete m_msg;
+      break;
+    }
+    case RLIFE_PREPARE: {
+      LifePrepareMessage *m_msg = (LifePrepareMessage *)msg;
+      m_msg->release();
+      delete m_msg;
+      break;
+    }
+    case RLIFE_PREPARE_RSP: {
+      LifePrepareResponseMessage *m_msg = (LifePrepareResponseMessage *)msg;
+      m_msg->release();
+      delete m_msg;
+      break;
+    }
+    case RLIFE_FINISH: {
+      LifeFinishMessage *m_msg = (LifeFinishMessage *)msg;
+      m_msg->release();
+      delete m_msg;
+      break;
+    }
+    case RLIFE_FINISH_RSP: {
+      LifeFinishResponseMessage *m_msg = (LifeFinishResponseMessage *)msg;
+      m_msg->release();
+      delete m_msg;
+      break;
+    }
     case RFWD: {
       ForwardMessage * m_msg = (ForwardMessage*)msg;
       m_msg->release();
@@ -1050,6 +1366,169 @@ void PrepareMessage::copy_to_buf(char * buf) {
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
  assert(ptr == get_size());
+}
+
+/************************/
+
+uint64_t LifeExecuteMessage::get_size() {
+  return Message::mget_size() + life_descriptor_size(descriptor) +
+         life_operation_size(operation);
+}
+
+void LifeExecuteMessage::copy_from_txn(TxnManager *txn) {
+  (void)txn;
+}
+
+void LifeExecuteMessage::copy_to_txn(TxnManager *txn) {
+  Message::mcopy_to_txn(txn);
+}
+
+void LifeExecuteMessage::copy_from_buf(char *buf) {
+  Message::mcopy_from_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_read_descriptor(buf, ptr, descriptor);
+  life_read_operation(buf, ptr, operation);
+  assert(ptr == get_size());
+}
+
+void LifeExecuteMessage::copy_to_buf(char *buf) {
+  Message::mcopy_to_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_write_descriptor(buf, ptr, descriptor);
+  life_write_operation(buf, ptr, operation);
+  assert(ptr == get_size());
+}
+
+uint64_t LifeExecuteResponseMessage::get_size() {
+  return Message::mget_size() + life_result_size(result);
+}
+
+void LifeExecuteResponseMessage::copy_from_txn(TxnManager *txn) {
+  (void)txn;
+}
+
+void LifeExecuteResponseMessage::copy_to_txn(TxnManager *txn) {
+  Message::mcopy_to_txn(txn);
+}
+
+void LifeExecuteResponseMessage::copy_from_buf(char *buf) {
+  Message::mcopy_from_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_read_result(buf, ptr, result);
+  assert(ptr == get_size());
+}
+
+void LifeExecuteResponseMessage::copy_to_buf(char *buf) {
+  Message::mcopy_to_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_write_result(buf, ptr, result);
+  assert(ptr == get_size());
+}
+
+uint64_t LifePrepareMessage::get_size() {
+  return Message::mget_size() + life_descriptor_size(descriptor);
+}
+
+void LifePrepareMessage::copy_from_txn(TxnManager *txn) {
+  (void)txn;
+}
+
+void LifePrepareMessage::copy_to_txn(TxnManager *txn) {
+  Message::mcopy_to_txn(txn);
+}
+
+void LifePrepareMessage::copy_from_buf(char *buf) {
+  Message::mcopy_from_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_read_descriptor(buf, ptr, descriptor);
+  assert(ptr == get_size());
+}
+
+void LifePrepareMessage::copy_to_buf(char *buf) {
+  Message::mcopy_to_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_write_descriptor(buf, ptr, descriptor);
+  assert(ptr == get_size());
+}
+
+uint64_t LifePrepareResponseMessage::get_size() {
+  return Message::mget_size() + life_result_size(result);
+}
+
+void LifePrepareResponseMessage::copy_from_txn(TxnManager *txn) {
+  (void)txn;
+}
+
+void LifePrepareResponseMessage::copy_to_txn(TxnManager *txn) {
+  Message::mcopy_to_txn(txn);
+}
+
+void LifePrepareResponseMessage::copy_from_buf(char *buf) {
+  Message::mcopy_from_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_read_result(buf, ptr, result);
+  assert(ptr == get_size());
+}
+
+void LifePrepareResponseMessage::copy_to_buf(char *buf) {
+  Message::mcopy_to_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_write_result(buf, ptr, result);
+  assert(ptr == get_size());
+}
+
+uint64_t LifeFinishMessage::get_size() {
+  return Message::mget_size() + life_descriptor_size(descriptor) + sizeof(RC);
+}
+
+void LifeFinishMessage::copy_from_txn(TxnManager *txn) {
+  (void)txn;
+}
+
+void LifeFinishMessage::copy_to_txn(TxnManager *txn) {
+  Message::mcopy_to_txn(txn);
+}
+
+void LifeFinishMessage::copy_from_buf(char *buf) {
+  Message::mcopy_from_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_read_descriptor(buf, ptr, descriptor);
+  COPY_VAL(decision, buf, ptr);
+  assert(ptr == get_size());
+}
+
+void LifeFinishMessage::copy_to_buf(char *buf) {
+  Message::mcopy_to_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_write_descriptor(buf, ptr, descriptor);
+  COPY_BUF(buf, decision, ptr);
+  assert(ptr == get_size());
+}
+
+uint64_t LifeFinishResponseMessage::get_size() {
+  return Message::mget_size() + life_result_size(result);
+}
+
+void LifeFinishResponseMessage::copy_from_txn(TxnManager *txn) {
+  (void)txn;
+}
+
+void LifeFinishResponseMessage::copy_to_txn(TxnManager *txn) {
+  Message::mcopy_to_txn(txn);
+}
+
+void LifeFinishResponseMessage::copy_from_buf(char *buf) {
+  Message::mcopy_from_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_read_result(buf, ptr, result);
+  assert(ptr == get_size());
+}
+
+void LifeFinishResponseMessage::copy_to_buf(char *buf) {
+  Message::mcopy_to_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_write_result(buf, ptr, result);
+  assert(ptr == get_size());
 }
 
 /************************/
@@ -1765,4 +2244,3 @@ void PPSQueryMessage::copy_to_buf(char * buf) {
  assert(ptr == get_size());
 
 }
-
