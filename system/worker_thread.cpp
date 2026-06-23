@@ -21,6 +21,7 @@
 #include "txn.h"
 #include "wl.h"
 #include "query.h"
+#include "ycsb.h"
 #include "ycsb_query.h"
 #include "tpcc_query.h"
 #include "math.h"
@@ -67,6 +68,14 @@ void WorkerThread::process(Message * msg) {
 			case RQRY_RSP:
         rc = process_rqry_rsp(msg);
 				break;
+#if CC_ALG == LIFE
+      case RLIFE_EXECUTE:
+        rc = process_life_execute(msg);
+        break;
+      case RLIFE_EXECUTE_RSP:
+        rc = process_life_execute_rsp(msg);
+        break;
+#endif
 			case RFIN: 
         rc = process_rfin(msg);
 				break;
@@ -421,6 +430,50 @@ RC WorkerThread::process_rqry_cont(Message * msg) {
   return rc;
 }
 
+#if CC_ALG == LIFE
+RC WorkerThread::process_life_execute(Message *msg) {
+  DEBUG("RLIFE_EXECUTE %ld\n", msg->get_txn_id());
+  assert(CC_ALG == LIFE);
+  assert(!IS_LOCAL(msg->get_txn_id()));
+
+  LifeExecuteMessage *life_msg = (LifeExecuteMessage *)msg;
+  LifeExecuteResponseMessage *response =
+      (LifeExecuteResponseMessage *)Message::create_message(RLIFE_EXECUTE_RSP);
+  response->txn_id = msg->get_txn_id();
+  response->result =
+      ((YCSBTxnManager *)txn_man)
+          ->execute_life_remote(life_msg->descriptor, life_msg->operation);
+
+  if (response->result.code == LifeResultCode::Success) {
+    response->result.transaction = life_msg->descriptor;
+    response->result.transaction.ycsb.next_record_id++;
+    response->result.transaction.ycsb.state =
+        response->result.transaction.ycsb.next_record_id ==
+                response->result.transaction.ycsb.requests.size()
+            ? YCSB_FIN
+            : YCSB_0;
+  }
+
+  msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
+  return RCOK;
+}
+
+RC WorkerThread::process_life_execute_rsp(Message *msg) {
+  DEBUG("RLIFE_EXECUTE_RSP %ld\n", msg->get_txn_id());
+  assert(CC_ALG == LIFE);
+  assert(IS_LOCAL(msg->get_txn_id()));
+
+  txn_man->txn_stats.remote_wait_time +=
+      get_sys_clock() - txn_man->txn_stats.wait_starttime;
+
+  LifeExecuteResponseMessage *life_msg = (LifeExecuteResponseMessage *)msg;
+  RC rc = ((YCSBTxnManager *)txn_man)
+              ->apply_life_execute_response(life_msg->result);
+  check_if_done(rc);
+  return rc;
+}
+#endif
+
 
 RC WorkerThread::process_rtxn_cont(Message * msg) {
   DEBUG("RTXN_CONT %ld\n",msg->get_txn_id());
@@ -605,5 +658,3 @@ ts_t WorkerThread::get_next_ts() {
 		return _curr_ts;
 	}
 }
-
-

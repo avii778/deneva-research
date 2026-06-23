@@ -40,6 +40,8 @@ public:
     RC process_rqry_rsp(Message * msg);
     RC process_rqry(Message * msg);
     RC process_rqry_cont(Message * msg);
+    RC process_life_execute(Message *msg);
+    RC process_life_execute_rsp(Message *msg);
     RC process_rinit(Message * msg);
     RC process_rprepare(Message * msg);
     RC process_rpass(Message * msg);

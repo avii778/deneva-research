@@ -65,6 +65,11 @@ public:
   RC run_calvin_txn();
   LifeTxnDescriptor life_descriptor() const;
   void life_reset_workload();
+  RC send_life_execute(const LifeTxnDescriptor &descriptor,
+                       const LifeOperation &operation);
+  LifeExecuteResult execute_life_remote(const LifeTxnDescriptor &descriptor,
+                                        const LifeOperation &operation);
+  RC apply_life_execute_response(const LifeExecuteResult &result);
   void copy_remote_requests(YCSBQueryMessage *msg);
 
 private:
@@ -82,6 +87,7 @@ private:
   void rollback_life_descriptor(const LifeTxnDescriptor &descriptor);
   void collect_life_objects(const LifeTxnDescriptor &descriptor,
                             std::vector<LifeFinalizeObject> &objects);
+  void copy_life_descriptor_to_workload(const LifeTxnDescriptor &descriptor);
   row_t *lookup_life_row(const LifeObjectId &object) const;
   row_t *lookup_life_row(uint64_t key) const;
   LifeOperation make_life_operation(row_t *row, ycsb_request *req);

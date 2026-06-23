@@ -208,12 +208,15 @@ RC YCSBTxnManager::run_life_txn() {
   txns.reserve(g_req_per_query);
   txns.push_back(life_descriptor());
 
-  try_life_transactions(txns);
+  const bool complete = try_life_transactions(txns);
 
   uint64_t curr_time = get_sys_clock();
   txn_stats.process_time += curr_time - starttime;
   txn_stats.process_time_short += curr_time - starttime;
   txn_stats.wait_starttime = get_sys_clock();
+
+  if (!complete)
+    return WAIT_REM;
 
   txn->life_status = LifeTxnStatus::Committed;
 #if LOG_LIFE
@@ -254,6 +257,29 @@ bool YCSBTxnManager::try_life_transactions(
         txns.pop_back();
       }
       continue;
+    }
+
+    const LifeYcsbRequest &request = ctx.ycsb.requests[ctx.ycsb.next_record_id];
+    const int part_id = _wl->key_to_part(request.key);
+    if (GET_NODE_ID(part_id) != g_node_id) {
+      LifeOperation operation = LifeOperation();
+      operation.object.table_id = _wl->the_table->get_table_id();
+      operation.object.partition_id = part_id;
+      operation.object.primary_key = request.key;
+      operation.field_id = 0;
+      operation.value_size = sizeof(uint64_t);
+      if (request.kind == LifeYcsbRequestKind::Read ||
+          request.kind == LifeYcsbRequestKind::Scan) {
+        operation.kind = LifeOperationKind::ReadField;
+      } else {
+        assert(request.kind == LifeYcsbRequestKind::Write);
+        operation.kind = LifeOperationKind::WriteField;
+        const uint64_t value = 0;
+        const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&value);
+        operation.argument.assign(bytes, bytes + sizeof(value));
+      }
+      send_life_execute(ctx, operation);
+      return false;
     }
 
     LifeOperation operation;
@@ -339,6 +365,82 @@ YCSBTxnManager::execute_life_operation(LifeTxnDescriptor &descriptor,
   operation = make_life_operation(life_row, request);
 
   return life_row->execute_life(descriptor, operation);
+}
+
+RC YCSBTxnManager::send_life_execute(const LifeTxnDescriptor &descriptor,
+                                     const LifeOperation &operation) {
+  uint64_t dest_node_id = GET_NODE_ID(operation.object.partition_id);
+  assert(dest_node_id != g_node_id);
+  query->partitions_touched.add_unique(operation.object.partition_id);
+
+  LifeExecuteMessage *msg =
+      (LifeExecuteMessage *)Message::create_message(RLIFE_EXECUTE);
+  msg->txn_id = get_txn_id();
+  msg->descriptor = descriptor;
+  msg->operation = operation;
+  msg_queue.enqueue(get_thd_id(), msg, dest_node_id);
+  return WAIT_REM;
+}
+
+LifeExecuteResult
+YCSBTxnManager::execute_life_remote(const LifeTxnDescriptor &descriptor,
+                                    const LifeOperation &operation) {
+  Row_life *manager = operation.manager;
+  if (manager == NULL)
+    manager = lookup_life_row(operation.object)->manager;
+  assert(manager != NULL);
+
+  LifeTxnDescriptor local_descriptor = descriptor;
+  LifeOperation local_operation = operation;
+  local_operation.manager = manager;
+  return manager->execute(local_descriptor, local_operation);
+}
+
+void YCSBTxnManager::copy_life_descriptor_to_workload(
+    const LifeTxnDescriptor &descriptor) {
+  txn->life_tid = descriptor.tid;
+  txn->life_history = descriptor.history;
+  state = static_cast<YCSBRemTxnType>(descriptor.ycsb.state);
+  next_record_id = descriptor.ycsb.next_record_id;
+}
+
+RC YCSBTxnManager::apply_life_execute_response(
+    const LifeExecuteResult &result) {
+  LifeTxnDescriptor descriptor = life_descriptor();
+  descriptor.ycsb = make_life_ycsb_snapshot(*(YCSBQuery *)query, state,
+                                            next_record_id);
+
+  switch (result.code) {
+
+  case LifeResultCode::Success:
+    copy_life_descriptor_to_workload(result.transaction);
+    break;
+
+  case LifeResultCode::Committed:
+  case LifeResultCode::Help:
+  case LifeResultCode::Finalize:
+    // Distributed helping/finalization and stale remote completion handling are
+    // intentionally not wired yet.
+    rollback_life_descriptor(descriptor);
+    return Abort;
+
+  case LifeResultCode::Retry:
+    rollback_life_descriptor(descriptor);
+    descriptor.tid.attempt =
+        std::max(descriptor.tid.attempt, result.observed_attempt) + 1;
+    descriptor.history.clear();
+    descriptor.touched_objects.clear();
+    descriptor.ycsb.next_record_id = 0;
+    descriptor.ycsb.state = YCSB_0;
+    copy_life_descriptor_to_workload(descriptor);
+    break;
+
+  default:
+    assert(false);
+    return Abort;
+  }
+
+  return run_life_txn();
 }
 
 void YCSBTxnManager::collect_life_objects(
