@@ -28,8 +28,9 @@ LifeTxnStatus record_status_or_aborted(const LifeProcessRecord *record) {
 }
 
 size_t record_history_size(const LifeProcessRecord *record) {
-  return record != NULL && record->transaction ? record->transaction->history.size()
-                                               : 0;
+  return record != NULL && record->transaction
+             ? record->transaction->history.size()
+             : 0;
 }
 
 class LifeLatchGuard {
@@ -174,8 +175,8 @@ const LifeObjectId &Row_life::object_id() const {
 
 // Updates state if this is a write, updates response if this is a read
 // according to the operation
-bool Row_life::apply_operation(const LifeOperation &operation,
-                               uint8_t *state, size_t state_size,
+bool Row_life::apply_operation(const LifeOperation &operation, uint8_t *state,
+                               size_t state_size,
                                LifeResponse &response) const {
 
   response.value.clear();
@@ -241,8 +242,7 @@ bool Row_life::replay_history(const LifeTxnDescriptor &tx,
     if (it->operation.object != object_id())
       continue;
     LifeResponse replayed_response;
-    if (!apply_operation(it->operation, state, state_size,
-                         replayed_response) ||
+    if (!apply_operation(it->operation, state, state_size, replayed_response) ||
         replayed_response != it->response)
       return false;
   }
@@ -270,8 +270,8 @@ bool Row_life::validate_committed_operation(
          operation.argument.size() == operation.value_size;
 }
 
-bool Row_life::evaluate_committed_operation(
-    const LifeOperation &operation, LifeResponse &response) const {
+bool Row_life::evaluate_committed_operation(const LifeOperation &operation,
+                                            LifeResponse &response) const {
   response.value.clear();
   if (!validate_committed_operation(operation))
     return false;
@@ -341,6 +341,11 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   const bool same_process_txn_attempt = tx.tid == local_tid;
   const size_t local_history_size = record_history_size(local);
 
+  if (tx.tid.time < local_tid.time ||
+      (same_process_txn_time && local_status == LifeTxnStatus::Committed)) {
+    return make_result(LifeResultCode::Committed);
+  }
+
   const bool must_defer =
       context_status == LifeTxnStatus::Prepared || context_tid < tx.tid ||
       tx.tid.time < local_tid.time || local_has_newer_attempt ||
@@ -375,12 +380,6 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
       result.transaction = *context_transaction;
       return result;
     }
-
-    if (tx.tid.time < local_tid.time)
-      return make_result(LifeResultCode::Committed);
-
-    if (same_process_txn_time && local_status == LifeTxnStatus::Committed)
-      return make_result(LifeResultCode::Committed);
 
     if (local_has_newer_attempt ||
         (same_process_txn_attempt && local_status == LifeTxnStatus::Aborted)) {
@@ -436,8 +435,7 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 
     if (!replay_history(tx, tx_object_history_indices, speculative_state,
                         _tuple_size) ||
-        !apply_operation(operation, speculative_state, _tuple_size,
-                         response)) {
+        !apply_operation(operation, speculative_state, _tuple_size, response)) {
       return make_result(LifeResultCode::InvalidOperation);
     }
   }
