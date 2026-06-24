@@ -560,6 +560,7 @@ void YCSBTxnManager::copy_life_descriptor_to_workload(
     const LifeTxnDescriptor &descriptor) {
   txn->life_tid = descriptor.tid;
   txn->life_history = descriptor.history;
+  txn->life_objects.clear();
   state = static_cast<YCSBRemTxnType>(descriptor.ycsb.state);
   next_record_id = descriptor.ycsb.next_record_id;
 }
@@ -585,6 +586,11 @@ void YCSBTxnManager::send_life_message_to_node(Message *msg, uint64_t node_id) {
 
 void YCSBTxnManager::send_life_help_request(
     const LifeTxnDescriptor &descriptor) {
+  if (GET_NODE_ID(descriptor.tid.time) == g_node_id) {
+    apply_life_help_request(descriptor, UINT64_MAX);
+    return;
+  }
+
   LifeHelpMessage *msg = (LifeHelpMessage *)Message::create_message(RLIFE_HELP);
   msg->txn_id = descriptor.tid.time;
   msg->return_node_id = g_node_id;
@@ -650,9 +656,15 @@ RC YCSBTxnManager::apply_life_execute_response(
 
   switch (result.code) {
 
-  case LifeResultCode::Success:
+  case LifeResultCode::Success: {
+    const LifeTxnDescriptor &response = result.transaction;
+    const bool owns_response =
+        response.pid == txn->life_pid && response.tid == txn->life_tid;
+    if (!owns_response)
+      return run_life_txn();
     copy_life_descriptor_to_workload(result.transaction);
     break;
+  }
 
   case LifeResultCode::Committed:
     rollback_life_descriptor(descriptor);
@@ -872,7 +884,8 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
   if (!remote_nodes.empty()) {
     const bool owns_descriptor = descriptor.pid == txn->life_pid &&
                                  descriptor.tid.time == txn->life_tid.time;
-    if (!owns_descriptor) {
+    const uint64_t home_node = GET_NODE_ID(descriptor.tid.time);
+    if (!owns_descriptor && g_node_id != home_node) {
       rollback_life_descriptor(descriptor);
       send_life_finalize_request(descriptor);
       return false;

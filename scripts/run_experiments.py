@@ -28,6 +28,18 @@ skip = False
 PROGRESS_POLL_INTERVAL = 5
 
 
+def checked_system(cmd):
+    rc = os.system(cmd)
+    if rc != 0:
+        sys.exit("Command failed with status {}: {}".format(rc, cmd))
+
+
+def write_local_ifconfig(total_node_cnt):
+    with open("ifconfig.txt", "w") as f_ifcfg:
+        for _ in range(total_node_cnt):
+            f_ifcfg.write("127.0.0.1\n")
+
+
 def read_latest_counter(path, names):
     try:
         f = open(path, 'r')
@@ -45,11 +57,36 @@ def read_latest_counter(path, names):
     return latest
 
 
+def read_latest_client_inflight(path):
+    try:
+        f = open(path, 'r')
+        data = f.read()
+        f.close()
+    except IOError:
+        return None
+
+    matches = re.findall(r'(?:^|\n)((?:tif_node[0-9]+=[0-9]+,?\s*)+)', data)
+    if not matches:
+        return None
+    values = re.findall(r'tif_node[0-9]+=([0-9]+)', matches[-1])
+    if not values:
+        return None
+    return sum(int(value) for value in values)
+
+
 def file_has_output(path):
     try:
         return os.path.getsize(path) > 0
     except OSError:
         return False
+
+
+def format_client_progress_diagnostics(client_sent_raw, client_completed_raw,
+                                       client_inflight):
+    if not client_sent_raw and not client_completed_raw and not client_inflight:
+        return ""
+    return " client_sent_raw={} client_completed_raw={} client_inflight={}".format(
+        sum(client_sent_raw), sum(client_completed_raw), sum(client_inflight))
 
 
 def print_transaction_progress(output_files, client_output_files, start_time,
@@ -61,6 +98,20 @@ def print_transaction_progress(output_files, client_output_files, start_time,
         value = read_latest_counter(path, ["txn_cnt"])
         if value is not None:
             counters.append(value)
+
+    client_sent_raw = []
+    client_completed_raw = []
+    client_inflight = []
+    for path in client_output_files:
+        value = read_latest_counter(path, ["client_sent_raw"])
+        if value is not None:
+            client_sent_raw.append(value)
+        value = read_latest_counter(path, ["client_completed_raw"])
+        if value is not None:
+            client_completed_raw.append(value)
+        value = read_latest_client_inflight(path)
+        if value is not None:
+            client_inflight.append(value)
 
     source = "client txn_cnt"
     if len(counters) == 0:
@@ -79,8 +130,11 @@ def print_transaction_progress(output_files, client_output_files, start_time,
             total = 0
             source = "no stats yet"
             if force or total != last_total:
-                print("[progress] elapsed={}s completed_transactions={} source={}".format(
-                    int(time.time() - start_time), total, source))
+                diagnostics = format_client_progress_diagnostics(
+                    client_sent_raw, client_completed_raw, client_inflight)
+                print("[progress] elapsed={}s completed_transactions={} source={}{}".format(
+                    int(time.time() - start_time), total, source,
+                    diagnostics))
                 sys.stdout.flush()
             return total
         if force:
@@ -90,8 +144,10 @@ def print_transaction_progress(output_files, client_output_files, start_time,
 
     total = sum(counters)
     if force or total != last_total:
-        print("[progress] elapsed={}s completed_transactions={} source={}".format(
-            int(time.time() - start_time), total, source))
+        diagnostics = format_client_progress_diagnostics(
+            client_sent_raw, client_completed_raw, client_inflight)
+        print("[progress] elapsed={}s completed_transactions={} source={}{}".format(
+            int(time.time() - start_time), total, source, diagnostics))
         sys.stdout.flush()
     return total
 
@@ -163,15 +219,15 @@ for exp in exps:
                 if not found_cfg: f_cfg.write(line)
 
         cmd = "make release"
-        os.system(cmd)
+        checked_system(cmd)
         if not execute:
             exit()
 
         if execute:
             cmd = "mkdir -p {}".format(result_dir)
-            os.system(cmd)
+            checked_system(cmd)
             cmd = "cp config.h {}{}.cfg".format(result_dir,output_f)
-            os.system(cmd)
+            checked_system(cmd)
 
             if remote:
                 if cluster == 'istc':
@@ -255,6 +311,7 @@ for exp in exps:
                 pids = []
                 output_files = []
                 client_output_files = []
+                write_local_ifconfig(nnodes + nclnodes)
                 print("Deploying: {}".format(output_f))
                 for n in range(nnodes + nclnodes):
                     if n < nnodes:

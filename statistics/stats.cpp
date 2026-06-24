@@ -92,6 +92,8 @@ void Stats_thd::clear() {
 
   // Client
   txn_sent_cnt=0;
+  client_sent_raw=0;
+  client_completed_raw=0;
   cl_send_intv=0;
 
   // Abort queue
@@ -303,6 +305,8 @@ void Stats_thd::print_client(FILE * outf, bool prog) {
       ",tput=%f"
       ",txn_cnt=%ld"
       ",txn_sent_cnt=%ld"
+      ",client_completed_raw=%ld"
+      ",client_sent_raw=%ld"
       ",txn_run_time=%f"
       ",txn_run_avg_time=%f"
       ",cl_send_intv=%f"
@@ -310,6 +314,8 @@ void Stats_thd::print_client(FILE * outf, bool prog) {
       ,tput
       ,txn_cnt
       ,txn_sent_cnt
+      ,client_completed_raw
+      ,client_sent_raw
       ,txn_run_time / BILLION
       ,txn_run_avg_time / BILLION
       ,cl_send_intv / BILLION
@@ -1233,6 +1239,8 @@ void Stats_thd::combine(Stats_thd * stats) {
 
   // Client
   txn_sent_cnt+=stats->txn_sent_cnt;
+  client_sent_raw+=stats->client_sent_raw;
+  client_completed_raw+=stats->client_completed_raw;
   cl_send_intv+=stats->cl_send_intv;
 
   // Abort queue
@@ -1758,4 +1766,3 @@ void Stats::cpu_util(FILE * outf) {
   lastSysCPU = timeSample.tms_stime;
   lastUserCPU = timeSample.tms_utime;
 }
-

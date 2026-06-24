@@ -5,16 +5,16 @@
 /***********************************************/
 // Simulation + Hardware
 /***********************************************/
-#define NODE_CNT 1
+#define NODE_CNT 2
 #define THREAD_CNT 4
 #define REM_THREAD_CNT 4
 #define SEND_THREAD_CNT 4
 #define CORE_CNT 8
 // PART_CNT should be at least NODE_CNT
-#define PART_CNT 1
+#define PART_CNT 2
 // this was originally CLIENT_NODE_CNT NODE_CNT, i changed it so that the
 // run_expirements.py hopefully works
-#define CLIENT_NODE_CNT 1
+#define CLIENT_NODE_CNT 2
 #define CLIENT_THREAD_CNT 4
 #define CLIENT_REM_THREAD_CNT 2
 #define CLIENT_SEND_THREAD_CNT 2
@@ -174,13 +174,13 @@
 #define DATA_PERC 100
 #define ACCESS_PERC 0.03
 #define INIT_PARALLELISM 8
-#define SYNTH_TABLE_SIZE 16777216
-#define ZIPF_THETA 0.7
+#define SYNTH_TABLE_SIZE 33554432
+#define ZIPF_THETA 0.6
 #define TXN_WRITE_PERC 0.5
 #define TUP_WRITE_PERC 0.5
 #define SCAN_PERC 0
 #define SCAN_LEN 20
-#define PART_PER_TXN 1
+#define PART_PER_TXN 2
 #define PERC_MULTI_PART MPR
 #define REQ_PER_QUERY 10
 #define FIELD_PER_TUPLE 10
@@ -200,7 +200,7 @@
 // are not modeled.
 #define TPCC_ACCESS_ALL false
 #define WH_UPDATE true
-#define NUM_WH 1
+#define NUM_WH 2
 // % of transactions that access multiple partitions
 #define MPR 1.0
 #define MPIR 0.01

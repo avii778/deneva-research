@@ -81,6 +81,8 @@ public:
 
   // Client
   uint64_t txn_sent_cnt;
+  uint64_t client_sent_raw;
+  uint64_t client_completed_raw;
   double cl_send_intv;
 
   // Breakdown

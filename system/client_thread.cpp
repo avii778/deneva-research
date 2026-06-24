@@ -99,6 +99,7 @@ RC ClientThread::run() {
     msg_queue.enqueue(get_thd_id(),msg,next_node_id);
 		num_txns_sent++;
 		txns_sent[next_node]++;
+    stats._stats[get_thd_id()]->client_sent_raw++;
     INC_STATS(get_thd_id(),txn_sent_cnt,1);
 
 	}

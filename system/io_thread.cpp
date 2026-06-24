@@ -108,6 +108,7 @@ RC InputThread::client_recv_loop() {
       return_node_offset = msg->return_node_id - g_server_start_node;
       assert(return_node_offset < g_servers_per_client);
       rsp_cnts[return_node_offset]++;
+      stats._stats[get_thd_id()]->client_completed_raw++;
       INC_STATS(get_thd_id(),txn_cnt,1);
       uint64_t timespan = get_sys_clock() - ((ClientResponseMessage*)msg)->client_startts; 
       INC_STATS(get_thd_id(),txn_run_time, timespan);
@@ -205,5 +206,4 @@ RC OutputThread::run() {
   fflush(stdout);
   return FINISH;
 }
-
 

@@ -572,10 +572,11 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
     }
 
     LifeProcessRecord &updated = mutable_process_record(tx->pid);
-    // Retain the committed descriptor until a later transaction is admitted
-    // on this row. The later execute path compacts it to an ID/status
-    // tombstone.
-    updated.transaction = tx;
+    // A committed row record only needs the terminal id/status to reject stale
+    // execute/prepare/commit calls. Keeping the full descriptor here pins one
+    // transaction payload per cold row until that row is touched again, which
+    // grows without bound on large YCSB tables.
+    updated.transaction.reset();
     updated.tid = tx->tid;
     updated.status = LifeTxnStatus::Committed;
     updated.has_value = true;
@@ -595,6 +596,8 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
 
 void Row_life::rollback(const LifeTxnDescriptor &tx) {
 
+  std::unique_ptr<LifeInlineOperation> pending;
+
   {
     LifeLatchGuard guard(&latch);
 
@@ -603,11 +606,19 @@ void Row_life::rollback(const LifeTxnDescriptor &tx) {
     if (local != NULL && local->tid == tx.tid &&
         local->status != LifeTxnStatus::Aborted &&
         local->status != LifeTxnStatus::Committed) {
-      mutable_process_record(tx.pid).status = LifeTxnStatus::Aborted;
+      LifeProcessRecord &record = mutable_process_record(tx.pid);
+      record.status = LifeTxnStatus::Aborted;
+      record.transaction.reset();
+    }
+
+    if (active_process.has_value && active_process.value == tx.pid) {
+      active_process.reset();
+      pending = std::move(inline_operation);
     }
   }
 
-  help(tx);
+  if (pending)
+    execute(*pending->transaction, pending->operation);
 }
 
 void Row_life::help(const LifeTxnDescriptor &tx) {
