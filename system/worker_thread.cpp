@@ -202,7 +202,12 @@ void WorkerThread::commit() {
 
   // Send result back to client
 #if !SERVER_GENERATE_QUERIES
-  msg_queue.enqueue(get_thd_id(),Message::create_message(txn_man,CL_RSP),txn_man->client_id);
+  if (ISCLIENTN(txn_man->client_id)) {
+    msg_queue.enqueue(get_thd_id(),Message::create_message(txn_man,CL_RSP),txn_man->client_id);
+  } else {
+    DEBUG("Skip CL_RSP for %ld with invalid client_id %ld\n",
+          txn_man->get_txn_id(), txn_man->client_id);
+  }
 #endif
   // remove txn from pool
   release_txn_man();
@@ -487,31 +492,17 @@ RC WorkerThread::process_life_execute(Message *msg) {
   response->txn_id = msg->get_txn_id();
   response->wait_id = life_msg->wait_id;
   YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
-  response->result =
-      life_txn->execute_life_remote(life_msg->descriptor,
-                                    life_msg->operation);
-
-  // A remote Help/Finalize result must be handled by the coordinator that owns
-  // the saved LIFE execution stack. Calling Row_life::help() here only clears
-  // row-local active state; it does not run the blocking transaction to
-  // completion as Algorithm 2 requires.
-  if (response->result.code != LifeResultCode::Help &&
-      response->result.code != LifeResultCode::Finalize)
-    response->result.transaction = life_msg->descriptor;
-
-  if (response->result.code == LifeResultCode::Success) {
-    response->result.transaction = life_msg->descriptor;
-    LifeHistoryEntry entry;
-    entry.operation = life_msg->operation;
-    entry.response = response->result.response;
-    life_append_history(response->result.transaction, entry);
-    response->result.transaction.ycsb.next_record_id++;
-    response->result.transaction.ycsb.state =
-        response->result.transaction.ycsb.next_record_id ==
-                response->result.transaction.ycsb.requests.size()
-            ? YCSB_FIN
-            : YCSB_0;
-    response->result.observed_attempt = response->result.transaction.tid.attempt;
+  bool deferred = false;
+  RC rc = life_txn->serve_life_execute(life_msg->descriptor,
+                                       life_msg->operation,
+                                       msg->return_node_id, msg->get_txn_id(),
+                                       life_msg->wait_id, response->result,
+                                       deferred);
+  if (deferred) {
+    Message::release_message(response);
+    if (rc != WAIT_REM)
+      release_txn_man();
+    return rc;
   }
 
   msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
@@ -523,7 +514,6 @@ RC WorkerThread::process_life_execute(Message *msg) {
 RC WorkerThread::process_life_execute_rsp(Message *msg) {
   DEBUG("RLIFE_EXECUTE_RSP %ld\n", msg->get_txn_id());
   assert(CC_ALG == LIFE);
-  assert(IS_LOCAL(msg->get_txn_id()));
   __sync_fetch_and_add(&life_dbg_execute_rsp_recv, 1);
 
   txn_man->txn_stats.remote_wait_time +=
@@ -535,6 +525,8 @@ RC WorkerThread::process_life_execute_rsp(Message *msg) {
                                             life_msg->wait_id);
   __sync_fetch_and_add(&life_dbg_execute_rsp_applied, 1);
   check_if_done(rc);
+  if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM && txn_man != NULL)
+    release_txn_man();
   return rc;
 }
 
@@ -559,7 +551,6 @@ RC WorkerThread::process_life_prepare(Message *msg) {
 RC WorkerThread::process_life_prepare_rsp(Message *msg) {
   DEBUG("RLIFE_PREPARE_RSP %ld\n", msg->get_txn_id());
   assert(CC_ALG == LIFE);
-  assert(IS_LOCAL(msg->get_txn_id()));
   __sync_fetch_and_add(&life_dbg_prepare_rsp_recv, 1);
 
   txn_man->txn_stats.remote_wait_time +=
@@ -569,6 +560,8 @@ RC WorkerThread::process_life_prepare_rsp(Message *msg) {
   RC rc = ((YCSBTxnManager *)txn_man)
               ->apply_life_prepare_response(life_msg->result);
   check_if_done(rc);
+  if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM && txn_man != NULL)
+    release_txn_man();
   return rc;
 }
 
@@ -594,13 +587,14 @@ RC WorkerThread::process_life_finish(Message *msg) {
 RC WorkerThread::process_life_finish_rsp(Message *msg) {
   DEBUG("RLIFE_FINISH_RSP %ld\n", msg->get_txn_id());
   assert(CC_ALG == LIFE);
-  assert(IS_LOCAL(msg->get_txn_id()));
   __sync_fetch_and_add(&life_dbg_finish_rsp_recv, 1);
 
   LifeFinishResponseMessage *life_msg = (LifeFinishResponseMessage *)msg;
   RC rc = ((YCSBTxnManager *)txn_man)
               ->apply_life_finish_response(life_msg->result);
   check_if_done(rc);
+  if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM && txn_man != NULL)
+    release_txn_man();
   return rc;
 }
 
@@ -644,13 +638,14 @@ RC WorkerThread::process_life_finalize(Message *msg) {
 RC WorkerThread::process_life_finalize_rsp(Message *msg) {
   DEBUG("RLIFE_FINALIZE_RSP %ld\n", msg->get_txn_id());
   assert(CC_ALG == LIFE);
-  assert(IS_LOCAL(msg->get_txn_id()));
   __sync_fetch_and_add(&life_dbg_finalize_rsp_recv, 1);
 
   LifeFinalizeResponseMessage *life_msg = (LifeFinalizeResponseMessage *)msg;
   RC rc = ((YCSBTxnManager *)txn_man)
               ->apply_life_finalize_response(life_msg->result);
   check_if_done(rc);
+  if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM && txn_man != NULL)
+    release_txn_man();
   return rc;
 }
 #endif

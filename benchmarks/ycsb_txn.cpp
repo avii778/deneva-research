@@ -110,6 +110,7 @@ void persist_life_timing(uint64_t txn_id, uint64_t node_id, uint64_t worker_id,
 
 #if CC_ALG == LIFE
 extern volatile uint64_t life_dbg_execute_sent;
+extern volatile uint64_t life_dbg_execute_rsp_sent;
 extern volatile uint64_t life_dbg_prepare_sent;
 extern volatile uint64_t life_dbg_finish_sent;
 extern volatile uint64_t life_dbg_finalize_sent;
@@ -120,6 +121,7 @@ YCSBTxnManager::YCSBTxnManager()
     : life_finalize_requester_nodes(NULL),
       life_finalize_requester_txn_ids(NULL), life_wait_stacks(NULL),
       life_next_wait_id(1) {
+  life_served_remote.active = false;
   h_thd = NULL;
   h_wl = NULL;
   txn = NULL;
@@ -157,6 +159,7 @@ void YCSBTxnManager::reset() {
   next_record_id = 0;
 #if CC_ALG == LIFE
   reset_pending_life_finalize();
+  reset_served_life_execute();
   life_wait_stacks->clear();
   life_next_wait_id = 1;
 #endif
@@ -173,6 +176,7 @@ void YCSBTxnManager::life_reset_workload() {
   state = YCSB_0;
   next_record_id = 0;
   reset_pending_life_finalize();
+  reset_served_life_execute();
 }
 #endif
 
@@ -312,6 +316,7 @@ bool YCSBTxnManager::try_life_transactions(
       }
 
       if (finalized) {
+        note_life_descriptor_complete(ctx);
         if (ctx.pid == txn->life_pid && ctx.tid.time == txn->life_tid.time) {
           txn->life_tid = ctx.tid;
           txn->life_history = ctx.history;
@@ -381,6 +386,7 @@ bool YCSBTxnManager::try_life_transactions(
     }
 
     case LifeResultCode::Committed:
+      note_life_descriptor_complete(ctx);
       txns.pop_back();
       break;
 
@@ -445,6 +451,48 @@ YCSBTxnManager::execute_life_remote(const LifeTxnDescriptor &descriptor,
   LifeOperation local_operation = operation;
   local_operation.manager = manager;
   return manager->execute(local_descriptor, local_operation);
+}
+
+RC YCSBTxnManager::serve_life_execute(
+    const LifeTxnDescriptor &descriptor, const LifeOperation &operation,
+    uint64_t requester_node_id, uint64_t requester_txn_id, uint64_t wait_id,
+    LifeExecuteResult &immediate_result, bool &deferred) {
+  deferred = false;
+  immediate_result = execute_life_remote(descriptor, operation);
+
+  if (immediate_result.code != LifeResultCode::Help &&
+      immediate_result.code != LifeResultCode::Finalize) {
+    immediate_result.transaction = descriptor;
+    if (immediate_result.code == LifeResultCode::Success) {
+      LifeHistoryEntry entry;
+      entry.operation = operation;
+      entry.response = immediate_result.response;
+      life_append_history(immediate_result.transaction, entry);
+      immediate_result.transaction.ycsb.next_record_id++;
+      immediate_result.transaction.ycsb.state =
+          immediate_result.transaction.ycsb.next_record_id ==
+                  immediate_result.transaction.ycsb.requests.size()
+              ? YCSB_FIN
+              : YCSB_0;
+      immediate_result.observed_attempt =
+          immediate_result.transaction.tid.attempt;
+    }
+    return RCOK;
+  }
+
+  reset_served_life_execute();
+  life_served_remote.active = true;
+  life_served_remote.requester_node_id = requester_node_id;
+  life_served_remote.requester_txn_id = requester_txn_id;
+  life_served_remote.wait_id = wait_id;
+  life_served_remote.root = descriptor;
+  life_served_remote.response = descriptor;
+
+  std::vector<LifeTxnDescriptor> txns;
+  txns.reserve(g_req_per_query);
+  txns.push_back(descriptor);
+  deferred = true;
+  return try_life_transactions(txns) ? finish_served_life_execute() : WAIT_REM;
 }
 
 LifeExecuteResult
@@ -543,29 +591,8 @@ RC YCSBTxnManager::help_life_remote(const LifeTxnDescriptor &descriptor) {
 
 RC YCSBTxnManager::apply_life_help_request(const LifeTxnDescriptor &descriptor,
                                            uint64_t requester_node_id) {
-  std::vector<LifeFinalizeObject> objects = descriptor.touched_objects;
-  if (objects.empty())
-    collect_life_objects(descriptor, objects);
-
-  std::vector<uint64_t> remote_nodes;
-  remote_nodes.reserve(g_node_cnt);
-  for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
-       it != objects.end(); ++it) {
-    const uint64_t node_id = GET_NODE_ID(it->object.partition_id);
-    if (node_id == g_node_id)
-      continue;
-    if (node_id == requester_node_id)
-      continue;
-    add_unique_life_node(remote_nodes, node_id);
-  }
-
-  if (!remote_nodes.empty())
-    send_life_help_apply_messages(descriptor, remote_nodes, requester_node_id);
-
-  if (requester_node_id != g_node_id)
-    return help_life_remote(descriptor);
-
-  return RCOK;
+  (void)requester_node_id;
+  return help_life_remote(descriptor);
 }
 
 RC YCSBTxnManager::apply_life_finalize_request(
@@ -1224,17 +1251,6 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
   }
 
   if (!remote_nodes.empty()) {
-    const bool owns_descriptor = descriptor.pid == txn->life_pid &&
-                                 descriptor.tid.time == txn->life_tid.time;
-    const uint64_t home_node = GET_NODE_ID(descriptor.tid.time);
-    if (!owns_descriptor && g_node_id != home_node) {
-      rollback_life_descriptor(descriptor);
-      life_finalize_waiting = true;
-      life_pending_finalize = descriptor;
-      send_life_finalize_request(descriptor);
-      return false;
-    }
-
     life_finalize_waiting = true;
     life_prepare_pending = remote_nodes.size();
     life_finish_pending = 0;
@@ -1286,7 +1302,52 @@ void YCSBTxnManager::append_life_success(LifeTxnDescriptor &descriptor,
 }
 
 RC YCSBTxnManager::continue_life_after_stack() {
+  if (has_served_life_execute())
+    return finish_served_life_execute();
   return query == NULL ? RCOK : run_life_txn();
+}
+
+void YCSBTxnManager::note_life_descriptor_complete(
+    const LifeTxnDescriptor &descriptor) {
+  if (!has_served_life_execute())
+    return;
+  if (descriptor.pid != life_served_remote.root.pid ||
+      descriptor.tid.time != life_served_remote.root.tid.time)
+    return;
+
+  life_served_remote.response = descriptor;
+}
+
+bool YCSBTxnManager::has_served_life_execute() const {
+  return life_served_remote.active;
+}
+
+void YCSBTxnManager::reset_served_life_execute() {
+  life_served_remote.active = false;
+  life_served_remote.requester_node_id = UINT64_MAX;
+  life_served_remote.requester_txn_id = UINT64_MAX;
+  life_served_remote.wait_id = UINT64_MAX;
+  life_served_remote.root = LifeTxnDescriptor();
+  life_served_remote.response = LifeTxnDescriptor();
+}
+
+RC YCSBTxnManager::finish_served_life_execute() {
+  if (!has_served_life_execute())
+    return RCOK;
+
+  LifeExecuteResponseMessage *response =
+      (LifeExecuteResponseMessage *)Message::create_message(RLIFE_EXECUTE_RSP);
+  response->txn_id = life_served_remote.requester_txn_id;
+  response->wait_id = life_served_remote.wait_id;
+  response->result.code = LifeResultCode::Success;
+  response->result.transaction = life_served_remote.response;
+  response->result.observed_attempt = life_served_remote.response.tid.attempt;
+
+  msg_queue.enqueue(get_thd_id(), response,
+                    life_served_remote.requester_node_id);
+  __sync_fetch_and_add(&life_dbg_execute_rsp_sent, 1);
+  reset_served_life_execute();
+  return RCOK;
 }
 
 void YCSBTxnManager::push_life_help_descriptor(

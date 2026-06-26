@@ -570,11 +570,11 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
     }
 
     LifeProcessRecord &updated = mutable_process_record(tx->pid);
-    // A committed row record only needs the terminal id/status to reject stale
-    // execute/prepare/commit calls. Keeping the full descriptor here pins one
-    // transaction payload per cold row until that row is touched again, which
-    // grows without bound on large YCSB tables.
-    updated.transaction.reset();
+    // Keep the committed descriptor until a later transaction is admitted on
+    // this row. Algorithm 1 stores P[pid] = (tx, Committed); retaining tx keeps
+    // duplicate commits idempotent and lets stale helpers replay/observe the
+    // same committed transaction instead of losing the row-local history.
+    updated.transaction = tx;
     updated.tid = tx->tid;
     updated.status = LifeTxnStatus::Committed;
     updated.has_value = true;

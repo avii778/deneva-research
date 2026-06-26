@@ -460,6 +460,8 @@ void TxnManager::reset() {
   rsp_cnt = 0;
   aborted = false;
   return_id = UINT64_MAX;
+  client_id = UINT64_MAX;
+  client_startts = 0;
   twopl_wait_start = 0;
 
   // ready = true;

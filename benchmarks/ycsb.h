@@ -73,6 +73,12 @@ public:
                        const LifeOperation &operation, uint64_t wait_id);
   LifeExecuteResult execute_life_remote(const LifeTxnDescriptor &descriptor,
                                         const LifeOperation &operation);
+  RC serve_life_execute(const LifeTxnDescriptor &descriptor,
+                        const LifeOperation &operation,
+                        uint64_t requester_node_id,
+                        uint64_t requester_txn_id, uint64_t wait_id,
+                        LifeExecuteResult &immediate_result,
+                        bool &deferred);
   RC apply_life_execute_response(const LifeExecuteResult &result,
                                  uint64_t wait_id);
   LifeExecuteResult prepare_life_remote(const LifeTxnDescriptor &descriptor);
@@ -100,6 +106,14 @@ private:
     uint64_t remote_key;
     std::vector<LifeTxnDescriptor> stack;
   };
+  struct LifeServedRemoteContext {
+    bool active;
+    uint64_t requester_node_id;
+    uint64_t requester_txn_id;
+    uint64_t wait_id;
+    LifeTxnDescriptor root;
+    LifeTxnDescriptor response;
+  };
 
 #if CC_ALG == LIFE
   RC run_life_txn();
@@ -113,6 +127,10 @@ private:
                            const LifeOperation &operation,
                            const LifeResponse &response);
   RC continue_life_after_stack();
+  void note_life_descriptor_complete(const LifeTxnDescriptor &descriptor);
+  bool has_served_life_execute() const;
+  void reset_served_life_execute();
+  RC finish_served_life_execute();
   void push_life_help_descriptor(std::vector<LifeTxnDescriptor> &txns,
                                  const LifeTxnDescriptor &descriptor);
   void rollback_life_descriptor(const LifeTxnDescriptor &descriptor);
@@ -172,6 +190,7 @@ private:
   std::vector<uint64_t> *life_finalize_requester_nodes;
   std::vector<uint64_t> *life_finalize_requester_txn_ids;
   std::vector<LifeWaitContext> *life_wait_stacks;
+  LifeServedRemoteContext life_served_remote;
   uint64_t life_next_wait_id;
 #if LOG_LIFE
   uint64_t life_help_time;
