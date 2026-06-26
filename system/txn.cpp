@@ -711,6 +711,8 @@ void TxnManager::register_thread(Thread *h_thd) {
 
 void TxnManager::set_txn_id(txnid_t txn_id) {
   txn->txn_id = txn_id;
+  txn->life_pid.node_id = GET_NODE_ID(txn_id);
+  txn->life_pid.worker_id = txn_id / g_node_cnt;
   txn->life_tid.time = txn_id;
   txn->life_tid.attempt = 1;
 }

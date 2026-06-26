@@ -93,10 +93,10 @@ void MessageThread::run() {
 
   sbuf = buffer[dest_node_id];
 
-  if(!sbuf->fits(msg->get_size())) {
-    assert(sbuf->cnt > 0);
+  if(!sbuf->fits(msg->get_size()) && sbuf->cnt > 0) {
     send_batch(dest_node_id);
   }
+  sbuf->ensure_capacity(sbuf->ptr + msg->get_size(), dest_node_id);
 
   uint64_t copy_starttime = get_sys_clock();
   msg->copy_to_buf(&(sbuf->buffer[sbuf->ptr]));
@@ -115,4 +115,3 @@ void MessageThread::run() {
   INC_STATS(_thd_id,mtx[10],get_sys_clock() - starttime);
 
 }
-

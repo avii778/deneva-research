@@ -28,6 +28,26 @@
 #include "work_queue.h"
 #include "message.h"
 
+#if CC_ALG == LIFE
+extern volatile uint64_t life_dbg_execute_sent;
+extern volatile uint64_t life_dbg_execute_recv;
+extern volatile uint64_t life_dbg_execute_rsp_sent;
+extern volatile uint64_t life_dbg_execute_rsp_recv;
+extern volatile uint64_t life_dbg_execute_rsp_applied;
+extern volatile uint64_t life_dbg_prepare_sent;
+extern volatile uint64_t life_dbg_prepare_recv;
+extern volatile uint64_t life_dbg_prepare_rsp_sent;
+extern volatile uint64_t life_dbg_prepare_rsp_recv;
+extern volatile uint64_t life_dbg_finish_sent;
+extern volatile uint64_t life_dbg_finish_recv;
+extern volatile uint64_t life_dbg_finish_rsp_sent;
+extern volatile uint64_t life_dbg_finish_rsp_recv;
+extern volatile uint64_t life_dbg_finalize_sent;
+extern volatile uint64_t life_dbg_finalize_recv;
+extern volatile uint64_t life_dbg_finalize_rsp_sent;
+extern volatile uint64_t life_dbg_finalize_rsp_recv;
+#endif
+
 void TxnTable::init() {
   //pool_size = g_inflight_max * g_node_cnt * 2 + 1;
   pool_size = g_inflight_max + 1;
@@ -44,6 +64,22 @@ void TxnTable::init() {
 }
 
 void TxnTable::dump() {
+#if CC_ALG == LIFE
+  printf("LIFE_DBG execute sent=%lu recv=%lu rsp_sent=%lu rsp_recv=%lu "
+         "rsp_applied=%lu\n",
+         life_dbg_execute_sent, life_dbg_execute_recv,
+         life_dbg_execute_rsp_sent, life_dbg_execute_rsp_recv,
+         life_dbg_execute_rsp_applied);
+  printf("LIFE_DBG prepare sent=%lu recv=%lu rsp_sent=%lu rsp_recv=%lu "
+         "finish sent=%lu recv=%lu rsp_sent=%lu rsp_recv=%lu\n",
+         life_dbg_prepare_sent, life_dbg_prepare_recv,
+         life_dbg_prepare_rsp_sent, life_dbg_prepare_rsp_recv,
+         life_dbg_finish_sent, life_dbg_finish_recv,
+         life_dbg_finish_rsp_sent, life_dbg_finish_rsp_recv);
+  printf("LIFE_DBG finalize sent=%lu recv=%lu rsp_sent=%lu rsp_recv=%lu\n",
+         life_dbg_finalize_sent, life_dbg_finalize_recv,
+         life_dbg_finalize_rsp_sent, life_dbg_finalize_rsp_recv);
+#endif
   for(uint64_t i = 0; i < pool_size;i++) {
     if(pool[i]->cnt  == 0)
       continue;
@@ -52,6 +88,10 @@ void TxnTable::dump() {
       while (t_node != NULL) {
         printf("TT (%ld,%ld)\n",t_node->txn_man->get_txn_id(),t_node->txn_man->get_batch_id()
             );
+#if CC_ALG == LIFE && WORKLOAD == YCSB
+        ((YCSBTxnManager *)t_node->txn_man)->debug_life_state();
+        printf("\n");
+#endif
         t_node = t_node->next;
       }
       
@@ -253,4 +293,3 @@ uint64_t TxnTable::get_min_ts(uint64_t thd_id) {
   return min_ts;
 
 }
-

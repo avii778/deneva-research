@@ -49,6 +49,7 @@ public:
     RC process_life_help(Message *msg);
     RC process_life_help_apply(Message *msg);
     RC process_life_finalize(Message *msg);
+    RC process_life_finalize_rsp(Message *msg);
     RC process_rinit(Message * msg);
     RC process_rprepare(Message * msg);
     RC process_rpass(Message * msg);

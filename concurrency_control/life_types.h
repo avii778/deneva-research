@@ -13,7 +13,7 @@ class Row_life;
 
 struct LifeProcessId {
   uint32_t node_id;
-  uint32_t worker_id;
+  uint64_t worker_id;
 };
 
 inline bool operator==(const LifeProcessId &lhs, const LifeProcessId &rhs) {
@@ -28,7 +28,7 @@ struct LifeProcessIdHash {
 
   std::size_t operator()(const LifeProcessId &pid) const {
     const std::size_t node_hash = std::hash<uint32_t>()(pid.node_id);
-    const std::size_t worker_hash = std::hash<uint32_t>()(pid.worker_id);
+    const std::size_t worker_hash = std::hash<uint64_t>()(pid.worker_id);
     return node_hash ^
            (worker_hash + 0x9e3779b9U + (node_hash << 6) + (node_hash >> 2));
   }

@@ -87,7 +87,7 @@ def ycsb_scaling():
     txn_write_perc = [0.5]
     tup_write_perc = [0.5]
     load = [10000]
-    tcnt = [4]
+    tcnt = [1]
     skew = [0.6, 0.7]
     fmt = [
         "WORKLOAD",

@@ -193,7 +193,8 @@ void life_read_touched_object(char *buf, uint64_t &ptr,
 }
 
 uint64_t life_descriptor_size(const LifeTxnDescriptor &descriptor) {
-  uint64_t size = sizeof(uint32_t) * 2 + sizeof(uint64_t) * 2;
+  uint64_t size = sizeof(descriptor.pid.node_id) +
+                  sizeof(descriptor.pid.worker_id) + sizeof(uint64_t) * 2;
   size += sizeof(uint32_t) + sizeof(uint64_t);
 
   size += sizeof(size_t);
@@ -450,6 +451,9 @@ Message * Message::create_message(RemReqType rtype) {
     case RLIFE_FINALIZE:
       msg = new LifeFinalizeMessage;
       break;
+    case RLIFE_FINALIZE_RSP:
+      msg = new LifeFinalizeResponseMessage;
+      break;
     case RFWD:
       msg = new ForwardMessage;
       break;
@@ -669,6 +673,13 @@ void Message::release_message(Message * msg) {
     }
     case RLIFE_FINISH_RSP: {
       LifeFinishResponseMessage *m_msg = (LifeFinishResponseMessage *)msg;
+      m_msg->release();
+      delete m_msg;
+      break;
+    }
+    case RLIFE_FINALIZE_RSP: {
+      LifeFinalizeResponseMessage *m_msg =
+          (LifeFinalizeResponseMessage *)msg;
       m_msg->release();
       delete m_msg;
       break;
@@ -1557,7 +1568,8 @@ void LifeHelpApplyMessage::copy_to_buf(char *buf) {
 }
 
 uint64_t LifeFinalizeMessage::get_size() {
-  return Message::mget_size() + life_descriptor_size(descriptor);
+  return Message::mget_size() + sizeof(requester_txn_id) +
+         life_descriptor_size(descriptor);
 }
 
 void LifeFinalizeMessage::copy_from_txn(TxnManager *txn) {
@@ -1571,6 +1583,7 @@ void LifeFinalizeMessage::copy_to_txn(TxnManager *txn) {
 void LifeFinalizeMessage::copy_from_buf(char *buf) {
   Message::mcopy_from_buf(buf);
   uint64_t ptr = Message::mget_size();
+  COPY_VAL(requester_txn_id, buf, ptr);
   life_read_descriptor(buf, ptr, descriptor);
   assert(ptr == get_size());
 }
@@ -1578,7 +1591,34 @@ void LifeFinalizeMessage::copy_from_buf(char *buf) {
 void LifeFinalizeMessage::copy_to_buf(char *buf) {
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
+  COPY_BUF(buf, requester_txn_id, ptr);
   life_write_descriptor(buf, ptr, descriptor);
+  assert(ptr == get_size());
+}
+
+uint64_t LifeFinalizeResponseMessage::get_size() {
+  return Message::mget_size() + life_result_size(result);
+}
+
+void LifeFinalizeResponseMessage::copy_from_txn(TxnManager *txn) {
+  (void)txn;
+}
+
+void LifeFinalizeResponseMessage::copy_to_txn(TxnManager *txn) {
+  Message::mcopy_to_txn(txn);
+}
+
+void LifeFinalizeResponseMessage::copy_from_buf(char *buf) {
+  Message::mcopy_from_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_read_result(buf, ptr, result);
+  assert(ptr == get_size());
+}
+
+void LifeFinalizeResponseMessage::copy_to_buf(char *buf) {
+  Message::mcopy_to_buf(buf);
+  uint64_t ptr = Message::mget_size();
+  life_write_result(buf, ptr, result);
   assert(ptr == get_size());
 }
 

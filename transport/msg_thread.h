@@ -23,13 +23,15 @@
 
 struct mbuf {
   char * buffer;
+  uint64_t capacity;
   uint64_t starttime;
   uint64_t ptr;
   uint64_t cnt;
   bool wait;
 
   void init(uint64_t dest_id) {
-    buffer = (char*)nn_allocmsg(g_msg_size,0);
+    capacity = g_msg_size;
+    buffer = (char*)nn_allocmsg(capacity,0);
   }
   void reset(uint64_t dest_id) {
     //buffer = (char*)nn_allocmsg(g_msg_size,0);
@@ -41,8 +43,25 @@ struct mbuf {
 	  ((uint32_t*)buffer)[1] = g_node_id;
     ptr = sizeof(uint32_t) * 3;
   }
+  void ensure_capacity(uint64_t required, uint64_t dest_id) {
+    if(required <= capacity)
+      return;
+
+    uint64_t new_capacity = capacity;
+    while(new_capacity < required)
+      new_capacity *= 2;
+
+    char * new_buffer = (char*)nn_allocmsg(new_capacity,0);
+    if(cnt > 0)
+      memcpy(new_buffer, buffer, ptr);
+    nn_freemsg(buffer);
+    buffer = new_buffer;
+    capacity = new_capacity;
+    if(cnt == 0)
+      reset(dest_id);
+  }
   void copy(char * p, uint64_t s) {
-    assert(ptr + s <= g_msg_size);
+    assert(ptr + s <= capacity);
     if(cnt == 0)
       starttime = get_sys_clock();
     COPY_BUF_SIZE(buffer,p,ptr,s);
@@ -50,7 +69,7 @@ struct mbuf {
     //size += s;
   }
   bool fits(uint64_t s) {
-    return (ptr + s) <= g_msg_size;
+    return (ptr + s) <= capacity;
   }
   bool ready() {
     if(cnt == 0)

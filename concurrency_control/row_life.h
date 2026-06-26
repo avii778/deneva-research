@@ -3,6 +3,7 @@
 
 #include "life_types.h"
 #include <pthread.h>
+#include <unordered_map>
 #include <vector>
 
 class Catalog;
@@ -29,7 +30,8 @@ public:
   void help(const LifeTxnDescriptor &tx);
 
 private:
-  typedef std::vector<LifeProcessRecord> ProcessSlots;
+  typedef std::unordered_map<LifeProcessId, LifeProcessRecord,
+                             LifeProcessIdHash> ProcessSlots;
 
   const LifeTxnDescriptor::TouchedObject *
   touched_object(const LifeTxnDescriptor &tx) const;
@@ -42,7 +44,7 @@ private:
   const LifeProcessRecord *context_record() const;
   LifeProcessRecord &mutable_process_record(const LifeProcessId &pid);
   LifeExecuteResult make_result(LifeResultCode code) const;
-  const LifeObjectId &object_id() const;
+  LifeObjectId object_id() const;
   bool apply_operation(const LifeOperation &operation,
                        uint8_t *state, size_t state_size,
                        LifeResponse &response) const;
@@ -56,11 +58,6 @@ private:
 
   pthread_mutex_t latch;
   row_t *_row;
-  Catalog *_schema;
-  mutable LifeObjectId _object_id;
-  mutable bool _primary_key_cached;
-  uint64_t _tuple_size;
-  uint64_t _field_count;
   LifeOptional<LifeProcessId> active_process;
   std::unique_ptr<ProcessSlots> processes;
   std::unique_ptr<LifeInlineOperation> inline_operation;

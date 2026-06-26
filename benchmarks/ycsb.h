@@ -57,6 +57,8 @@ private:
 
 class YCSBTxnManager : public TxnManager {
 public:
+  YCSBTxnManager();
+  virtual ~YCSBTxnManager();
   void init(uint64_t thd_id, Workload *h_wl);
   void reset();
   void partial_reset();
@@ -78,9 +80,13 @@ public:
   RC apply_life_help_request(const LifeTxnDescriptor &descriptor,
                              uint64_t requester_node_id);
   RC help_life_remote(const LifeTxnDescriptor &descriptor);
-  RC apply_life_finalize_request(const LifeTxnDescriptor &descriptor);
+  RC apply_life_finalize_request(const LifeTxnDescriptor &descriptor,
+                                 uint64_t requester_node_id,
+                                 uint64_t requester_txn_id);
+  RC apply_life_finalize_response(const LifeExecuteResult &result);
   RC apply_life_prepare_response(const LifeExecuteResult &result);
   RC apply_life_finish_response(const LifeExecuteResult &result);
+  void debug_life_state() const;
 #endif
   void copy_remote_requests(YCSBQueryMessage *msg);
 
@@ -101,6 +107,10 @@ private:
   void collect_life_objects(const LifeTxnDescriptor &descriptor,
                             std::vector<LifeFinalizeObject> &objects);
   void copy_life_descriptor_to_workload(const LifeTxnDescriptor &descriptor);
+  void save_life_wait_stack(const std::vector<LifeTxnDescriptor> &txns,
+                            uint32_t reason, uint64_t remote_node_id,
+                            uint64_t remote_key);
+  bool take_life_wait_stack(std::vector<LifeTxnDescriptor> &txns);
   row_t *lookup_life_row(const LifeObjectId &object) const;
   row_t *lookup_life_row(uint64_t key) const;
   LifeOperation make_life_operation(row_t *row, ycsb_request *req);
@@ -112,6 +122,11 @@ private:
                                      const std::vector<uint64_t> &nodes,
                                      uint64_t requester_node_id);
   void send_life_finalize_request(const LifeTxnDescriptor &descriptor);
+  void add_life_finalize_requester(uint64_t requester_node_id,
+                                   uint64_t requester_txn_id);
+  void send_life_finalize_response(const LifeExecuteResult &result,
+                                   uint64_t requester_node_id,
+                                   uint64_t requester_txn_id);
   void send_life_prepare_messages(const LifeTxnDescriptor &descriptor,
                                   const std::vector<uint64_t> &nodes);
   void send_life_finish_messages(const LifeTxnDescriptor &descriptor,
@@ -138,6 +153,13 @@ private:
   LifeTxnDescriptor life_pending_finalize;
   std::vector<LifeFinalizeObject> life_pending_objects;
   std::vector<uint64_t> life_pending_remote_nodes;
+  std::vector<uint64_t> *life_finalize_requester_nodes;
+  std::vector<uint64_t> *life_finalize_requester_txn_ids;
+  bool life_wait_stack_active;
+  std::vector<LifeTxnDescriptor> *life_wait_stack;
+  uint32_t life_wait_stack_reason;
+  uint64_t life_wait_stack_remote_node;
+  uint64_t life_wait_stack_remote_key;
 #if LOG_LIFE
   uint64_t life_help_time;
   uint64_t life_own_time;
