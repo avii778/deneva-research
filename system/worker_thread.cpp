@@ -485,19 +485,16 @@ RC WorkerThread::process_life_execute(Message *msg) {
   LifeExecuteResponseMessage *response =
       (LifeExecuteResponseMessage *)Message::create_message(RLIFE_EXECUTE_RSP);
   response->txn_id = msg->get_txn_id();
+  response->wait_id = life_msg->wait_id;
   YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
   response->result =
       life_txn->execute_life_remote(life_msg->descriptor,
                                     life_msg->operation);
-  for (uint64_t tries = 0;
-       response->result.code == LifeResultCode::Help &&
-       tries < g_req_per_query;
-       ++tries) {
-    life_txn->help_life_remote(response->result.transaction);
-    response->result =
-        life_txn->execute_life_remote(life_msg->descriptor,
-                                      life_msg->operation);
-  }
+
+  // A remote Help/Finalize result must be handled by the coordinator that owns
+  // the saved LIFE execution stack. Calling Row_life::help() here only clears
+  // row-local active state; it does not run the blocking transaction to
+  // completion as Algorithm 2 requires.
   if (response->result.code != LifeResultCode::Help &&
       response->result.code != LifeResultCode::Finalize)
     response->result.transaction = life_msg->descriptor;
@@ -514,6 +511,7 @@ RC WorkerThread::process_life_execute(Message *msg) {
                 response->result.transaction.ycsb.requests.size()
             ? YCSB_FIN
             : YCSB_0;
+    response->result.observed_attempt = response->result.transaction.tid.attempt;
   }
 
   msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
@@ -533,7 +531,8 @@ RC WorkerThread::process_life_execute_rsp(Message *msg) {
 
   LifeExecuteResponseMessage *life_msg = (LifeExecuteResponseMessage *)msg;
   RC rc = ((YCSBTxnManager *)txn_man)
-              ->apply_life_execute_response(life_msg->result);
+              ->apply_life_execute_response(life_msg->result,
+                                            life_msg->wait_id);
   __sync_fetch_and_add(&life_dbg_execute_rsp_applied, 1);
   check_if_done(rc);
   return rc;
@@ -622,7 +621,8 @@ RC WorkerThread::process_life_help_apply(Message *msg) {
 
   LifeHelpApplyMessage *life_msg = (LifeHelpApplyMessage *)msg;
   RC rc = ((YCSBTxnManager *)txn_man)->help_life_remote(life_msg->descriptor);
-  release_txn_man();
+  if (rc != WAIT_REM)
+    release_txn_man();
   return rc;
 }
 

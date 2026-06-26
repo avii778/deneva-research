@@ -148,50 +148,6 @@ void life_read_ycsb_request(char *buf, uint64_t &ptr,
   request.row = NULL;
 }
 
-uint64_t life_history_indices_size(const LifeHistoryIndices &indices) {
-  return sizeof(size_t) + sizeof(size_t) * indices.size();
-}
-
-void life_write_history_indices(char *buf, uint64_t &ptr,
-                                const LifeHistoryIndices &indices) {
-  const size_t size = indices.size();
-  COPY_BUF(buf, size, ptr);
-  for (size_t i = 0; i < size; ++i) {
-    const size_t index = indices[i];
-    COPY_BUF(buf, index, ptr);
-  }
-}
-
-void life_read_history_indices(char *buf, uint64_t &ptr,
-                               LifeHistoryIndices &indices) {
-  size_t size;
-  COPY_VAL(size, buf, ptr);
-  indices = LifeHistoryIndices();
-  for (size_t i = 0; i < size; ++i) {
-    size_t index;
-    COPY_VAL(index, buf, ptr);
-    indices.push_back(index);
-  }
-}
-
-uint64_t life_touched_object_size(
-    const LifeTxnDescriptor::TouchedObject &object) {
-  return life_object_id_size() + life_history_indices_size(object.history_indices);
-}
-
-void life_write_touched_object(
-    char *buf, uint64_t &ptr, const LifeTxnDescriptor::TouchedObject &object) {
-  life_write_object_id(buf, ptr, object.object);
-  life_write_history_indices(buf, ptr, object.history_indices);
-}
-
-void life_read_touched_object(char *buf, uint64_t &ptr,
-                              LifeTxnDescriptor::TouchedObject &object) {
-  life_read_object_id(buf, ptr, object.object);
-  life_read_history_indices(buf, ptr, object.history_indices);
-  object.manager = NULL;
-}
-
 uint64_t life_descriptor_size(const LifeTxnDescriptor &descriptor) {
   uint64_t size = sizeof(descriptor.pid.node_id) +
                   sizeof(descriptor.pid.worker_id) + sizeof(uint64_t) * 2;
@@ -204,10 +160,6 @@ uint64_t life_descriptor_size(const LifeTxnDescriptor &descriptor) {
   size += sizeof(size_t);
   for (size_t i = 0; i < descriptor.ycsb.requests.size(); ++i)
     size += life_ycsb_request_size();
-
-  size += sizeof(size_t);
-  for (size_t i = 0; i < descriptor.touched_objects.size(); ++i)
-    size += life_touched_object_size(descriptor.touched_objects[i]);
 
   return size;
 }
@@ -230,11 +182,6 @@ void life_write_descriptor(char *buf, uint64_t &ptr,
   COPY_BUF(buf, size, ptr);
   for (size_t i = 0; i < descriptor.ycsb.requests.size(); ++i)
     life_write_ycsb_request(buf, ptr, descriptor.ycsb.requests[i]);
-
-  size = descriptor.touched_objects.size();
-  COPY_BUF(buf, size, ptr);
-  for (size_t i = 0; i < descriptor.touched_objects.size(); ++i)
-    life_write_touched_object(buf, ptr, descriptor.touched_objects[i]);
 }
 
 void life_read_descriptor(char *buf, uint64_t &ptr,
@@ -257,11 +204,8 @@ void life_read_descriptor(char *buf, uint64_t &ptr,
   descriptor.ycsb.requests.resize(size);
   for (size_t i = 0; i < size; ++i)
     life_read_ycsb_request(buf, ptr, descriptor.ycsb.requests[i]);
-
-  COPY_VAL(size, buf, ptr);
-  descriptor.touched_objects.resize(size);
-  for (size_t i = 0; i < size; ++i)
-    life_read_touched_object(buf, ptr, descriptor.touched_objects[i]);
+  descriptor.history.reserve(descriptor.ycsb.requests.size());
+  descriptor.touched_objects.reserve(descriptor.ycsb.requests.size());
 }
 
 uint64_t life_result_size(const LifeExecuteResult &result) {
@@ -1410,7 +1354,7 @@ void PrepareMessage::copy_to_buf(char * buf) {
 
 uint64_t LifeExecuteMessage::get_size() {
   return Message::mget_size() + life_descriptor_size(descriptor) +
-         life_operation_size(operation);
+         life_operation_size(operation) + sizeof(wait_id);
 }
 
 void LifeExecuteMessage::copy_from_txn(TxnManager *txn) {
@@ -1426,6 +1370,7 @@ void LifeExecuteMessage::copy_from_buf(char *buf) {
   uint64_t ptr = Message::mget_size();
   life_read_descriptor(buf, ptr, descriptor);
   life_read_operation(buf, ptr, operation);
+  COPY_VAL(wait_id, buf, ptr);
   assert(ptr == get_size());
 }
 
@@ -1434,11 +1379,12 @@ void LifeExecuteMessage::copy_to_buf(char *buf) {
   uint64_t ptr = Message::mget_size();
   life_write_descriptor(buf, ptr, descriptor);
   life_write_operation(buf, ptr, operation);
+  COPY_BUF(buf, wait_id, ptr);
   assert(ptr == get_size());
 }
 
 uint64_t LifeExecuteResponseMessage::get_size() {
-  return Message::mget_size() + life_result_size(result);
+  return Message::mget_size() + sizeof(wait_id) + life_result_size(result);
 }
 
 void LifeExecuteResponseMessage::copy_from_txn(TxnManager *txn) {
@@ -1452,6 +1398,7 @@ void LifeExecuteResponseMessage::copy_to_txn(TxnManager *txn) {
 void LifeExecuteResponseMessage::copy_from_buf(char *buf) {
   Message::mcopy_from_buf(buf);
   uint64_t ptr = Message::mget_size();
+  COPY_VAL(wait_id, buf, ptr);
   life_read_result(buf, ptr, result);
   assert(ptr == get_size());
 }
@@ -1459,6 +1406,7 @@ void LifeExecuteResponseMessage::copy_from_buf(char *buf) {
 void LifeExecuteResponseMessage::copy_to_buf(char *buf) {
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
+  COPY_BUF(buf, wait_id, ptr);
   life_write_result(buf, ptr, result);
   assert(ptr == get_size());
 }
@@ -1490,7 +1438,7 @@ void LifePrepareMessage::copy_to_buf(char *buf) {
 }
 
 uint64_t LifePrepareResponseMessage::get_size() {
-  return Message::mget_size() + life_result_size(result);
+  return Message::mget_size() + sizeof(uint32_t) + sizeof(uint64_t);
 }
 
 void LifePrepareResponseMessage::copy_from_txn(TxnManager *txn) {
@@ -1504,14 +1452,20 @@ void LifePrepareResponseMessage::copy_to_txn(TxnManager *txn) {
 void LifePrepareResponseMessage::copy_from_buf(char *buf) {
   Message::mcopy_from_buf(buf);
   uint64_t ptr = Message::mget_size();
-  life_read_result(buf, ptr, result);
+  uint32_t code;
+  COPY_VAL(code, buf, ptr);
+  result = LifeExecuteResult();
+  result.code = static_cast<LifeResultCode>(code);
+  COPY_VAL(result.observed_attempt, buf, ptr);
   assert(ptr == get_size());
 }
 
 void LifePrepareResponseMessage::copy_to_buf(char *buf) {
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
-  life_write_result(buf, ptr, result);
+  const uint32_t code = static_cast<uint32_t>(result.code);
+  COPY_BUF(buf, code, ptr);
+  COPY_BUF(buf, result.observed_attempt, ptr);
   assert(ptr == get_size());
 }
 
@@ -1651,7 +1605,7 @@ void LifeFinishMessage::copy_to_buf(char *buf) {
 }
 
 uint64_t LifeFinishResponseMessage::get_size() {
-  return Message::mget_size() + life_result_size(result);
+  return Message::mget_size() + sizeof(uint32_t);
 }
 
 void LifeFinishResponseMessage::copy_from_txn(TxnManager *txn) {
@@ -1665,14 +1619,18 @@ void LifeFinishResponseMessage::copy_to_txn(TxnManager *txn) {
 void LifeFinishResponseMessage::copy_from_buf(char *buf) {
   Message::mcopy_from_buf(buf);
   uint64_t ptr = Message::mget_size();
-  life_read_result(buf, ptr, result);
+  uint32_t code;
+  COPY_VAL(code, buf, ptr);
+  result = LifeExecuteResult();
+  result.code = static_cast<LifeResultCode>(code);
   assert(ptr == get_size());
 }
 
 void LifeFinishResponseMessage::copy_to_buf(char *buf) {
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
-  life_write_result(buf, ptr, result);
+  const uint32_t code = static_cast<uint32_t>(result.code);
+  COPY_BUF(buf, code, ptr);
   assert(ptr == get_size());
 }
 

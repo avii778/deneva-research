@@ -127,8 +127,10 @@ Row_life::process_record(const LifeProcessId &pid) const {
 }
 
 LifeProcessRecord &Row_life::mutable_process_record(const LifeProcessId &pid) {
-  if (!processes)
+  if (!processes) {
     processes.reset(new ProcessSlots());
+    processes->reserve(g_node_cnt * g_thread_cnt);
+  }
   return (*processes)[pid];
 }
 
@@ -300,8 +302,6 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   if (tuple_size > MAX_TUPLE_SIZE)
     return make_result(LifeResultCode::InvalidOperation);
   uint8_t speculative_state[MAX_TUPLE_SIZE];
-  std::shared_ptr<LifeTxnDescriptor> updated_transaction =
-      std::make_shared<LifeTxnDescriptor>(tx);
 
   LifeLatchGuard guard(&latch);
 
@@ -354,7 +354,7 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 
       if (!inline_operation || tx.tid <= inline_operation->transaction->tid) {
         LifeInlineOperation pending;
-        pending.transaction = updated_transaction;
+        pending.transaction = std::make_shared<LifeTxnDescriptor>(tx);
         pending.operation = operation;
         inline_operation.reset(new LifeInlineOperation(pending));
       }
@@ -440,6 +440,8 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   entry.operation = operation;
   entry.response = response;
 
+  std::shared_ptr<LifeTxnDescriptor> updated_transaction =
+      std::make_shared<LifeTxnDescriptor>(tx);
   LifeProcessRecord updated;
   life_append_history(*updated_transaction, entry);
   updated.transaction = updated_transaction;
@@ -630,6 +632,7 @@ void Row_life::help(const LifeTxnDescriptor &tx) {
     active_process.reset();
 
     pending = std::move(inline_operation);
+    inline_operation.reset();
   }
 
   if (pending)

@@ -209,6 +209,7 @@ public:
 
   LifeTxnDescriptor descriptor;
   LifeOperation operation;
+  uint64_t wait_id;
 };
 
 class LifeExecuteResponseMessage : public Message {
@@ -222,6 +223,7 @@ public:
   void release() {}
 
   LifeExecuteResult result;
+  uint64_t wait_id;
 };
 
 class LifePrepareMessage : public Message {
