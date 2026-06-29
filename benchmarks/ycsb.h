@@ -114,6 +114,7 @@ private:
     uint64_t wait_id;
     LifeTxnDescriptor root;
     LifeTxnDescriptor response;
+    LifeExecuteResult result;
   };
 
 #if CC_ALG == LIFE
