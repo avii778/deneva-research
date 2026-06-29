@@ -837,7 +837,7 @@ void YCSBTxnManager::send_life_finalize_request(
 
 void YCSBTxnManager::add_life_finalize_requester(
     uint64_t requester_node_id, uint64_t requester_txn_id) {
-  if (requester_node_id == UINT64_MAX || requester_node_id == g_node_id)
+  if (requester_node_id == UINT64_MAX)
     return;
   if (requester_txn_id == UINT64_MAX)
     return;
@@ -856,7 +856,7 @@ void YCSBTxnManager::add_life_finalize_requester(
 void YCSBTxnManager::send_life_finalize_response(
     const LifeExecuteResult &result, uint64_t requester_node_id,
     uint64_t requester_txn_id) {
-  if (requester_node_id == UINT64_MAX || requester_node_id == g_node_id)
+  if (requester_node_id == UINT64_MAX)
     return;
   if (requester_txn_id == UINT64_MAX)
     return;
@@ -867,7 +867,7 @@ void YCSBTxnManager::send_life_finalize_response(
   response->txn_id = requester_txn_id;
   response->result = result;
   __sync_fetch_and_add(&life_dbg_finalize_rsp_sent, 1);
-  msg_queue.enqueue(get_thd_id(), response, requester_node_id);
+  send_life_message_to_node(response, requester_node_id);
 }
 
 void YCSBTxnManager::send_life_prepare_messages(
@@ -1302,14 +1302,14 @@ void YCSBTxnManager::append_life_success(LifeTxnDescriptor &descriptor,
 }
 
 RC YCSBTxnManager::continue_life_after_stack() {
-  if (has_served_life_execute())
+  if (is_serving_life_execute())
     return finish_served_life_execute();
   return query == NULL ? RCOK : run_life_txn();
 }
 
 void YCSBTxnManager::note_life_descriptor_complete(
     const LifeTxnDescriptor &descriptor) {
-  if (!has_served_life_execute())
+  if (!is_serving_life_execute())
     return;
   if (descriptor.pid != life_served_remote.root.pid ||
       descriptor.tid.time != life_served_remote.root.tid.time)
@@ -1318,7 +1318,7 @@ void YCSBTxnManager::note_life_descriptor_complete(
   life_served_remote.response = descriptor;
 }
 
-bool YCSBTxnManager::has_served_life_execute() const {
+bool YCSBTxnManager::is_serving_life_execute() const {
   return life_served_remote.active;
 }
 
@@ -1332,7 +1332,7 @@ void YCSBTxnManager::reset_served_life_execute() {
 }
 
 RC YCSBTxnManager::finish_served_life_execute() {
-  if (!has_served_life_execute())
+  if (!is_serving_life_execute())
     return RCOK;
 
   LifeExecuteResponseMessage *response =

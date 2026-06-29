@@ -73,6 +73,7 @@ public:
                        const LifeOperation &operation, uint64_t wait_id);
   LifeExecuteResult execute_life_remote(const LifeTxnDescriptor &descriptor,
                                         const LifeOperation &operation);
+  bool is_serving_life_execute() const;
   RC serve_life_execute(const LifeTxnDescriptor &descriptor,
                         const LifeOperation &operation,
                         uint64_t requester_node_id,
@@ -128,7 +129,6 @@ private:
                            const LifeResponse &response);
   RC continue_life_after_stack();
   void note_life_descriptor_complete(const LifeTxnDescriptor &descriptor);
-  bool has_served_life_execute() const;
   void reset_served_life_execute();
   RC finish_served_life_execute();
   void push_life_help_descriptor(std::vector<LifeTxnDescriptor> &txns,

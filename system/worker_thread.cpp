@@ -483,7 +483,6 @@ RC WorkerThread::process_rqry_cont(Message * msg) {
 RC WorkerThread::process_life_execute(Message *msg) {
   DEBUG("RLIFE_EXECUTE %ld\n", msg->get_txn_id());
   assert(CC_ALG == LIFE);
-  assert(!IS_LOCAL(msg->get_txn_id()));
   __sync_fetch_and_add(&life_dbg_execute_recv, 1);
 
   LifeExecuteMessage *life_msg = (LifeExecuteMessage *)msg;
@@ -500,14 +499,15 @@ RC WorkerThread::process_life_execute(Message *msg) {
                                        deferred);
   if (deferred) {
     Message::release_message(response);
-    if (rc != WAIT_REM)
+    if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM)
       release_txn_man();
     return rc;
   }
 
   msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
   __sync_fetch_and_add(&life_dbg_execute_rsp_sent, 1);
-  release_txn_man();
+  if (!IS_LOCAL(msg->get_txn_id()))
+    release_txn_man();
   return RCOK;
 }
 
@@ -519,13 +519,15 @@ RC WorkerThread::process_life_execute_rsp(Message *msg) {
   txn_man->txn_stats.remote_wait_time +=
       get_sys_clock() - txn_man->txn_stats.wait_starttime;
 
+  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  const bool serving_remote = life_txn->is_serving_life_execute();
   LifeExecuteResponseMessage *life_msg = (LifeExecuteResponseMessage *)msg;
-  RC rc = ((YCSBTxnManager *)txn_man)
-              ->apply_life_execute_response(life_msg->result,
-                                            life_msg->wait_id);
+  RC rc = life_txn->apply_life_execute_response(life_msg->result,
+                                                life_msg->wait_id);
   __sync_fetch_and_add(&life_dbg_execute_rsp_applied, 1);
-  check_if_done(rc);
-  if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM && txn_man != NULL)
+  if (!serving_remote)
+    check_if_done(rc);
+  if (serving_remote && rc != WAIT_REM && txn_man != NULL)
     release_txn_man();
   return rc;
 }
@@ -533,7 +535,6 @@ RC WorkerThread::process_life_execute_rsp(Message *msg) {
 RC WorkerThread::process_life_prepare(Message *msg) {
   DEBUG("RLIFE_PREPARE %ld\n", msg->get_txn_id());
   assert(CC_ALG == LIFE);
-  assert(!IS_LOCAL(msg->get_txn_id()));
   __sync_fetch_and_add(&life_dbg_prepare_recv, 1);
 
   LifePrepareMessage *life_msg = (LifePrepareMessage *)msg;
@@ -544,7 +545,8 @@ RC WorkerThread::process_life_prepare(Message *msg) {
       ((YCSBTxnManager *)txn_man)->prepare_life_remote(life_msg->descriptor);
   msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
   __sync_fetch_and_add(&life_dbg_prepare_rsp_sent, 1);
-  release_txn_man();
+  if (!IS_LOCAL(msg->get_txn_id()))
+    release_txn_man();
   return RCOK;
 }
 
@@ -556,11 +558,13 @@ RC WorkerThread::process_life_prepare_rsp(Message *msg) {
   txn_man->txn_stats.remote_wait_time +=
       get_sys_clock() - txn_man->txn_stats.wait_starttime;
 
+  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  const bool serving_remote = life_txn->is_serving_life_execute();
   LifePrepareResponseMessage *life_msg = (LifePrepareResponseMessage *)msg;
-  RC rc = ((YCSBTxnManager *)txn_man)
-              ->apply_life_prepare_response(life_msg->result);
-  check_if_done(rc);
-  if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM && txn_man != NULL)
+  RC rc = life_txn->apply_life_prepare_response(life_msg->result);
+  if (!serving_remote)
+    check_if_done(rc);
+  if (serving_remote && rc != WAIT_REM && txn_man != NULL)
     release_txn_man();
   return rc;
 }
@@ -568,7 +572,6 @@ RC WorkerThread::process_life_prepare_rsp(Message *msg) {
 RC WorkerThread::process_life_finish(Message *msg) {
   DEBUG("RLIFE_FINISH %ld\n", msg->get_txn_id());
   assert(CC_ALG == LIFE);
-  assert(!IS_LOCAL(msg->get_txn_id()));
   __sync_fetch_and_add(&life_dbg_finish_recv, 1);
 
   LifeFinishMessage *life_msg = (LifeFinishMessage *)msg;
@@ -580,7 +583,8 @@ RC WorkerThread::process_life_finish(Message *msg) {
                                               life_msg->decision);
   msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
   __sync_fetch_and_add(&life_dbg_finish_rsp_sent, 1);
-  release_txn_man();
+  if (!IS_LOCAL(msg->get_txn_id()))
+    release_txn_man();
   return RCOK;
 }
 
@@ -589,11 +593,13 @@ RC WorkerThread::process_life_finish_rsp(Message *msg) {
   assert(CC_ALG == LIFE);
   __sync_fetch_and_add(&life_dbg_finish_rsp_recv, 1);
 
+  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  const bool serving_remote = life_txn->is_serving_life_execute();
   LifeFinishResponseMessage *life_msg = (LifeFinishResponseMessage *)msg;
-  RC rc = ((YCSBTxnManager *)txn_man)
-              ->apply_life_finish_response(life_msg->result);
-  check_if_done(rc);
-  if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM && txn_man != NULL)
+  RC rc = life_txn->apply_life_finish_response(life_msg->result);
+  if (!serving_remote)
+    check_if_done(rc);
+  if (serving_remote && rc != WAIT_REM && txn_man != NULL)
     release_txn_man();
   return rc;
 }
@@ -611,11 +617,10 @@ RC WorkerThread::process_life_help(Message *msg) {
 RC WorkerThread::process_life_help_apply(Message *msg) {
   DEBUG("RLIFE_HELP_APPLY %ld\n", msg->get_txn_id());
   assert(CC_ALG == LIFE);
-  assert(!IS_LOCAL(msg->get_txn_id()));
 
   LifeHelpApplyMessage *life_msg = (LifeHelpApplyMessage *)msg;
   RC rc = ((YCSBTxnManager *)txn_man)->help_life_remote(life_msg->descriptor);
-  if (rc != WAIT_REM)
+  if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM)
     release_txn_man();
   return rc;
 }
@@ -640,11 +645,13 @@ RC WorkerThread::process_life_finalize_rsp(Message *msg) {
   assert(CC_ALG == LIFE);
   __sync_fetch_and_add(&life_dbg_finalize_rsp_recv, 1);
 
+  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  const bool serving_remote = life_txn->is_serving_life_execute();
   LifeFinalizeResponseMessage *life_msg = (LifeFinalizeResponseMessage *)msg;
-  RC rc = ((YCSBTxnManager *)txn_man)
-              ->apply_life_finalize_response(life_msg->result);
-  check_if_done(rc);
-  if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM && txn_man != NULL)
+  RC rc = life_txn->apply_life_finalize_response(life_msg->result);
+  if (!serving_remote)
+    check_if_done(rc);
+  if (serving_remote && rc != WAIT_REM && txn_man != NULL)
     release_txn_man();
   return rc;
 }
