@@ -52,6 +52,13 @@ volatile uint64_t life_dbg_finalize_sent = 0;
 volatile uint64_t life_dbg_finalize_recv = 0;
 volatile uint64_t life_dbg_finalize_rsp_sent = 0;
 volatile uint64_t life_dbg_finalize_rsp_recv = 0;
+volatile uint64_t life_dbg_execute_rsp_recv_code[6] = {0, 0, 0, 0, 0, 0};
+
+void life_dbg_count_execute_rsp_code(LifeResultCode code) {
+  const uint32_t index = static_cast<uint32_t>(code);
+  if (index < 6)
+    __sync_fetch_and_add(&life_dbg_execute_rsp_recv_code[index], 1);
+}
 #endif
 
 void WorkerThread::setup() {
@@ -522,6 +529,7 @@ RC WorkerThread::process_life_execute_rsp(Message *msg) {
   YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
   const bool serving_remote = life_txn->is_serving_life_execute();
   LifeExecuteResponseMessage *life_msg = (LifeExecuteResponseMessage *)msg;
+  life_dbg_count_execute_rsp_code(life_msg->result.code);
   RC rc = life_txn->apply_life_execute_response(life_msg->result,
                                                 life_msg->wait_id);
   __sync_fetch_and_add(&life_dbg_execute_rsp_applied, 1);

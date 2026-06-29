@@ -24,6 +24,10 @@
 #include <time.h>
 #include <sys/times.h>
 
+#if CC_ALG == LIFE
+extern volatile uint64_t life_dbg_execute_rsp_recv_code[6];
+#endif
+
 void Stats_thd::init(uint64_t thd_id) {
   DEBUG_M("Stats_thd::init part_cnt alloc\n");
   part_cnt = (uint64_t*) mem_allocator.align_alloc(sizeof(uint64_t)*g_part_cnt);
@@ -1564,6 +1568,21 @@ void Stats::print(bool prog) {
   else
 	  fprintf(outf, "[summary] ");
   totals->print(outf,prog);
+#if CC_ALG == LIFE
+  fprintf(outf,
+          ",life_exec_rsp_success=%lu"
+          ",life_exec_rsp_finalize=%lu"
+          ",life_exec_rsp_committed=%lu"
+          ",life_exec_rsp_help=%lu"
+          ",life_exec_rsp_retry=%lu"
+          ",life_exec_rsp_invalid=%lu",
+          life_dbg_execute_rsp_recv_code[0],
+          life_dbg_execute_rsp_recv_code[1],
+          life_dbg_execute_rsp_recv_code[2],
+          life_dbg_execute_rsp_recv_code[3],
+          life_dbg_execute_rsp_recv_code[4],
+          life_dbg_execute_rsp_recv_code[5]);
+#endif
   mem_util(outf);
   cpu_util(outf);
 

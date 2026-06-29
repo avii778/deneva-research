@@ -131,7 +131,6 @@ YCSBTxnManager::YCSBTxnManager()
   client_id = 0;
   abort_cnt = 0;
   txn_ready = 1;
-  life_served_remote.result = LifeExecuteResult();
 }
 
 YCSBTxnManager::~YCSBTxnManager() {
@@ -488,10 +487,6 @@ RC YCSBTxnManager::serve_life_execute(
   life_served_remote.wait_id = wait_id;
   life_served_remote.root = descriptor;
   life_served_remote.response = descriptor;
-  life_served_remote.result = LifeExecuteResult();
-  life_served_remote.result.code = LifeResultCode::Success;
-  life_served_remote.result.transaction = descriptor;
-  life_served_remote.result.observed_attempt = descriptor.tid.attempt;
 
   std::vector<LifeTxnDescriptor> txns;
   txns.reserve(g_req_per_query);
@@ -944,34 +939,16 @@ RC YCSBTxnManager::apply_life_execute_response(
   }
 
   case LifeResultCode::Committed: {
-    const LifeTxnDescriptor &response = result.transaction;
-    const bool owns_response =
-        response.pid == txn->life_pid && response.tid.time == txn->life_tid.time;
-    if (owns_response && is_serving_life_execute()) {
-      life_served_remote.result = result;
-      if (life_served_remote.result.transaction.ycsb.requests.empty() &&
-          life_served_remote.result.transaction.history.empty())
-        life_served_remote.result.transaction = response;
-      return finish_served_life_execute();
-    }
-    if (owns_response && !has_current_descriptor && !txns.empty()) {
-      descriptor = txns.back();
-      has_current_descriptor = true;
-    }
-    if (!owns_response) {
-      rollback_life_descriptor(response);
-      assert(!txns.empty());
+    if (has_saved_stack && !txns.empty()) {
+      note_life_descriptor_complete(txns.back());
       txns.pop_back();
       if (!txns.empty())
         return try_life_transactions(txns) ? continue_life_after_stack()
                                            : WAIT_REM;
       return continue_life_after_stack();
     }
-    txn->life_status = LifeTxnStatus::Committed;
-    state = YCSB_FIN;
-    if (query != NULL)
-      next_record_id = ((YCSBQuery *)query)->requests.size();
-    return query == NULL ? RCOK : commit();
+
+    return continue_life_after_stack();
   }
 
   case LifeResultCode::Help: {
@@ -1331,10 +1308,6 @@ void YCSBTxnManager::note_life_descriptor_complete(
     return;
 
   life_served_remote.response = descriptor;
-  life_served_remote.result = LifeExecuteResult();
-  life_served_remote.result.code = LifeResultCode::Success;
-  life_served_remote.result.transaction = descriptor;
-  life_served_remote.result.observed_attempt = descriptor.tid.attempt;
 }
 
 bool YCSBTxnManager::is_serving_life_execute() const {
@@ -1348,7 +1321,6 @@ void YCSBTxnManager::reset_served_life_execute() {
   life_served_remote.wait_id = UINT64_MAX;
   life_served_remote.root = LifeTxnDescriptor();
   life_served_remote.response = LifeTxnDescriptor();
-  life_served_remote.result = LifeExecuteResult();
 }
 
 RC YCSBTxnManager::finish_served_life_execute() {
@@ -1359,13 +1331,9 @@ RC YCSBTxnManager::finish_served_life_execute() {
       (LifeExecuteResponseMessage *)Message::create_message(RLIFE_EXECUTE_RSP);
   response->txn_id = life_served_remote.requester_txn_id;
   response->wait_id = life_served_remote.wait_id;
-  response->result = life_served_remote.result;
-  if (response->result.transaction.ycsb.requests.empty() &&
-      response->result.transaction.history.empty()) {
-    response->result.code = LifeResultCode::Success;
-    response->result.transaction = life_served_remote.response;
-    response->result.observed_attempt = life_served_remote.response.tid.attempt;
-  }
+  response->result.code = LifeResultCode::Success;
+  response->result.transaction = life_served_remote.response;
+  response->result.observed_attempt = life_served_remote.response.tid.attempt;
 
   msg_queue.enqueue(get_thd_id(), response,
                     life_served_remote.requester_node_id);
