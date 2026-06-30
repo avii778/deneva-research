@@ -1354,7 +1354,8 @@ void PrepareMessage::copy_to_buf(char * buf) {
 
 uint64_t LifeExecuteMessage::get_size() {
   return Message::mget_size() + life_descriptor_size(descriptor) +
-         life_operation_size(operation) + sizeof(wait_id);
+         life_operation_size(operation) + sizeof(wait_id) +
+         sizeof(stop_record_id);
 }
 
 void LifeExecuteMessage::copy_from_txn(TxnManager *txn) {
@@ -1371,6 +1372,7 @@ void LifeExecuteMessage::copy_from_buf(char *buf) {
   life_read_descriptor(buf, ptr, descriptor);
   life_read_operation(buf, ptr, operation);
   COPY_VAL(wait_id, buf, ptr);
+  COPY_VAL(stop_record_id, buf, ptr);
   assert(ptr == get_size());
 }
 
@@ -1380,6 +1382,7 @@ void LifeExecuteMessage::copy_to_buf(char *buf) {
   life_write_descriptor(buf, ptr, descriptor);
   life_write_operation(buf, ptr, operation);
   COPY_BUF(buf, wait_id, ptr);
+  COPY_BUF(buf, stop_record_id, ptr);
   assert(ptr == get_size());
 }
 

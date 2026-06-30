@@ -52,6 +52,10 @@ volatile uint64_t life_dbg_finalize_sent = 0;
 volatile uint64_t life_dbg_finalize_recv = 0;
 volatile uint64_t life_dbg_finalize_rsp_sent = 0;
 volatile uint64_t life_dbg_finalize_rsp_recv = 0;
+volatile uint64_t life_dbg_execute_rsp_stale = 0;
+volatile uint64_t life_dbg_execute_duplicate_wait = 0;
+volatile uint64_t life_dbg_prepare_rsp_duplicate = 0;
+volatile uint64_t life_dbg_finish_rsp_duplicate = 0;
 volatile uint64_t life_dbg_execute_rsp_recv_code[6] = {0, 0, 0, 0, 0, 0};
 
 void life_dbg_count_execute_rsp_code(LifeResultCode code) {
@@ -501,6 +505,7 @@ RC WorkerThread::process_life_execute(Message *msg) {
   bool deferred = false;
   RC rc = life_txn->serve_life_execute(life_msg->descriptor,
                                        life_msg->operation,
+                                       life_msg->stop_record_id,
                                        msg->return_node_id, msg->get_txn_id(),
                                        life_msg->wait_id, response->result,
                                        deferred);
@@ -569,7 +574,8 @@ RC WorkerThread::process_life_prepare_rsp(Message *msg) {
   YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
   const bool serving_remote = life_txn->is_serving_life_execute();
   LifePrepareResponseMessage *life_msg = (LifePrepareResponseMessage *)msg;
-  RC rc = life_txn->apply_life_prepare_response(life_msg->result);
+  RC rc = life_txn->apply_life_prepare_response(life_msg->result,
+                                                msg->return_node_id);
   if (!serving_remote)
     check_if_done(rc);
   if (serving_remote && rc != WAIT_REM && txn_man != NULL)
@@ -604,7 +610,8 @@ RC WorkerThread::process_life_finish_rsp(Message *msg) {
   YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
   const bool serving_remote = life_txn->is_serving_life_execute();
   LifeFinishResponseMessage *life_msg = (LifeFinishResponseMessage *)msg;
-  RC rc = life_txn->apply_life_finish_response(life_msg->result);
+  RC rc = life_txn->apply_life_finish_response(life_msg->result,
+                                               msg->return_node_id);
   if (!serving_remote)
     check_if_done(rc);
   if (serving_remote && rc != WAIT_REM && txn_man != NULL)

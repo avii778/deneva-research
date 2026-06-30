@@ -210,6 +210,7 @@ public:
   LifeTxnDescriptor descriptor;
   LifeOperation operation;
   uint64_t wait_id;
+  uint64_t stop_record_id;
 };
 
 class LifeExecuteResponseMessage : public Message {

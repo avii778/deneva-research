@@ -26,6 +26,10 @@
 
 #if CC_ALG == LIFE
 extern volatile uint64_t life_dbg_execute_rsp_recv_code[6];
+extern volatile uint64_t life_dbg_execute_rsp_stale;
+extern volatile uint64_t life_dbg_execute_duplicate_wait;
+extern volatile uint64_t life_dbg_prepare_rsp_duplicate;
+extern volatile uint64_t life_dbg_finish_rsp_duplicate;
 #endif
 
 void Stats_thd::init(uint64_t thd_id) {
@@ -1575,13 +1579,21 @@ void Stats::print(bool prog) {
           ",life_exec_rsp_committed=%lu"
           ",life_exec_rsp_help=%lu"
           ",life_exec_rsp_retry=%lu"
-          ",life_exec_rsp_invalid=%lu",
+          ",life_exec_rsp_invalid=%lu"
+          ",life_exec_rsp_stale=%lu"
+          ",life_exec_duplicate_wait=%lu"
+          ",life_prepare_rsp_duplicate=%lu"
+          ",life_finish_rsp_duplicate=%lu",
           life_dbg_execute_rsp_recv_code[0],
           life_dbg_execute_rsp_recv_code[1],
           life_dbg_execute_rsp_recv_code[2],
           life_dbg_execute_rsp_recv_code[3],
           life_dbg_execute_rsp_recv_code[4],
-          life_dbg_execute_rsp_recv_code[5]);
+          life_dbg_execute_rsp_recv_code[5],
+          life_dbg_execute_rsp_stale,
+          life_dbg_execute_duplicate_wait,
+          life_dbg_prepare_rsp_duplicate,
+          life_dbg_finish_rsp_duplicate);
 #endif
   mem_util(outf);
   cpu_util(outf);

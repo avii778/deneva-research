@@ -76,6 +76,7 @@ public:
   bool is_serving_life_execute() const;
   RC serve_life_execute(const LifeTxnDescriptor &descriptor,
                         const LifeOperation &operation,
+                        uint64_t stop_record_id,
                         uint64_t requester_node_id,
                         uint64_t requester_txn_id, uint64_t wait_id,
                         LifeExecuteResult &immediate_result,
@@ -92,8 +93,10 @@ public:
                                  uint64_t requester_node_id,
                                  uint64_t requester_txn_id);
   RC apply_life_finalize_response(const LifeExecuteResult &result);
-  RC apply_life_prepare_response(const LifeExecuteResult &result);
-  RC apply_life_finish_response(const LifeExecuteResult &result);
+  RC apply_life_prepare_response(const LifeExecuteResult &result,
+                                 uint64_t responder_node_id);
+  RC apply_life_finish_response(const LifeExecuteResult &result,
+                                uint64_t responder_node_id);
   void debug_life_state() const;
 #endif
   void copy_remote_requests(YCSBQueryMessage *msg);
@@ -144,8 +147,15 @@ private:
                             std::vector<LifeTxnDescriptor> &txns);
   bool take_life_wait_stack_by_reason(uint32_t reason,
                                       std::vector<LifeTxnDescriptor> &txns);
+  bool has_life_wait_stack(const LifeTxnDescriptor &descriptor,
+                           uint32_t reason, uint64_t remote_node_id,
+                           uint64_t remote_key) const;
+  bool note_life_prepare_response(uint64_t responder_node_id);
+  bool note_life_finish_response(uint64_t responder_node_id);
   row_t *lookup_life_row(const LifeObjectId &object) const;
   row_t *lookup_life_row(uint64_t key) const;
+  uint64_t life_remote_batch_stop(const LifeTxnDescriptor &descriptor,
+                                  uint64_t dest_node_id) const;
   LifeOperation make_life_operation(const LifeYcsbRequest &req);
   LifeOperation make_life_operation(row_t *row, ycsb_request *req);
   LifeOperation make_life_operation(row_t *row, const LifeYcsbRequest &req);
@@ -187,6 +197,8 @@ private:
   LifeTxnDescriptor life_pending_finalize;
   std::vector<LifeFinalizeObject> life_pending_objects;
   std::vector<uint64_t> life_pending_remote_nodes;
+  std::vector<uint64_t> life_prepare_response_nodes;
+  std::vector<uint64_t> life_finish_response_nodes;
   std::vector<uint64_t> *life_finalize_requester_nodes;
   std::vector<uint64_t> *life_finalize_requester_txn_ids;
   std::vector<LifeWaitContext> *life_wait_stacks;
