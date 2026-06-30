@@ -1,6 +1,6 @@
 CC=g++
 OPTFLAGS ?= -O2
-CFLAGS=-Wall -g -gdwarf-3 -std=c++0x $(OPTFLAGS)
+CFLAGS=-Wall -g -gdwarf-3 -std=c++0x $(OPTFLAGS) -I$(CONDA_PREFIX)/include
 #CFLAGS += -fsanitize=address -fno-omit-frame-pointer 
 JEMALLOC=./jemalloc-4.0.3
 NNMSG=./nanomsg-0.5-beta
@@ -12,8 +12,8 @@ DEPS = -I. -I./benchmarks -I./client/ -I./concurrency_control -I./storage -I./tr
 
 CFLAGS += $(DEPS) -D NOGRAPHITE=1 -Wno-sizeof-pointer-memaccess
 CFLAGS += -DJEMALLOC_NO_DEMANGLE
-LDFLAGS = -Wall -L. -L$(NNMSG) -L$(JEMALLOC)/lib -Wl,-rpath,$(JEMALLOC)/lib -pthread -gdwarf-3 -lrt -std=c++0x
-#LDFLAGS = -Wall -L. -L$(NNMSG) -L$(JEMALLOC)/lib -Wl,-rpath,$(JEMALLOC)/lib -pthread -gdwarf-3 -lrt -std=c++11
+LDFLAGS = -Wall -L. -L$(NNMSG) -L$(CONDA_PREFIX)/lib -L$(JEMALLOC)/lib -Wl,-rpath,$(JEMALLOC)/lib -Wl,-rpath,$(CONDA_PREFIX)/lib -pthread -gdwarf-3 -lrt -std=c++0x
+#LDFLAGS = -Wall -L. -L$(NNMSG) -L$(CONDA_PREFIX)/lib -L$(JEMALLOC)/lib -Wl,-rpath,$(JEMALLOC)/lib -Wl,-rpath,$(CONDA_PREFIX)/lib -pthread -gdwarf-3 -lrt -std=c++11
 LDFLAGS += $(CFLAGS)
 LIBS = -lnanomsg -lanl -ljemalloc 
 

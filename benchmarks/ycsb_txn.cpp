@@ -532,6 +532,26 @@ RC YCSBTxnManager::serve_life_execute(
   txns.reserve(g_req_per_query);
   txns.push_back(response_descriptor);
   deferred = true;
+
+  if (immediate_result.code == LifeResultCode::Help) {
+    push_life_help_descriptor(txns, immediate_result.transaction);
+    return try_life_transactions(txns) ? finish_served_life_execute()
+                                       : WAIT_REM;
+  }
+
+  assert(immediate_result.code == LifeResultCode::Finalize);
+  LifeTxnDescriptor finalize = immediate_result.transaction;
+  const uint64_t finalize_time = finalize.tid.time;
+  const uint64_t ctx_time = response_descriptor.tid.time;
+  const bool finalized = finalize_life_descriptor(finalize);
+  if (life_finalize_waiting) {
+    save_life_wait_stack(txns, 2, GET_NODE_ID(life_pending_finalize.tid.time),
+                         life_pending_finalize.tid.time);
+    return WAIT_REM;
+  }
+  if (finalized && finalize_time < ctx_time)
+    txns.push_back(finalize);
+
   return try_life_transactions(txns) ? finish_served_life_execute() : WAIT_REM;
 }
 
@@ -638,15 +658,14 @@ RC YCSBTxnManager::apply_life_help_request(const LifeTxnDescriptor &descriptor,
 RC YCSBTxnManager::apply_life_finalize_request(
     const LifeTxnDescriptor &descriptor, uint64_t requester_node_id,
     uint64_t requester_txn_id) {
+  add_life_finalize_requester(requester_node_id, requester_txn_id);
   if (life_finalize_waiting) {
-    add_life_finalize_requester(requester_node_id, requester_txn_id);
     return WAIT_REM;
   }
 
   LifeTxnDescriptor finalize = descriptor;
   const bool finalized = finalize_life_descriptor(finalize);
   if (life_finalize_waiting) {
-    add_life_finalize_requester(requester_node_id, requester_txn_id);
     return WAIT_REM;
   }
 

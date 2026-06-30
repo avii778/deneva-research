@@ -6,9 +6,9 @@
 // Simulation + Hardware
 /***********************************************/
 #define NODE_CNT 2
-#define THREAD_CNT 1
-#define REM_THREAD_CNT 1
-#define SEND_THREAD_CNT 1
+#define THREAD_CNT 4
+#define REM_THREAD_CNT 4
+#define SEND_THREAD_CNT 4
 #define CORE_CNT 8
 // PART_CNT should be at least NODE_CNT
 #define PART_CNT 2
@@ -114,8 +114,8 @@
 // per-row lock/ts management or central lock/ts management
 #define CENTRAL_MAN false
 #define BUCKET_CNT 31
-#define ABORT_PENALTY 10 * 1000000UL          // in ns.
-#define ABORT_PENALTY_MAX 5 * 100 * 1000000UL // in ns.
+#define ABORT_PENALTY 10 * 1000000UL   // in ns.
+#define ABORT_PENALTY_MAX 5 * 100 * 1000000UL   // in ns.
 #define LIFE_HELP_WAIT_US 0
 #define BACKOFF true
 // [ INDEX ]
@@ -359,8 +359,8 @@ enum PPSTxnType {
 #define PROG_TIMER 10 * BILLION // in s
 #define BATCH_TIMER 0
 #define SEQ_BATCH_TIMER 5 * 1 * MILLION // ~5ms -- same as CALVIN paper
-#define DONE_TIMER 1 * 60 * BILLION     // ~1 minutes
-#define WARMUP_TIMER 1 * 60 * BILLION   // ~1 minutes
+#define DONE_TIMER 1 * 60 * BILLION // ~1 minutes
+#define WARMUP_TIMER 1 * 60 * BILLION // ~1 minutes
 
 #define SEED 0
 #define SHMEM_ENV false
