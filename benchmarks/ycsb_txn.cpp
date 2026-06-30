@@ -1014,7 +1014,14 @@ RC YCSBTxnManager::apply_life_execute_response(
 
   case LifeResultCode::Committed: {
     if (has_saved_stack && !txns.empty()) {
-      note_life_descriptor_complete(txns.back());
+      const LifeTxnDescriptor &committed =
+          result.transaction.ycsb.requests.empty() ? txns.back()
+                                                   : result.transaction;
+      note_life_descriptor_complete(committed);
+      if (committed.pid == txn->life_pid &&
+          committed.tid.time == txn->life_tid.time) {
+        copy_life_descriptor_to_workload(committed);
+      }
       txns.pop_back();
       if (!txns.empty())
         return try_life_transactions(txns) ? continue_life_after_stack()

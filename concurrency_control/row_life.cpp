@@ -336,9 +336,18 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   const bool same_process_txn_attempt = tx.tid == local_tid;
   const size_t local_history_size = record_history_size(local);
 
-  if (tx.tid.time < local_tid.time ||
-      (same_process_txn_time && local_status == LifeTxnStatus::Committed)) {
+  if (tx.tid.time < local_tid.time) {
     return make_result(LifeResultCode::Committed);
+  }
+
+  if (same_process_txn_time && local_status == LifeTxnStatus::Committed) {
+    LifeExecuteResult result = make_result(LifeResultCode::Committed);
+    if (local != NULL && local->transaction) {
+      const LifeTxnDescriptorPtr committed = local->transaction;
+      guard.unlock();
+      result.transaction = *committed;
+    }
+    return result;
   }
 
   const bool must_defer =
