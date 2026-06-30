@@ -510,6 +510,9 @@ RC YCSBTxnManager::serve_life_execute(
     immediate_result.observed_attempt = response_descriptor.tid.attempt;
   }
 
+  if (immediate_result.code == LifeResultCode::Retry)
+    rollback_life_descriptor(response_descriptor);
+
   if (immediate_result.code != LifeResultCode::Help &&
       immediate_result.code != LifeResultCode::Finalize) {
     if (immediate_result.transaction.ycsb.requests.empty())
@@ -1218,6 +1221,9 @@ RC YCSBTxnManager::apply_life_finish_response(
     return continue_life_after_stack();
   }
 
+  std::vector<LifeTxnDescriptor> discarded_stack;
+  take_life_wait_stack_by_reason(2, discarded_stack);
+
   if (committed) {
     copy_life_descriptor_to_workload(finished);
     txn->life_status = LifeTxnStatus::Committed;
@@ -1307,16 +1313,21 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
   LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(descriptor);
   const std::vector<LifeFinalizeObject> &objects = frozen->touched_objects;
 
-  uint64_t observed_attempt = descriptor.tid.attempt;
   std::vector<uint64_t> remote_nodes;
   remote_nodes.reserve(g_node_cnt);
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
        it != objects.end(); ++it) {
     const uint64_t node_id = GET_NODE_ID(it->object.partition_id);
-    if (node_id != g_node_id) {
+    if (node_id != g_node_id)
       add_unique_life_node(remote_nodes, node_id);
+  }
+
+  uint64_t observed_attempt = descriptor.tid.attempt;
+  for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
+       it != objects.end(); ++it) {
+    const uint64_t node_id = GET_NODE_ID(it->object.partition_id);
+    if (node_id != g_node_id)
       continue;
-    }
 
     Row_life *manager = it->manager;
     if (manager == NULL)
@@ -1330,6 +1341,23 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
 
     if (result.code == LifeResultCode::Retry)
       observed_attempt = result.observed_attempt;
+
+    if (!remote_nodes.empty()) {
+      life_finalize_waiting = true;
+      life_prepare_pending = 0;
+      life_finish_pending = remote_nodes.size();
+      life_prepare_failed = true;
+      life_prepare_observed_attempt = observed_attempt;
+      life_pending_finalize = descriptor;
+      life_pending_finalize.touched_objects = objects;
+      life_pending_objects = objects;
+      life_pending_remote_nodes = remote_nodes;
+      send_life_finish_messages(life_pending_finalize,
+                                life_pending_remote_nodes, Abort);
+      reset_life_descriptor(life_pending_finalize, observed_attempt);
+      return false;
+    }
+
     reset_life_descriptor(descriptor, observed_attempt);
     return false;
   }
