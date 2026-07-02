@@ -1049,6 +1049,11 @@ RC YCSBTxnManager::apply_life_execute_response(
       if (committed.pid == txn->life_pid &&
           committed.tid.time == txn->life_tid.time) {
         copy_life_descriptor_to_workload(committed);
+        txn->life_status = LifeTxnStatus::Committed;
+        txns.clear();
+        return query == NULL || query->partitions_touched.size() == 0
+                   ? RCOK
+                   : commit();
       }
       txns.pop_back();
       if (!txns.empty())
