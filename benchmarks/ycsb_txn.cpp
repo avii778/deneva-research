@@ -470,6 +470,9 @@ RC YCSBTxnManager::serve_life_execute(
     uint64_t stop_record_id, uint64_t requester_node_id,
     uint64_t requester_txn_id, uint64_t wait_id,
     LifeExecuteResult &immediate_result, bool &deferred) {
+  (void)requester_node_id;
+  (void)requester_txn_id;
+  (void)wait_id;
   deferred = false;
   LifeTxnDescriptor response_descriptor = descriptor;
   if (stop_record_id <= response_descriptor.ycsb.next_record_id)
@@ -513,46 +516,13 @@ RC YCSBTxnManager::serve_life_execute(
   if (immediate_result.code == LifeResultCode::Retry)
     rollback_life_descriptor(response_descriptor);
 
-  if (immediate_result.code != LifeResultCode::Help &&
-      immediate_result.code != LifeResultCode::Finalize) {
-    if (immediate_result.transaction.ycsb.requests.empty())
-      immediate_result.transaction = response_descriptor;
-    return RCOK;
-  }
+  if (immediate_result.transaction.ycsb.requests.empty())
+    immediate_result.transaction = response_descriptor;
 
-  reset_served_life_execute();
-  life_served_remote.active = true;
-  life_served_remote.requester_node_id = requester_node_id;
-  life_served_remote.requester_txn_id = requester_txn_id;
-  life_served_remote.wait_id = wait_id;
-  life_served_remote.root = response_descriptor;
-  life_served_remote.response = response_descriptor;
-
-  std::vector<LifeTxnDescriptor> txns;
-  txns.reserve(g_req_per_query);
-  txns.push_back(response_descriptor);
-  deferred = true;
-
-  if (immediate_result.code == LifeResultCode::Help) {
-    push_life_help_descriptor(txns, immediate_result.transaction);
-    return try_life_transactions(txns) ? finish_served_life_execute()
-                                       : WAIT_REM;
-  }
-
-  assert(immediate_result.code == LifeResultCode::Finalize);
-  LifeTxnDescriptor finalize = immediate_result.transaction;
-  const uint64_t finalize_time = finalize.tid.time;
-  const uint64_t ctx_time = response_descriptor.tid.time;
-  const bool finalized = finalize_life_descriptor(finalize);
-  if (life_finalize_waiting) {
-    save_life_wait_stack(txns, 2, GET_NODE_ID(life_pending_finalize.tid.time),
-                         life_pending_finalize.tid.time);
-    return WAIT_REM;
-  }
-  if (finalized && finalize_time < ctx_time)
-    txns.push_back(finalize);
-
-  return try_life_transactions(txns) ? finish_served_life_execute() : WAIT_REM;
+  // Match Algorithm 1: Execute returns Help/Finalize to its caller. The
+  // requester owns the transaction stack and will decide which descriptor to
+  // help or finalize next.
+  return RCOK;
 }
 
 LifeExecuteResult
@@ -1092,25 +1062,6 @@ RC YCSBTxnManager::apply_life_execute_response(
 
   case LifeResultCode::Help: {
     LifeTxnDescriptor helped = result.transaction;
-    const bool owns_helped =
-        helped.pid == txn->life_pid && helped.tid.time == txn->life_tid.time;
-    if (owns_helped) {
-      if (has_saved_stack && !txns.empty()) {
-        txns.resize(1);
-        if (!has_current_descriptor && query != NULL) {
-          descriptor = life_descriptor();
-          descriptor.ycsb = make_life_ycsb_snapshot(*(YCSBQuery *)query, state,
-                                                    next_record_id);
-          has_current_descriptor = true;
-        }
-        if (has_current_descriptor)
-          txns.back() = descriptor;
-        return try_life_transactions(txns) ? continue_life_after_stack()
-                                           : WAIT_REM;
-      }
-      return continue_life_after_stack();
-    }
-
     push_life_help_descriptor(txns, helped);
     return try_life_transactions(txns) ? continue_life_after_stack() : WAIT_REM;
   }
