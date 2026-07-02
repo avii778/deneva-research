@@ -697,7 +697,8 @@ RC YCSBTxnManager::apply_life_finalize_request(
 RC YCSBTxnManager::apply_life_finalize_response(
     const LifeExecuteResult &result) {
   std::vector<LifeTxnDescriptor> txns;
-  const bool has_saved_stack = take_life_wait_stack_by_reason(2, txns);
+  const bool has_saved_stack =
+      take_life_wait_stack_by_descriptor(2, result.transaction, txns);
   reset_pending_life_finalize();
 
   if (result.code == LifeResultCode::Retry) {
@@ -823,6 +824,41 @@ bool YCSBTxnManager::take_life_wait_stack_by_reason(
     return true;
   }
   return false;
+}
+
+bool YCSBTxnManager::take_life_wait_stack_by_descriptor(
+    uint32_t reason, const LifeTxnDescriptor &descriptor,
+    std::vector<LifeTxnDescriptor> &txns) {
+  for (std::vector<LifeWaitContext>::iterator it = life_wait_stacks->begin();
+       it != life_wait_stacks->end(); ++it) {
+    if (it->reason != reason)
+      continue;
+    if (it->remote_key != descriptor.tid.time)
+      continue;
+
+    bool found = false;
+    for (std::vector<LifeTxnDescriptor>::const_iterator ctx = it->stack.begin();
+         ctx != it->stack.end(); ++ctx) {
+      if (ctx->pid == descriptor.pid && ctx->tid.time == descriptor.tid.time) {
+        found = true;
+        break;
+      }
+    }
+    if (!found)
+      continue;
+
+    txns = it->stack;
+    life_wait_stacks->erase(it);
+    return true;
+  }
+  return false;
+}
+
+bool YCSBTxnManager::pending_life_finalize_matches(
+    const LifeProcessId &pid, const LifeTxnId &tid) const {
+  return life_finalize_waiting && life_pending_finalize.pid == pid &&
+         life_pending_finalize.tid.time == tid.time &&
+         life_pending_finalize.tid.attempt == tid.attempt;
 }
 
 bool YCSBTxnManager::note_life_prepare_response(uint64_t responder_node_id) {
@@ -1141,9 +1177,12 @@ RC YCSBTxnManager::apply_life_execute_response(
 }
 
 RC YCSBTxnManager::apply_life_prepare_response(
-    const LifeExecuteResult &result, uint64_t responder_node_id) {
+    const LifeExecuteResult &result, const LifeProcessId &pid,
+    const LifeTxnId &tid, uint64_t responder_node_id) {
   if (!life_finalize_waiting || life_prepare_pending == 0)
     return continue_life_after_stack();
+  if (!pending_life_finalize_matches(pid, tid))
+    return WAIT_REM;
   if (!note_life_prepare_response(responder_node_id)) {
     __sync_fetch_and_add(&life_dbg_prepare_rsp_duplicate, 1);
     return WAIT_REM;
@@ -1163,10 +1202,10 @@ RC YCSBTxnManager::apply_life_prepare_response(
   if (life_prepare_failed) {
     send_life_finish_messages(life_pending_finalize, life_pending_remote_nodes,
                               Abort);
-    reset_life_descriptor(life_pending_finalize, life_prepare_observed_attempt);
     life_finish_pending = life_pending_remote_nodes.size();
     return life_finish_pending > 0 ? WAIT_REM
                                    : apply_life_finish_response(result,
+                                                                pid, tid,
                                                                 g_node_id);
   }
 
@@ -1190,14 +1229,18 @@ RC YCSBTxnManager::apply_life_prepare_response(
   life_finish_pending = life_pending_remote_nodes.size();
   return life_finish_pending > 0 ? WAIT_REM
                                  : apply_life_finish_response(result,
+                                                              pid, tid,
                                                               g_node_id);
 }
 
 RC YCSBTxnManager::apply_life_finish_response(
-    const LifeExecuteResult &result, uint64_t responder_node_id) {
+    const LifeExecuteResult &result, const LifeProcessId &pid,
+    const LifeTxnId &tid, uint64_t responder_node_id) {
   (void)result;
   if (!life_finalize_waiting || life_finish_pending == 0)
     return continue_life_after_stack();
+  if (!pending_life_finalize_matches(pid, tid))
+    return WAIT_REM;
   if (!note_life_finish_response(responder_node_id)) {
     __sync_fetch_and_add(&life_dbg_finish_rsp_duplicate, 1);
     return WAIT_REM;
@@ -1209,6 +1252,8 @@ RC YCSBTxnManager::apply_life_finish_response(
 
   const bool committed = !life_prepare_failed;
   LifeTxnDescriptor finished = life_pending_finalize;
+  if (!committed)
+    reset_life_descriptor(finished, life_prepare_observed_attempt);
   for (size_t index = 0; index < life_finalize_requester_nodes->size();
        ++index) {
     LifeExecuteResult response = LifeExecuteResult();
@@ -1224,7 +1269,8 @@ RC YCSBTxnManager::apply_life_finish_response(
                             finished.tid.time == txn->life_tid.time;
   if (!owns_pending) {
     std::vector<LifeTxnDescriptor> txns;
-    const bool has_saved_stack = take_life_wait_stack_by_reason(2, txns);
+    const bool has_saved_stack =
+        take_life_wait_stack_by_descriptor(2, finished, txns);
     reset_pending_life_finalize();
 
     if (has_saved_stack && !txns.empty()) {
@@ -1241,7 +1287,7 @@ RC YCSBTxnManager::apply_life_finish_response(
   }
 
   std::vector<LifeTxnDescriptor> discarded_stack;
-  take_life_wait_stack_by_reason(2, discarded_stack);
+  take_life_wait_stack_by_descriptor(2, finished, discarded_stack);
 
   if (committed) {
     copy_life_descriptor_to_workload(finished);
@@ -1373,7 +1419,6 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
       life_pending_remote_nodes = remote_nodes;
       send_life_finish_messages(life_pending_finalize,
                                 life_pending_remote_nodes, Abort);
-      reset_life_descriptor(life_pending_finalize, observed_attempt);
       return false;
     }
 

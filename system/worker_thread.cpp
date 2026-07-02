@@ -554,6 +554,8 @@ RC WorkerThread::process_life_prepare(Message *msg) {
   LifePrepareResponseMessage *response =
       (LifePrepareResponseMessage *)Message::create_message(RLIFE_PREPARE_RSP);
   response->txn_id = msg->get_txn_id();
+  response->pid = life_msg->descriptor.pid;
+  response->tid = life_msg->descriptor.tid;
   response->result =
       ((YCSBTxnManager *)txn_man)->prepare_life_remote(life_msg->descriptor);
   msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
@@ -575,6 +577,8 @@ RC WorkerThread::process_life_prepare_rsp(Message *msg) {
   const bool serving_remote = life_txn->is_serving_life_execute();
   LifePrepareResponseMessage *life_msg = (LifePrepareResponseMessage *)msg;
   RC rc = life_txn->apply_life_prepare_response(life_msg->result,
+                                                life_msg->pid,
+                                                life_msg->tid,
                                                 msg->return_node_id);
   if (!serving_remote)
     check_if_done(rc);
@@ -592,6 +596,8 @@ RC WorkerThread::process_life_finish(Message *msg) {
   LifeFinishResponseMessage *response =
       (LifeFinishResponseMessage *)Message::create_message(RLIFE_FINISH_RSP);
   response->txn_id = msg->get_txn_id();
+  response->pid = life_msg->descriptor.pid;
+  response->tid = life_msg->descriptor.tid;
   response->result = ((YCSBTxnManager *)txn_man)
                          ->finish_life_remote(life_msg->descriptor,
                                               life_msg->decision);
@@ -611,6 +617,8 @@ RC WorkerThread::process_life_finish_rsp(Message *msg) {
   const bool serving_remote = life_txn->is_serving_life_execute();
   LifeFinishResponseMessage *life_msg = (LifeFinishResponseMessage *)msg;
   RC rc = life_txn->apply_life_finish_response(life_msg->result,
+                                               life_msg->pid,
+                                               life_msg->tid,
                                                msg->return_node_id);
   if (!serving_remote)
     check_if_done(rc);

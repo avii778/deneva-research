@@ -1441,7 +1441,9 @@ void LifePrepareMessage::copy_to_buf(char *buf) {
 }
 
 uint64_t LifePrepareResponseMessage::get_size() {
-  return Message::mget_size() + sizeof(uint32_t) + sizeof(uint64_t);
+  return Message::mget_size() + sizeof(uint32_t) + sizeof(uint64_t) +
+         sizeof(pid.node_id) + sizeof(pid.worker_id) + sizeof(tid.time) +
+         sizeof(tid.attempt);
 }
 
 void LifePrepareResponseMessage::copy_from_txn(TxnManager *txn) {
@@ -1460,6 +1462,10 @@ void LifePrepareResponseMessage::copy_from_buf(char *buf) {
   result = LifeExecuteResult();
   result.code = static_cast<LifeResultCode>(code);
   COPY_VAL(result.observed_attempt, buf, ptr);
+  COPY_VAL(pid.node_id, buf, ptr);
+  COPY_VAL(pid.worker_id, buf, ptr);
+  COPY_VAL(tid.time, buf, ptr);
+  COPY_VAL(tid.attempt, buf, ptr);
   assert(ptr == get_size());
 }
 
@@ -1469,6 +1475,10 @@ void LifePrepareResponseMessage::copy_to_buf(char *buf) {
   const uint32_t code = static_cast<uint32_t>(result.code);
   COPY_BUF(buf, code, ptr);
   COPY_BUF(buf, result.observed_attempt, ptr);
+  COPY_BUF(buf, pid.node_id, ptr);
+  COPY_BUF(buf, pid.worker_id, ptr);
+  COPY_BUF(buf, tid.time, ptr);
+  COPY_BUF(buf, tid.attempt, ptr);
   assert(ptr == get_size());
 }
 
@@ -1608,7 +1618,8 @@ void LifeFinishMessage::copy_to_buf(char *buf) {
 }
 
 uint64_t LifeFinishResponseMessage::get_size() {
-  return Message::mget_size() + sizeof(uint32_t);
+  return Message::mget_size() + sizeof(uint32_t) + sizeof(pid.node_id) +
+         sizeof(pid.worker_id) + sizeof(tid.time) + sizeof(tid.attempt);
 }
 
 void LifeFinishResponseMessage::copy_from_txn(TxnManager *txn) {
@@ -1626,6 +1637,10 @@ void LifeFinishResponseMessage::copy_from_buf(char *buf) {
   COPY_VAL(code, buf, ptr);
   result = LifeExecuteResult();
   result.code = static_cast<LifeResultCode>(code);
+  COPY_VAL(pid.node_id, buf, ptr);
+  COPY_VAL(pid.worker_id, buf, ptr);
+  COPY_VAL(tid.time, buf, ptr);
+  COPY_VAL(tid.attempt, buf, ptr);
   assert(ptr == get_size());
 }
 
@@ -1634,6 +1649,10 @@ void LifeFinishResponseMessage::copy_to_buf(char *buf) {
   uint64_t ptr = Message::mget_size();
   const uint32_t code = static_cast<uint32_t>(result.code);
   COPY_BUF(buf, code, ptr);
+  COPY_BUF(buf, pid.node_id, ptr);
+  COPY_BUF(buf, pid.worker_id, ptr);
+  COPY_BUF(buf, tid.time, ptr);
+  COPY_BUF(buf, tid.attempt, ptr);
   assert(ptr == get_size());
 }
 

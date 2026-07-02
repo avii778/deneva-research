@@ -94,8 +94,12 @@ public:
                                  uint64_t requester_txn_id);
   RC apply_life_finalize_response(const LifeExecuteResult &result);
   RC apply_life_prepare_response(const LifeExecuteResult &result,
+                                 const LifeProcessId &pid,
+                                 const LifeTxnId &tid,
                                  uint64_t responder_node_id);
   RC apply_life_finish_response(const LifeExecuteResult &result,
+                                const LifeProcessId &pid,
+                                const LifeTxnId &tid,
                                 uint64_t responder_node_id);
   void debug_life_state() const;
 #endif
@@ -147,9 +151,14 @@ private:
                             std::vector<LifeTxnDescriptor> &txns);
   bool take_life_wait_stack_by_reason(uint32_t reason,
                                       std::vector<LifeTxnDescriptor> &txns);
+  bool take_life_wait_stack_by_descriptor(
+      uint32_t reason, const LifeTxnDescriptor &descriptor,
+      std::vector<LifeTxnDescriptor> &txns);
   bool has_life_wait_stack(const LifeTxnDescriptor &descriptor,
                            uint32_t reason, uint64_t remote_node_id,
                            uint64_t remote_key) const;
+  bool pending_life_finalize_matches(const LifeProcessId &pid,
+                                     const LifeTxnId &tid) const;
   bool note_life_prepare_response(uint64_t responder_node_id);
   bool note_life_finish_response(uint64_t responder_node_id);
   row_t *lookup_life_row(const LifeObjectId &object) const;

@@ -251,6 +251,8 @@ public:
   void release() {}
 
   LifeExecuteResult result;
+  LifeProcessId pid;
+  LifeTxnId tid;
 };
 
 class LifeHelpMessage : public Message {
@@ -331,6 +333,8 @@ public:
   void release() {}
 
   LifeExecuteResult result;
+  LifeProcessId pid;
+  LifeTxnId tid;
 };
 
 class ForwardMessage : public Message {
