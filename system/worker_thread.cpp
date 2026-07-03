@@ -56,6 +56,7 @@ volatile uint64_t life_dbg_execute_rsp_stale = 0;
 volatile uint64_t life_dbg_execute_duplicate_wait = 0;
 volatile uint64_t life_dbg_prepare_rsp_duplicate = 0;
 volatile uint64_t life_dbg_finish_rsp_duplicate = 0;
+volatile uint64_t life_dbg_inactive_msg_dropped = 0;
 volatile uint64_t life_dbg_execute_rsp_recv_code[6] = {0, 0, 0, 0, 0, 0};
 
 void life_dbg_count_execute_rsp_code(LifeResultCode code) {
@@ -184,6 +185,9 @@ void WorkerThread::check_if_done(RC rc) {
 }
 
 void WorkerThread::release_txn_man() {
+#if CC_ALG == LIFE && WORKLOAD == YCSB
+  ((YCSBTxnManager *)txn_man)->clear_life_active();
+#endif
   txn_table.release_transaction_manager(get_thd_id(),txn_man->get_txn_id(),txn_man->get_batch_id());
   txn_man = NULL;
 }
@@ -496,6 +500,7 @@ RC WorkerThread::process_life_execute(Message *msg) {
   assert(CC_ALG == LIFE);
   __sync_fetch_and_add(&life_dbg_execute_recv, 1);
 
+  ((YCSBTxnManager *)txn_man)->mark_life_active();
   LifeExecuteMessage *life_msg = (LifeExecuteMessage *)msg;
   LifeExecuteResponseMessage *response =
       (LifeExecuteResponseMessage *)Message::create_message(RLIFE_EXECUTE_RSP);
@@ -528,10 +533,16 @@ RC WorkerThread::process_life_execute_rsp(Message *msg) {
   assert(CC_ALG == LIFE);
   __sync_fetch_and_add(&life_dbg_execute_rsp_recv, 1);
 
+  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  if (!life_txn->is_life_active()) {
+    __sync_fetch_and_add(&life_dbg_inactive_msg_dropped, 1);
+    release_txn_man();
+    return RCOK;
+  }
+
   txn_man->txn_stats.remote_wait_time +=
       get_sys_clock() - txn_man->txn_stats.wait_starttime;
 
-  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
   const bool serving_remote = life_txn->is_serving_life_execute();
   LifeExecuteResponseMessage *life_msg = (LifeExecuteResponseMessage *)msg;
   life_dbg_count_execute_rsp_code(life_msg->result.code);
@@ -550,6 +561,7 @@ RC WorkerThread::process_life_prepare(Message *msg) {
   assert(CC_ALG == LIFE);
   __sync_fetch_and_add(&life_dbg_prepare_recv, 1);
 
+  ((YCSBTxnManager *)txn_man)->mark_life_active();
   LifePrepareMessage *life_msg = (LifePrepareMessage *)msg;
   LifePrepareResponseMessage *response =
       (LifePrepareResponseMessage *)Message::create_message(RLIFE_PREPARE_RSP);
@@ -570,10 +582,16 @@ RC WorkerThread::process_life_prepare_rsp(Message *msg) {
   assert(CC_ALG == LIFE);
   __sync_fetch_and_add(&life_dbg_prepare_rsp_recv, 1);
 
+  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  if (!life_txn->is_life_active()) {
+    __sync_fetch_and_add(&life_dbg_inactive_msg_dropped, 1);
+    release_txn_man();
+    return RCOK;
+  }
+
   txn_man->txn_stats.remote_wait_time +=
       get_sys_clock() - txn_man->txn_stats.wait_starttime;
 
-  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
   const bool serving_remote = life_txn->is_serving_life_execute();
   LifePrepareResponseMessage *life_msg = (LifePrepareResponseMessage *)msg;
   RC rc = life_txn->apply_life_prepare_response(life_msg->result,
@@ -592,6 +610,7 @@ RC WorkerThread::process_life_finish(Message *msg) {
   assert(CC_ALG == LIFE);
   __sync_fetch_and_add(&life_dbg_finish_recv, 1);
 
+  ((YCSBTxnManager *)txn_man)->mark_life_active();
   LifeFinishMessage *life_msg = (LifeFinishMessage *)msg;
   LifeFinishResponseMessage *response =
       (LifeFinishResponseMessage *)Message::create_message(RLIFE_FINISH_RSP);
@@ -614,6 +633,12 @@ RC WorkerThread::process_life_finish_rsp(Message *msg) {
   __sync_fetch_and_add(&life_dbg_finish_rsp_recv, 1);
 
   YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  if (!life_txn->is_life_active()) {
+    __sync_fetch_and_add(&life_dbg_inactive_msg_dropped, 1);
+    release_txn_man();
+    return RCOK;
+  }
+
   const bool serving_remote = life_txn->is_serving_life_execute();
   LifeFinishResponseMessage *life_msg = (LifeFinishResponseMessage *)msg;
   RC rc = life_txn->apply_life_finish_response(life_msg->result,
@@ -632,15 +657,23 @@ RC WorkerThread::process_life_help(Message *msg) {
   assert(CC_ALG == LIFE);
   assert(IS_LOCAL(msg->get_txn_id()));
 
+  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  if (!life_txn->is_life_active()) {
+    __sync_fetch_and_add(&life_dbg_inactive_msg_dropped, 1);
+    release_txn_man();
+    return RCOK;
+  }
+
   LifeHelpMessage *life_msg = (LifeHelpMessage *)msg;
-  return ((YCSBTxnManager *)txn_man)
-      ->apply_life_help_request(life_msg->descriptor, msg->return_node_id);
+  return life_txn->apply_life_help_request(life_msg->descriptor,
+                                           msg->return_node_id);
 }
 
 RC WorkerThread::process_life_help_apply(Message *msg) {
   DEBUG("RLIFE_HELP_APPLY %ld\n", msg->get_txn_id());
   assert(CC_ALG == LIFE);
 
+  ((YCSBTxnManager *)txn_man)->mark_life_active();
   LifeHelpApplyMessage *life_msg = (LifeHelpApplyMessage *)msg;
   RC rc = ((YCSBTxnManager *)txn_man)->help_life_remote(life_msg->descriptor);
   if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM)
@@ -654,11 +687,21 @@ RC WorkerThread::process_life_finalize(Message *msg) {
   assert(IS_LOCAL(msg->get_txn_id()));
   __sync_fetch_and_add(&life_dbg_finalize_recv, 1);
 
-  LifeFinalizeMessage *life_msg = (LifeFinalizeMessage *)msg;
-  RC rc = ((YCSBTxnManager *)txn_man)
-              ->apply_life_finalize_request(life_msg->descriptor,
+  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  if (!life_txn->is_life_active()) {
+    LifeFinalizeMessage *life_msg = (LifeFinalizeMessage *)msg;
+    life_txn->respond_life_finalize_success(life_msg->descriptor,
                                             msg->return_node_id,
                                             life_msg->requester_txn_id);
+    __sync_fetch_and_add(&life_dbg_inactive_msg_dropped, 1);
+    release_txn_man();
+    return RCOK;
+  }
+
+  LifeFinalizeMessage *life_msg = (LifeFinalizeMessage *)msg;
+  RC rc = life_txn->apply_life_finalize_request(life_msg->descriptor,
+                                                msg->return_node_id,
+                                                life_msg->requester_txn_id);
   check_if_done(rc);
   return rc;
 }
@@ -669,6 +712,12 @@ RC WorkerThread::process_life_finalize_rsp(Message *msg) {
   __sync_fetch_and_add(&life_dbg_finalize_rsp_recv, 1);
 
   YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  if (!life_txn->is_life_active()) {
+    __sync_fetch_and_add(&life_dbg_inactive_msg_dropped, 1);
+    release_txn_man();
+    return RCOK;
+  }
+
   const bool serving_remote = life_txn->is_serving_life_execute();
   LifeFinalizeResponseMessage *life_msg = (LifeFinalizeResponseMessage *)msg;
   RC rc = life_txn->apply_life_finalize_response(life_msg->result);
@@ -740,6 +789,9 @@ RC WorkerThread::process_rtxn(Message * msg) {
           txn_man->txn_stats.starttime = get_sys_clock();
           txn_man->txn_stats.restart_starttime = txn_man->txn_stats.starttime;
           msg->copy_to_txn(txn_man);
+#if CC_ALG == LIFE && WORKLOAD == YCSB
+          ((YCSBTxnManager *)txn_man)->mark_life_active();
+#endif
           DEBUG("START %ld %f %lu\n",txn_man->get_txn_id(),simulation->seconds_from_start(get_sys_clock()),txn_man->txn_stats.starttime);
           INC_STATS(get_thd_id(),local_txn_start_cnt,1);
 

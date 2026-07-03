@@ -124,7 +124,7 @@ extern volatile uint64_t life_dbg_finish_rsp_duplicate;
 YCSBTxnManager::YCSBTxnManager()
     : life_finalize_requester_nodes(NULL),
       life_finalize_requester_txn_ids(NULL), life_wait_stacks(NULL),
-      life_next_wait_id(1) {
+      life_active(false), life_next_wait_id(1) {
   life_served_remote.active = false;
   h_thd = NULL;
   h_wl = NULL;
@@ -164,6 +164,7 @@ void YCSBTxnManager::reset() {
   state = YCSB_0;
   next_record_id = 0;
 #if CC_ALG == LIFE
+  life_active = false;
   reset_pending_life_finalize();
   reset_served_life_execute();
   life_wait_stacks->clear();
@@ -183,6 +184,20 @@ void YCSBTxnManager::life_reset_workload() {
   next_record_id = 0;
   reset_pending_life_finalize();
   reset_served_life_execute();
+}
+
+bool YCSBTxnManager::is_life_active() const { return life_active; }
+
+void YCSBTxnManager::mark_life_active() { life_active = true; }
+
+void YCSBTxnManager::clear_life_active() {
+  life_active = false;
+  state = YCSB_0;
+  next_record_id = 0;
+  reset_pending_life_finalize();
+  reset_served_life_execute();
+  life_wait_stacks->clear();
+  life_next_wait_id = 1;
 }
 #endif
 
@@ -662,6 +677,16 @@ RC YCSBTxnManager::apply_life_finalize_request(
 
   copy_life_descriptor_to_workload(finalize);
   return run_life_txn();
+}
+
+void YCSBTxnManager::respond_life_finalize_success(
+    const LifeTxnDescriptor &descriptor, uint64_t requester_node_id,
+    uint64_t requester_txn_id) {
+  LifeExecuteResult response = LifeExecuteResult();
+  response.code = LifeResultCode::Success;
+  response.transaction = descriptor;
+  response.observed_attempt = descriptor.tid.attempt;
+  send_life_finalize_response(response, requester_node_id, requester_txn_id);
 }
 
 RC YCSBTxnManager::apply_life_finalize_response(

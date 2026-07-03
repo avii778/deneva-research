@@ -92,16 +92,22 @@ public:
   RC apply_life_finalize_request(const LifeTxnDescriptor &descriptor,
                                  uint64_t requester_node_id,
                                  uint64_t requester_txn_id);
+  void respond_life_finalize_success(const LifeTxnDescriptor &descriptor,
+                                     uint64_t requester_node_id,
+                                     uint64_t requester_txn_id);
   RC apply_life_finalize_response(const LifeExecuteResult &result);
   RC apply_life_prepare_response(const LifeExecuteResult &result,
-                                 const LifeProcessId &pid,
-                                 const LifeTxnId &tid,
-                                 uint64_t responder_node_id);
+                                  const LifeProcessId &pid,
+                                  const LifeTxnId &tid,
+                                  uint64_t responder_node_id);
   RC apply_life_finish_response(const LifeExecuteResult &result,
                                 const LifeProcessId &pid,
                                 const LifeTxnId &tid,
                                 uint64_t responder_node_id);
   void debug_life_state() const;
+  bool is_life_active() const;
+  void mark_life_active();
+  void clear_life_active();
 #endif
   void copy_remote_requests(YCSBQueryMessage *msg);
 
@@ -212,6 +218,7 @@ private:
   std::vector<uint64_t> *life_finalize_requester_txn_ids;
   std::vector<LifeWaitContext> *life_wait_stacks;
   LifeServedRemoteContext life_served_remote;
+  bool life_active;
   uint64_t life_next_wait_id;
 #if LOG_LIFE
   uint64_t life_help_time;
