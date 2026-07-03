@@ -194,6 +194,9 @@ private:
   std::vector<uint64_t> life_pending_remote_nodes;
   std::vector<uint64_t> life_prepare_response_nodes;
   std::vector<uint64_t> life_finish_response_nodes;
+  std::vector<LifeTxnDescriptor> life_txn_stack;
+  std::vector<LifeTxnDescriptor> life_response_stack;
+  std::vector<LifeFinalizeObject> life_object_scratch;
   std::vector<uint64_t> *life_finalize_requester_nodes;
   std::vector<uint64_t> *life_finalize_requester_txn_ids;
   std::vector<LifeWaitContext> *life_wait_stacks;

@@ -28,7 +28,7 @@
 #include "work_queue.h"
 #include "message.h"
 
-#if CC_ALG == LIFE
+#if CC_ALG == LIFE && LIFE_DEBUG_COUNTERS
 extern volatile uint64_t life_dbg_execute_sent;
 extern volatile uint64_t life_dbg_execute_recv;
 extern volatile uint64_t life_dbg_execute_rsp_sent;
@@ -68,7 +68,7 @@ void TxnTable::init() {
 }
 
 void TxnTable::dump() {
-#if CC_ALG == LIFE
+#if CC_ALG == LIFE && LIFE_DEBUG_COUNTERS
   printf("LIFE_DBG execute sent=%lu recv=%lu rsp_sent=%lu rsp_recv=%lu "
          "rsp_applied=%lu\n",
          life_dbg_execute_sent, life_dbg_execute_recv,

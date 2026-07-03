@@ -58,6 +58,8 @@ volatile uint64_t life_dbg_prepare_rsp_duplicate = 0;
 volatile uint64_t life_dbg_finish_rsp_duplicate = 0;
 volatile uint64_t life_dbg_inactive_msg_dropped = 0;
 volatile uint64_t life_dbg_execute_rsp_recv_code[6] = {0, 0, 0, 0, 0, 0};
+volatile uint64_t life_dbg_msg_count = 0;
+volatile uint64_t life_dbg_msg_bytes = 0;
 
 #ifndef LIFE_DEBUG_COUNTERS
 #define LIFE_DEBUG_COUNTERS false

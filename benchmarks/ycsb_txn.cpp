@@ -162,6 +162,9 @@ void YCSBTxnManager::init(uint64_t thd_id, Workload *h_wl) {
   life_wait_stacks->reserve(g_req_per_query);
   life_prepare_response_nodes.reserve(g_node_cnt);
   life_finish_response_nodes.reserve(g_node_cnt);
+  life_txn_stack.reserve(g_req_per_query);
+  life_response_stack.reserve(g_req_per_query);
+  life_object_scratch.reserve(g_req_per_query);
   TxnManager::init(thd_id, h_wl);
   _wl = (YCSBWorkload *)h_wl;
   reset();
@@ -288,11 +291,10 @@ RC YCSBTxnManager::run_txn() {
 RC YCSBTxnManager::run_life_txn() {
   uint64_t starttime = get_sys_clock();
 
-  std::vector<LifeTxnDescriptor> txns;
-  txns.reserve(g_req_per_query);
-  txns.push_back(life_descriptor());
+  life_txn_stack.clear();
+  life_txn_stack.push_back(life_descriptor());
 
-  const bool complete = try_life_transactions(txns);
+  const bool complete = try_life_transactions(life_txn_stack);
 
   uint64_t curr_time = get_sys_clock();
   txn_stats.process_time += curr_time - starttime;
@@ -540,7 +542,7 @@ RC YCSBTxnManager::serve_life_execute(
 
 LifeExecuteResult
 YCSBTxnManager::prepare_life_remote(const LifeTxnDescriptor &descriptor) {
-  std::vector<LifeFinalizeObject> fallback_objects;
+  life_object_scratch.clear();
   const std::vector<LifeFinalizeObject> *objects = &descriptor.touched_objects;
   size_t cached_indices = 0;
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects->begin();
@@ -548,9 +550,8 @@ YCSBTxnManager::prepare_life_remote(const LifeTxnDescriptor &descriptor) {
     cached_indices += it->history_indices.size();
   }
   if (cached_indices != descriptor.history.size()) {
-    fallback_objects.reserve(descriptor.history.size());
-    collect_life_objects(descriptor, fallback_objects);
-    objects = &fallback_objects;
+    collect_life_objects(descriptor, life_object_scratch);
+    objects = &life_object_scratch;
   }
 
   LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(descriptor);
@@ -588,7 +589,7 @@ YCSBTxnManager::prepare_life_remote(const LifeTxnDescriptor &descriptor) {
 LifeExecuteResult
 YCSBTxnManager::finish_life_remote(const LifeTxnDescriptor &descriptor,
                                    RC decision) {
-  std::vector<LifeFinalizeObject> fallback_objects;
+  life_object_scratch.clear();
   const std::vector<LifeFinalizeObject> *objects = &descriptor.touched_objects;
   size_t cached_indices = 0;
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects->begin();
@@ -596,9 +597,8 @@ YCSBTxnManager::finish_life_remote(const LifeTxnDescriptor &descriptor,
     cached_indices += it->history_indices.size();
   }
   if (cached_indices != descriptor.history.size()) {
-    fallback_objects.reserve(descriptor.history.size());
-    collect_life_objects(descriptor, fallback_objects);
-    objects = &fallback_objects;
+    collect_life_objects(descriptor, life_object_scratch);
+    objects = &life_object_scratch;
   }
 
   LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(descriptor);
@@ -626,10 +626,9 @@ YCSBTxnManager::finish_life_remote(const LifeTxnDescriptor &descriptor,
 }
 
 RC YCSBTxnManager::help_life_remote(const LifeTxnDescriptor &descriptor) {
-  std::vector<LifeTxnDescriptor> txns;
-  txns.reserve(g_req_per_query);
-  txns.push_back(descriptor);
-  return try_life_transactions(txns) ? RCOK : WAIT_REM;
+  life_response_stack.clear();
+  life_response_stack.push_back(descriptor);
+  return try_life_transactions(life_response_stack) ? RCOK : WAIT_REM;
 }
 
 RC YCSBTxnManager::apply_life_help_request(const LifeTxnDescriptor &descriptor,
@@ -689,7 +688,8 @@ void YCSBTxnManager::respond_life_finalize_success(
 
 RC YCSBTxnManager::apply_life_finalize_response(
     const LifeExecuteResult &result) {
-  std::vector<LifeTxnDescriptor> txns;
+  life_response_stack.clear();
+  std::vector<LifeTxnDescriptor> &txns = life_response_stack;
   const bool has_saved_stack =
       take_life_wait_stack_by_descriptor(2, result.transaction, txns);
   reset_pending_life_finalize();
@@ -1006,7 +1006,8 @@ void YCSBTxnManager::send_life_finish_messages(
 
 RC YCSBTxnManager::apply_life_execute_response(
     const LifeExecuteResult &result, uint64_t wait_id) {
-  std::vector<LifeTxnDescriptor> txns;
+  life_response_stack.clear();
+  std::vector<LifeTxnDescriptor> &txns = life_response_stack;
   const bool has_saved_stack = take_life_wait_stack(wait_id, txns);
   if (!has_saved_stack) {
     LIFE_DBG_INC(life_dbg_execute_rsp_stale);
@@ -1217,7 +1218,8 @@ RC YCSBTxnManager::apply_life_finish_response(
   const bool owns_pending = finished.pid == txn->life_pid &&
                             finished.tid.time == txn->life_tid.time;
   if (!owns_pending) {
-    std::vector<LifeTxnDescriptor> txns;
+    life_response_stack.clear();
+    std::vector<LifeTxnDescriptor> &txns = life_response_stack;
     const bool has_saved_stack =
         take_life_wait_stack_by_descriptor(2, finished, txns);
     reset_pending_life_finalize();
@@ -1235,8 +1237,8 @@ RC YCSBTxnManager::apply_life_finish_response(
     return continue_life_after_stack();
   }
 
-  std::vector<LifeTxnDescriptor> discarded_stack;
-  take_life_wait_stack_by_descriptor(2, finished, discarded_stack);
+  life_response_stack.clear();
+  take_life_wait_stack_by_descriptor(2, finished, life_response_stack);
 
   if (committed) {
     copy_life_descriptor_to_workload(finished);
@@ -1283,7 +1285,7 @@ void YCSBTxnManager::collect_life_objects(
 
 void YCSBTxnManager::rollback_life_descriptor(
     const LifeTxnDescriptor &descriptor) {
-  std::vector<LifeFinalizeObject> fallback_objects;
+  life_object_scratch.clear();
   const std::vector<LifeFinalizeObject> *objects = &descriptor.touched_objects;
   size_t cached_indices = 0;
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects->begin();
@@ -1291,9 +1293,8 @@ void YCSBTxnManager::rollback_life_descriptor(
     cached_indices += it->history_indices.size();
   }
   if (cached_indices != descriptor.history.size()) {
-    fallback_objects.reserve(descriptor.history.size());
-    collect_life_objects(descriptor, fallback_objects);
-    objects = &fallback_objects;
+    collect_life_objects(descriptor, life_object_scratch);
+    objects = &life_object_scratch;
   }
 
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects->begin();
@@ -1327,7 +1328,8 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
   LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(descriptor);
   const std::vector<LifeFinalizeObject> &objects = frozen->touched_objects;
 
-  std::vector<uint64_t> remote_nodes;
+  std::vector<uint64_t> &remote_nodes = life_pending_remote_nodes;
+  remote_nodes.clear();
   remote_nodes.reserve(g_node_cnt);
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
        it != objects.end(); ++it) {
@@ -1365,7 +1367,6 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
       life_pending_finalize = descriptor;
       life_pending_finalize.touched_objects = objects;
       life_pending_objects = objects;
-      life_pending_remote_nodes = remote_nodes;
       send_life_finish_messages(life_pending_finalize,
                                 life_pending_remote_nodes, Abort);
       return false;
@@ -1384,7 +1385,6 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
     life_pending_finalize = descriptor;
     life_pending_finalize.touched_objects = objects;
     life_pending_objects = objects;
-    life_pending_remote_nodes = remote_nodes;
     send_life_prepare_messages(life_pending_finalize,
                                life_pending_remote_nodes);
     return false;

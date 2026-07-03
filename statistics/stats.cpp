@@ -24,12 +24,14 @@
 #include <time.h>
 #include <sys/times.h>
 
-#if CC_ALG == LIFE
+#if CC_ALG == LIFE && LIFE_DEBUG_COUNTERS
 extern volatile uint64_t life_dbg_execute_rsp_recv_code[6];
 extern volatile uint64_t life_dbg_execute_rsp_stale;
 extern volatile uint64_t life_dbg_execute_duplicate_wait;
 extern volatile uint64_t life_dbg_prepare_rsp_duplicate;
 extern volatile uint64_t life_dbg_finish_rsp_duplicate;
+extern volatile uint64_t life_dbg_msg_count;
+extern volatile uint64_t life_dbg_msg_bytes;
 #endif
 
 void Stats_thd::init(uint64_t thd_id) {
@@ -1572,7 +1574,7 @@ void Stats::print(bool prog) {
   else
 	  fprintf(outf, "[summary] ");
   totals->print(outf,prog);
-#if CC_ALG == LIFE
+#if CC_ALG == LIFE && LIFE_DEBUG_COUNTERS
   fprintf(outf,
           ",life_exec_rsp_success=%lu"
           ",life_exec_rsp_finalize=%lu"
@@ -1583,7 +1585,9 @@ void Stats::print(bool prog) {
           ",life_exec_rsp_stale=%lu"
           ",life_exec_duplicate_wait=%lu"
           ",life_prepare_rsp_duplicate=%lu"
-          ",life_finish_rsp_duplicate=%lu",
+          ",life_finish_rsp_duplicate=%lu"
+          ",life_msg_count=%lu"
+          ",life_msg_bytes=%lu",
           life_dbg_execute_rsp_recv_code[0],
           life_dbg_execute_rsp_recv_code[1],
           life_dbg_execute_rsp_recv_code[2],
@@ -1593,7 +1597,9 @@ void Stats::print(bool prog) {
           life_dbg_execute_rsp_stale,
           life_dbg_execute_duplicate_wait,
           life_dbg_prepare_rsp_duplicate,
-          life_dbg_finish_rsp_duplicate);
+          life_dbg_finish_rsp_duplicate,
+          life_dbg_msg_count,
+          life_dbg_msg_bytes);
 #endif
   mem_util(outf);
   cpu_util(outf);

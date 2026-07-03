@@ -26,6 +26,18 @@
 #include "message.h"
 #include "maat.h"
 
+#if CC_ALG == LIFE && LIFE_DEBUG_COUNTERS
+extern volatile uint64_t life_dbg_msg_count;
+extern volatile uint64_t life_dbg_msg_bytes;
+#define LIFE_DBG_MSG_SIZE(size)                                                \
+  do {                                                                         \
+    __sync_fetch_and_add(&life_dbg_msg_count, 1);                              \
+    __sync_fetch_and_add(&life_dbg_msg_bytes, (size));                         \
+  } while (0)
+#else
+#define LIFE_DBG_MSG_SIZE(size) ((void)0)
+#endif
+
 namespace {
 
 uint64_t life_bytes_size(const LifeBytes &bytes) {
@@ -1377,6 +1389,7 @@ void LifeExecuteMessage::copy_from_buf(char *buf) {
 }
 
 void LifeExecuteMessage::copy_to_buf(char *buf) {
+  LIFE_DBG_MSG_SIZE(get_size());
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   life_write_descriptor(buf, ptr, descriptor);
@@ -1407,6 +1420,7 @@ void LifeExecuteResponseMessage::copy_from_buf(char *buf) {
 }
 
 void LifeExecuteResponseMessage::copy_to_buf(char *buf) {
+  LIFE_DBG_MSG_SIZE(get_size());
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   COPY_BUF(buf, wait_id, ptr);
@@ -1434,6 +1448,7 @@ void LifePrepareMessage::copy_from_buf(char *buf) {
 }
 
 void LifePrepareMessage::copy_to_buf(char *buf) {
+  LIFE_DBG_MSG_SIZE(get_size());
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   life_write_descriptor(buf, ptr, descriptor);
@@ -1470,6 +1485,7 @@ void LifePrepareResponseMessage::copy_from_buf(char *buf) {
 }
 
 void LifePrepareResponseMessage::copy_to_buf(char *buf) {
+  LIFE_DBG_MSG_SIZE(get_size());
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   const uint32_t code = static_cast<uint32_t>(result.code);
@@ -1502,6 +1518,7 @@ void LifeHelpMessage::copy_from_buf(char *buf) {
 }
 
 void LifeHelpMessage::copy_to_buf(char *buf) {
+  LIFE_DBG_MSG_SIZE(get_size());
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   life_write_descriptor(buf, ptr, descriptor);
@@ -1528,6 +1545,7 @@ void LifeHelpApplyMessage::copy_from_buf(char *buf) {
 }
 
 void LifeHelpApplyMessage::copy_to_buf(char *buf) {
+  LIFE_DBG_MSG_SIZE(get_size());
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   life_write_descriptor(buf, ptr, descriptor);
@@ -1556,6 +1574,7 @@ void LifeFinalizeMessage::copy_from_buf(char *buf) {
 }
 
 void LifeFinalizeMessage::copy_to_buf(char *buf) {
+  LIFE_DBG_MSG_SIZE(get_size());
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   COPY_BUF(buf, requester_txn_id, ptr);
@@ -1583,6 +1602,7 @@ void LifeFinalizeResponseMessage::copy_from_buf(char *buf) {
 }
 
 void LifeFinalizeResponseMessage::copy_to_buf(char *buf) {
+  LIFE_DBG_MSG_SIZE(get_size());
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   life_write_result(buf, ptr, result);
@@ -1610,6 +1630,7 @@ void LifeFinishMessage::copy_from_buf(char *buf) {
 }
 
 void LifeFinishMessage::copy_to_buf(char *buf) {
+  LIFE_DBG_MSG_SIZE(get_size());
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   life_write_descriptor(buf, ptr, descriptor);
@@ -1645,6 +1666,7 @@ void LifeFinishResponseMessage::copy_from_buf(char *buf) {
 }
 
 void LifeFinishResponseMessage::copy_to_buf(char *buf) {
+  LIFE_DBG_MSG_SIZE(get_size());
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   const uint32_t code = static_cast<uint32_t>(result.code);
