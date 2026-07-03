@@ -151,6 +151,7 @@
 #define LOG_COMMAND false
 #define LOG_REDO false
 #define LOG_LIFE false
+#define LIFE_DEBUG_COUNTERS false
 #define LIFE_LOG_FILE "life_timing.log"
 #define LOGGING false
 #define LOG_BUF_MAX 10

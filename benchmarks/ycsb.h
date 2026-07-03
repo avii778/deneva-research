@@ -73,14 +73,10 @@ public:
                        const LifeOperation &operation, uint64_t wait_id);
   LifeExecuteResult execute_life_remote(const LifeTxnDescriptor &descriptor,
                                         const LifeOperation &operation);
-  bool is_serving_life_execute() const;
   RC serve_life_execute(const LifeTxnDescriptor &descriptor,
                         const LifeOperation &operation,
                         uint64_t stop_record_id,
-                        uint64_t requester_node_id,
-                        uint64_t requester_txn_id, uint64_t wait_id,
-                        LifeExecuteResult &immediate_result,
-                        bool &deferred);
+                        LifeExecuteResult &immediate_result);
   RC apply_life_execute_response(const LifeExecuteResult &result,
                                  uint64_t wait_id);
   LifeExecuteResult prepare_life_remote(const LifeTxnDescriptor &descriptor);
@@ -120,15 +116,6 @@ private:
     uint64_t remote_key;
     std::vector<LifeTxnDescriptor> stack;
   };
-  struct LifeServedRemoteContext {
-    bool active;
-    uint64_t requester_node_id;
-    uint64_t requester_txn_id;
-    uint64_t wait_id;
-    LifeTxnDescriptor root;
-    LifeTxnDescriptor response;
-  };
-
 #if CC_ALG == LIFE
   RC run_life_txn();
   bool try_life_transactions(std::vector<LifeTxnDescriptor> &txns);
@@ -141,9 +128,6 @@ private:
                            const LifeOperation &operation,
                            const LifeResponse &response);
   RC continue_life_after_stack();
-  void note_life_descriptor_complete(const LifeTxnDescriptor &descriptor);
-  void reset_served_life_execute();
-  RC finish_served_life_execute();
   void push_life_help_descriptor(std::vector<LifeTxnDescriptor> &txns,
                                  const LifeTxnDescriptor &descriptor);
   void rollback_life_descriptor(const LifeTxnDescriptor &descriptor);
@@ -176,10 +160,6 @@ private:
   LifeOperation make_life_operation(row_t *row, const LifeYcsbRequest &req);
   void reset_pending_life_finalize();
   void send_life_message_to_node(Message *msg, uint64_t node_id);
-  void send_life_help_request(const LifeTxnDescriptor &descriptor);
-  void send_life_help_apply_messages(const LifeTxnDescriptor &descriptor,
-                                     const std::vector<uint64_t> &nodes,
-                                     uint64_t requester_node_id);
   void send_life_finalize_request(const LifeTxnDescriptor &descriptor);
   void add_life_finalize_requester(uint64_t requester_node_id,
                                    uint64_t requester_txn_id);
@@ -217,7 +197,6 @@ private:
   std::vector<uint64_t> *life_finalize_requester_nodes;
   std::vector<uint64_t> *life_finalize_requester_txn_ids;
   std::vector<LifeWaitContext> *life_wait_stacks;
-  LifeServedRemoteContext life_served_remote;
   bool life_active;
   uint64_t life_next_wait_id;
 #if LOG_LIFE
