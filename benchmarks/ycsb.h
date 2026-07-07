@@ -88,9 +88,6 @@ public:
   RC apply_life_finalize_request(const LifeTxnDescriptor &descriptor,
                                  uint64_t requester_node_id,
                                  uint64_t requester_txn_id);
-  void respond_life_finalize_success(const LifeTxnDescriptor &descriptor,
-                                     uint64_t requester_node_id,
-                                     uint64_t requester_txn_id);
   RC apply_life_finalize_response(const LifeExecuteResult &result);
   RC apply_life_prepare_response(const LifeExecuteResult &result,
                                   const LifeProcessId &pid,

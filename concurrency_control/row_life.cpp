@@ -27,12 +27,6 @@ LifeTxnStatus record_status_or_aborted(const LifeProcessRecord *record) {
   return record != NULL ? record->status : LifeTxnStatus::Aborted;
 }
 
-size_t record_history_size(const LifeProcessRecord *record) {
-  return record != NULL && record->transaction
-             ? record->transaction->history.size()
-             : 0;
-}
-
 class LifeLatchGuard {
 public:
   explicit LifeLatchGuard(pthread_mutex_t *latch)
@@ -334,7 +328,21 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   const bool local_has_newer_attempt =
       same_process_txn_time && tx.tid.attempt < local_tid.attempt;
   const bool same_process_txn_attempt = tx.tid == local_tid;
-  const size_t local_history_size = record_history_size(local);
+  size_t local_object_history_size = 0;
+  if (local != NULL && local->transaction) {
+    const LifeHistoryIndices *local_object_history_indices =
+        object_history_indices(*local->transaction);
+    if (local_object_history_indices != NULL) {
+      local_object_history_size = local_object_history_indices->size();
+    } else {
+      for (std::vector<LifeHistoryEntry>::const_iterator it =
+               local->transaction->history.begin();
+           it != local->transaction->history.end(); ++it) {
+        if (it->operation.object == object_id())
+          ++local_object_history_size;
+      }
+    }
+  }
 
   if (tx.tid.time < local_tid.time) {
     return make_result(LifeResultCode::Committed);
@@ -355,7 +363,8 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
       tx.tid.time < local_tid.time || local_has_newer_attempt ||
       (same_process_txn_attempt && (local_status == LifeTxnStatus::Aborted ||
                                     local_status == LifeTxnStatus::Committed ||
-                                    tx.history.size() < local_history_size));
+                                    tx_object_history_size <
+                                        local_object_history_size));
 
   if (must_defer) {
 
@@ -392,7 +401,7 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
       return result;
     }
 
-    if (tx.history.size() < local_history_size) {
+    if (tx_object_history_size < local_object_history_size) {
       assert(local != NULL && local->transaction);
       const LifeHistoryEntry *stored_entry =
           object_history_entry(*local->transaction, tx_object_history_size);

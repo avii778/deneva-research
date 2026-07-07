@@ -688,16 +688,7 @@ RC WorkerThread::process_life_finalize(Message *msg) {
   LIFE_DBG_INC(life_dbg_finalize_recv);
 
   YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
-  if (!life_txn->is_life_active()) {
-    LifeFinalizeMessage *life_msg = (LifeFinalizeMessage *)msg;
-    life_txn->respond_life_finalize_success(life_msg->descriptor,
-                                            msg->return_node_id,
-                                            life_msg->requester_txn_id);
-    LIFE_DBG_INC(life_dbg_inactive_msg_dropped);
-    release_txn_man();
-    return RCOK;
-  }
-
+  life_txn->mark_life_active();
   LifeFinalizeMessage *life_msg = (LifeFinalizeMessage *)msg;
   RC rc = life_txn->apply_life_finalize_request(life_msg->descriptor,
                                                 msg->return_node_id,
