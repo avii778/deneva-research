@@ -555,6 +555,8 @@ RC WorkerThread::process_life_execute_rsp(Message *msg) {
                                                 life_msg->wait_id);
   LIFE_DBG_INC(life_dbg_execute_rsp_applied);
   check_if_done(rc);
+  if (!IS_LOCAL(msg->get_txn_id()) && txn_man != NULL && rc != WAIT_REM)
+    release_txn_man();
   return rc;
 }
 
@@ -600,6 +602,8 @@ RC WorkerThread::process_life_prepare_rsp(Message *msg) {
                                                 life_msg->tid,
                                                 msg->return_node_id);
   check_if_done(rc);
+  if (!IS_LOCAL(msg->get_txn_id()) && txn_man != NULL && rc != WAIT_REM)
+    release_txn_man();
   return rc;
 }
 
@@ -643,6 +647,8 @@ RC WorkerThread::process_life_finish_rsp(Message *msg) {
                                                life_msg->tid,
                                                msg->return_node_id);
   check_if_done(rc);
+  if (!IS_LOCAL(msg->get_txn_id()) && txn_man != NULL && rc != WAIT_REM)
+    release_txn_man();
   return rc;
 }
 
@@ -715,6 +721,8 @@ RC WorkerThread::process_life_finalize_rsp(Message *msg) {
   LifeFinalizeResponseMessage *life_msg = (LifeFinalizeResponseMessage *)msg;
   RC rc = life_txn->apply_life_finalize_response(life_msg->result);
   check_if_done(rc);
+  if (!IS_LOCAL(msg->get_txn_id()) && txn_man != NULL && rc != WAIT_REM)
+    release_txn_man();
   return rc;
 }
 #endif

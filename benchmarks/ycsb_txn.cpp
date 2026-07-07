@@ -1150,6 +1150,7 @@ RC YCSBTxnManager::apply_life_prepare_response(
     return WAIT_REM;
 
   if (life_prepare_failed) {
+    rollback_life_descriptor(life_pending_finalize);
     send_life_finish_messages(life_pending_finalize, life_pending_remote_nodes,
                               Abort);
     life_finish_pending = life_pending_remote_nodes.size();
@@ -1367,6 +1368,7 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
       life_pending_finalize = descriptor;
       life_pending_finalize.touched_objects = objects;
       life_pending_objects = objects;
+      rollback_life_descriptor(life_pending_finalize);
       send_life_finish_messages(life_pending_finalize,
                                 life_pending_remote_nodes, Abort);
       return false;
