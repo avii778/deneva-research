@@ -29,7 +29,6 @@ extern volatile uint64_t life_dbg_execute_rsp_recv_code[6];
 extern volatile uint64_t life_dbg_execute_rsp_stale;
 extern volatile uint64_t life_dbg_execute_duplicate_wait;
 extern volatile uint64_t life_dbg_prepare_rsp_duplicate;
-extern volatile uint64_t life_dbg_finish_rsp_duplicate;
 extern volatile uint64_t life_dbg_msg_count;
 extern volatile uint64_t life_dbg_msg_bytes;
 #endif
@@ -1585,7 +1584,6 @@ void Stats::print(bool prog) {
           ",life_exec_rsp_stale=%lu"
           ",life_exec_duplicate_wait=%lu"
           ",life_prepare_rsp_duplicate=%lu"
-          ",life_finish_rsp_duplicate=%lu"
           ",life_msg_count=%lu"
           ",life_msg_bytes=%lu",
           life_dbg_execute_rsp_recv_code[0],
@@ -1597,7 +1595,6 @@ void Stats::print(bool prog) {
           life_dbg_execute_rsp_stale,
           life_dbg_execute_duplicate_wait,
           life_dbg_prepare_rsp_duplicate,
-          life_dbg_finish_rsp_duplicate,
           life_dbg_msg_count,
           life_dbg_msg_bytes);
 #endif

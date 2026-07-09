@@ -46,8 +46,6 @@ volatile uint64_t life_dbg_prepare_rsp_sent = 0;
 volatile uint64_t life_dbg_prepare_rsp_recv = 0;
 volatile uint64_t life_dbg_finish_sent = 0;
 volatile uint64_t life_dbg_finish_recv = 0;
-volatile uint64_t life_dbg_finish_rsp_sent = 0;
-volatile uint64_t life_dbg_finish_rsp_recv = 0;
 volatile uint64_t life_dbg_finalize_sent = 0;
 volatile uint64_t life_dbg_finalize_recv = 0;
 volatile uint64_t life_dbg_finalize_rsp_sent = 0;
@@ -55,7 +53,6 @@ volatile uint64_t life_dbg_finalize_rsp_recv = 0;
 volatile uint64_t life_dbg_execute_rsp_stale = 0;
 volatile uint64_t life_dbg_execute_duplicate_wait = 0;
 volatile uint64_t life_dbg_prepare_rsp_duplicate = 0;
-volatile uint64_t life_dbg_finish_rsp_duplicate = 0;
 volatile uint64_t life_dbg_inactive_msg_dropped = 0;
 volatile uint64_t life_dbg_execute_rsp_recv_code[6] = {0, 0, 0, 0, 0, 0};
 volatile uint64_t life_dbg_msg_count = 0;
@@ -130,9 +127,6 @@ void WorkerThread::process(Message * msg) {
         break;
       case RLIFE_FINISH:
         rc = process_life_finish(msg);
-        break;
-      case RLIFE_FINISH_RSP:
-        rc = process_life_finish_rsp(msg);
         break;
       case RLIFE_HELP:
         rc = process_life_help(msg);
@@ -624,42 +618,11 @@ RC WorkerThread::process_life_finish(Message *msg) {
 
   ((YCSBTxnManager *)txn_man)->mark_life_active();
   LifeFinishMessage *life_msg = (LifeFinishMessage *)msg;
-  LifeFinishResponseMessage *response =
-      (LifeFinishResponseMessage *)Message::create_message(RLIFE_FINISH_RSP);
-  response->txn_id = msg->get_txn_id();
-  response->pid = life_msg->descriptor.pid;
-  response->tid = life_msg->descriptor.tid;
-  response->result = ((YCSBTxnManager *)txn_man)
-                         ->finish_life_remote(life_msg->descriptor,
-                                              life_msg->decision);
-  msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
-  LIFE_DBG_INC(life_dbg_finish_rsp_sent);
+  ((YCSBTxnManager *)txn_man)
+      ->finish_life_remote(life_msg->descriptor, life_msg->decision);
   if (!IS_LOCAL(msg->get_txn_id()))
     release_txn_man();
   return RCOK;
-}
-
-RC WorkerThread::process_life_finish_rsp(Message *msg) {
-  DEBUG("RLIFE_FINISH_RSP %ld\n", msg->get_txn_id());
-  assert(CC_ALG == LIFE);
-  LIFE_DBG_INC(life_dbg_finish_rsp_recv);
-
-  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
-  if (!life_txn->is_life_active()) {
-    LIFE_DBG_INC(life_dbg_inactive_msg_dropped);
-    release_txn_man();
-    return RCOK;
-  }
-
-  LifeFinishResponseMessage *life_msg = (LifeFinishResponseMessage *)msg;
-  RC rc = life_txn->apply_life_finish_response(life_msg->result,
-                                               life_msg->pid,
-                                               life_msg->tid,
-                                               msg->return_node_id);
-  check_if_done(rc);
-  if (!IS_LOCAL(msg->get_txn_id()) && txn_man != NULL && rc != WAIT_REM)
-    release_txn_man();
-  return rc;
 }
 
 RC WorkerThread::process_life_help(Message *msg) {

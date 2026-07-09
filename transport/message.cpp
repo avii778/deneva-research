@@ -395,9 +395,6 @@ Message * Message::create_message(RemReqType rtype) {
     case RLIFE_FINISH:
       msg = new LifeFinishMessage;
       break;
-    case RLIFE_FINISH_RSP:
-      msg = new LifeFinishResponseMessage;
-      break;
     case RLIFE_HELP:
       msg = new LifeHelpMessage;
       break;
@@ -623,12 +620,6 @@ void Message::release_message(Message * msg) {
     }
     case RLIFE_FINISH: {
       LifeFinishMessage *m_msg = (LifeFinishMessage *)msg;
-      m_msg->release();
-      delete m_msg;
-      break;
-    }
-    case RLIFE_FINISH_RSP: {
-      LifeFinishResponseMessage *m_msg = (LifeFinishResponseMessage *)msg;
       m_msg->release();
       delete m_msg;
       break;
@@ -1635,46 +1626,6 @@ void LifeFinishMessage::copy_to_buf(char *buf) {
   uint64_t ptr = Message::mget_size();
   life_write_descriptor(buf, ptr, descriptor);
   COPY_BUF(buf, decision, ptr);
-  assert(ptr == get_size());
-}
-
-uint64_t LifeFinishResponseMessage::get_size() {
-  return Message::mget_size() + sizeof(uint32_t) + sizeof(pid.node_id) +
-         sizeof(pid.worker_id) + sizeof(tid.time) + sizeof(tid.attempt);
-}
-
-void LifeFinishResponseMessage::copy_from_txn(TxnManager *txn) {
-  (void)txn;
-}
-
-void LifeFinishResponseMessage::copy_to_txn(TxnManager *txn) {
-  Message::mcopy_to_txn(txn);
-}
-
-void LifeFinishResponseMessage::copy_from_buf(char *buf) {
-  Message::mcopy_from_buf(buf);
-  uint64_t ptr = Message::mget_size();
-  uint32_t code;
-  COPY_VAL(code, buf, ptr);
-  result = LifeExecuteResult();
-  result.code = static_cast<LifeResultCode>(code);
-  COPY_VAL(pid.node_id, buf, ptr);
-  COPY_VAL(pid.worker_id, buf, ptr);
-  COPY_VAL(tid.time, buf, ptr);
-  COPY_VAL(tid.attempt, buf, ptr);
-  assert(ptr == get_size());
-}
-
-void LifeFinishResponseMessage::copy_to_buf(char *buf) {
-  LIFE_DBG_MSG_SIZE(get_size());
-  Message::mcopy_to_buf(buf);
-  uint64_t ptr = Message::mget_size();
-  const uint32_t code = static_cast<uint32_t>(result.code);
-  COPY_BUF(buf, code, ptr);
-  COPY_BUF(buf, pid.node_id, ptr);
-  COPY_BUF(buf, pid.worker_id, ptr);
-  COPY_BUF(buf, tid.time, ptr);
-  COPY_BUF(buf, tid.attempt, ptr);
   assert(ptr == get_size());
 }
 

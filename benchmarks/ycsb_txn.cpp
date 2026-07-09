@@ -118,7 +118,6 @@ extern volatile uint64_t life_dbg_finalize_rsp_sent;
 extern volatile uint64_t life_dbg_execute_rsp_stale;
 extern volatile uint64_t life_dbg_execute_duplicate_wait;
 extern volatile uint64_t life_dbg_prepare_rsp_duplicate;
-extern volatile uint64_t life_dbg_finish_rsp_duplicate;
 #ifndef LIFE_DEBUG_COUNTERS
 #define LIFE_DEBUG_COUNTERS false
 #endif
@@ -161,7 +160,6 @@ void YCSBTxnManager::init(uint64_t thd_id, Workload *h_wl) {
   life_finalize_requester_txn_ids->reserve(g_node_cnt);
   life_wait_stacks->reserve(g_req_per_query);
   life_prepare_response_nodes.reserve(g_node_cnt);
-  life_finish_response_nodes.reserve(g_node_cnt);
   life_txn_stack.reserve(g_req_per_query);
   life_response_stack.reserve(g_req_per_query);
   life_object_scratch.reserve(g_req_per_query);
@@ -856,17 +854,6 @@ bool YCSBTxnManager::note_life_prepare_response(uint64_t responder_node_id) {
   return true;
 }
 
-bool YCSBTxnManager::note_life_finish_response(uint64_t responder_node_id) {
-  for (std::vector<uint64_t>::const_iterator it =
-           life_finish_response_nodes.begin();
-       it != life_finish_response_nodes.end(); ++it) {
-    if (*it == responder_node_id)
-      return false;
-  }
-  life_finish_response_nodes.push_back(responder_node_id);
-  return true;
-}
-
 void YCSBTxnManager::debug_life_state() const {
   uint32_t wait_reason = 0;
   uint64_t wait_node = UINT64_MAX;
@@ -879,12 +866,12 @@ void YCSBTxnManager::debug_life_state() const {
     wait_key = context.remote_key;
     wait_depth = context.stack.size();
   }
-  printf(" life_waiting=%d prep=%lu finish=%lu wait_stack=%d wait_depth=%lu "
+  printf(" life_waiting=%d prep=%lu wait_stack=%d wait_depth=%lu "
          "wait_reason=%u wait_node=%lu wait_key=%lu wait_slots=%lu "
          "pending_tid=%lu/%lu "
          "owner_tid=%lu/%lu state=%d next=%lu",
          life_finalize_waiting ? 1 : 0, life_prepare_pending,
-         life_finish_pending, life_wait_stacks->empty() ? 0 : 1, wait_depth,
+         life_wait_stacks->empty() ? 0 : 1, wait_depth,
          wait_reason, wait_node, wait_key, life_wait_stacks->size(),
          life_pending_finalize.tid.time, life_pending_finalize.tid.attempt,
          txn == NULL ? 0UL : txn->life_tid.time,
@@ -894,14 +881,12 @@ void YCSBTxnManager::debug_life_state() const {
 void YCSBTxnManager::reset_pending_life_finalize() {
   life_finalize_waiting = false;
   life_prepare_pending = 0;
-  life_finish_pending = 0;
   life_prepare_failed = false;
   life_prepare_observed_attempt = 0;
   life_pending_finalize = LifeTxnDescriptor();
   life_pending_objects.clear();
   life_pending_remote_nodes.clear();
   life_prepare_response_nodes.clear();
-  life_finish_response_nodes.clear();
   life_finalize_requester_nodes->clear();
   life_finalize_requester_txn_ids->clear();
 }
@@ -1141,10 +1126,7 @@ RC YCSBTxnManager::apply_life_prepare_response(const LifeExecuteResult &result,
     rollback_life_descriptor(life_pending_finalize);
     send_life_finish_messages(life_pending_finalize, life_pending_remote_nodes,
                               Abort);
-    life_finish_pending = life_pending_remote_nodes.size();
-    return life_finish_pending > 0
-               ? WAIT_REM
-               : apply_life_finish_response(result, pid, tid, g_node_id);
+    return complete_life_finish();
   }
 
   LifeTxnDescriptorPtr frozen =
@@ -1164,29 +1146,12 @@ RC YCSBTxnManager::apply_life_prepare_response(const LifeExecuteResult &result,
 
   send_life_finish_messages(life_pending_finalize, life_pending_remote_nodes,
                             Commit);
-  life_finish_pending = life_pending_remote_nodes.size();
-  return life_finish_pending > 0
-             ? WAIT_REM
-             : apply_life_finish_response(result, pid, tid, g_node_id);
+  return complete_life_finish();
 }
 
-RC YCSBTxnManager::apply_life_finish_response(const LifeExecuteResult &result,
-                                              const LifeProcessId &pid,
-                                              const LifeTxnId &tid,
-                                              uint64_t responder_node_id) {
-  (void)result;
-  if (!life_finalize_waiting || life_finish_pending == 0)
+RC YCSBTxnManager::complete_life_finish() {
+  if (!life_finalize_waiting)
     return continue_life_after_stack();
-  if (!pending_life_finalize_matches(pid, tid))
-    return WAIT_REM;
-  if (!note_life_finish_response(responder_node_id)) {
-    LIFE_DBG_INC(life_dbg_finish_rsp_duplicate);
-    return WAIT_REM;
-  }
-
-  --life_finish_pending;
-  if (life_finish_pending > 0)
-    return WAIT_REM;
 
   const bool committed = !life_prepare_failed;
   LifeTxnDescriptor finished = life_pending_finalize;
@@ -1347,18 +1312,11 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
       observed_attempt = result.observed_attempt;
 
     if (!remote_nodes.empty()) {
-      life_finalize_waiting = true;
-      life_prepare_pending = 0;
-      life_finish_pending = remote_nodes.size();
-      life_prepare_failed = true;
-      life_prepare_observed_attempt = observed_attempt;
-      life_pending_finalize = descriptor;
-      life_pending_finalize.touched_objects = objects;
-      life_pending_objects = objects;
-      rollback_life_descriptor(life_pending_finalize);
-      send_life_finish_messages(life_pending_finalize,
-                                life_pending_remote_nodes, Abort);
-      return false;
+      LifeTxnDescriptor abort_descriptor = descriptor;
+      abort_descriptor.touched_objects = objects;
+      rollback_life_descriptor(abort_descriptor);
+      send_life_finish_messages(abort_descriptor, life_pending_remote_nodes,
+                                Abort);
     }
 
     reset_life_descriptor(descriptor, observed_attempt);
@@ -1368,7 +1326,6 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
   if (!remote_nodes.empty()) {
     life_finalize_waiting = true;
     life_prepare_pending = remote_nodes.size();
-    life_finish_pending = 0;
     life_prepare_failed = false;
     life_prepare_observed_attempt = descriptor.tid.attempt;
     life_pending_finalize = descriptor;

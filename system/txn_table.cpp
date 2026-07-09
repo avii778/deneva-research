@@ -40,8 +40,6 @@ extern volatile uint64_t life_dbg_prepare_rsp_sent;
 extern volatile uint64_t life_dbg_prepare_rsp_recv;
 extern volatile uint64_t life_dbg_finish_sent;
 extern volatile uint64_t life_dbg_finish_recv;
-extern volatile uint64_t life_dbg_finish_rsp_sent;
-extern volatile uint64_t life_dbg_finish_rsp_recv;
 extern volatile uint64_t life_dbg_finalize_sent;
 extern volatile uint64_t life_dbg_finalize_recv;
 extern volatile uint64_t life_dbg_finalize_rsp_sent;
@@ -49,7 +47,6 @@ extern volatile uint64_t life_dbg_finalize_rsp_recv;
 extern volatile uint64_t life_dbg_execute_rsp_stale;
 extern volatile uint64_t life_dbg_execute_duplicate_wait;
 extern volatile uint64_t life_dbg_prepare_rsp_duplicate;
-extern volatile uint64_t life_dbg_finish_rsp_duplicate;
 #endif
 
 void TxnTable::init() {
@@ -75,18 +72,17 @@ void TxnTable::dump() {
          life_dbg_execute_rsp_sent, life_dbg_execute_rsp_recv,
          life_dbg_execute_rsp_applied);
   printf("LIFE_DBG prepare sent=%lu recv=%lu rsp_sent=%lu rsp_recv=%lu "
-         "finish sent=%lu recv=%lu rsp_sent=%lu rsp_recv=%lu\n",
+         "finish sent=%lu recv=%lu\n",
          life_dbg_prepare_sent, life_dbg_prepare_recv,
          life_dbg_prepare_rsp_sent, life_dbg_prepare_rsp_recv,
-         life_dbg_finish_sent, life_dbg_finish_recv,
-         life_dbg_finish_rsp_sent, life_dbg_finish_rsp_recv);
+         life_dbg_finish_sent, life_dbg_finish_recv);
   printf("LIFE_DBG finalize sent=%lu recv=%lu rsp_sent=%lu rsp_recv=%lu\n",
          life_dbg_finalize_sent, life_dbg_finalize_recv,
          life_dbg_finalize_rsp_sent, life_dbg_finalize_rsp_recv);
   printf("LIFE_DBG stale_execute_rsp=%lu duplicate_execute_wait=%lu "
-         "duplicate_prepare_rsp=%lu duplicate_finish_rsp=%lu\n",
+         "duplicate_prepare_rsp=%lu\n",
          life_dbg_execute_rsp_stale, life_dbg_execute_duplicate_wait,
-         life_dbg_prepare_rsp_duplicate, life_dbg_finish_rsp_duplicate);
+         life_dbg_prepare_rsp_duplicate);
 #endif
   for(uint64_t i = 0; i < pool_size;i++) {
     if(pool[i]->cnt  == 0)

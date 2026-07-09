@@ -93,10 +93,7 @@ public:
                                   const LifeProcessId &pid,
                                   const LifeTxnId &tid,
                                   uint64_t responder_node_id);
-  RC apply_life_finish_response(const LifeExecuteResult &result,
-                                const LifeProcessId &pid,
-                                const LifeTxnId &tid,
-                                uint64_t responder_node_id);
+  RC complete_life_finish();
   void debug_life_state() const;
   bool is_life_active() const;
   void mark_life_active();
@@ -147,7 +144,6 @@ private:
   bool pending_life_finalize_matches(const LifeProcessId &pid,
                                      const LifeTxnId &tid) const;
   bool note_life_prepare_response(uint64_t responder_node_id);
-  bool note_life_finish_response(uint64_t responder_node_id);
   row_t *lookup_life_row(const LifeObjectId &object) const;
   row_t *lookup_life_row(uint64_t key) const;
   uint64_t life_remote_batch_stop(const LifeTxnDescriptor &descriptor,
@@ -183,14 +179,12 @@ private:
   uint64_t next_record_id;
   bool life_finalize_waiting;
   uint64_t life_prepare_pending;
-  uint64_t life_finish_pending;
   bool life_prepare_failed;
   uint64_t life_prepare_observed_attempt;
   LifeTxnDescriptor life_pending_finalize;
   std::vector<LifeFinalizeObject> life_pending_objects;
   std::vector<uint64_t> life_pending_remote_nodes;
   std::vector<uint64_t> life_prepare_response_nodes;
-  std::vector<uint64_t> life_finish_response_nodes;
   std::vector<LifeTxnDescriptor> life_txn_stack;
   std::vector<LifeTxnDescriptor> life_response_stack;
   std::vector<LifeFinalizeObject> life_object_scratch;
