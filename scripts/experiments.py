@@ -33,6 +33,7 @@ SHORTNAMES = {
     "MODE": "",
     "PRIORITY": "",
     "ABORT_PENALTY": "PENALTY",
+    "LIFE_HELP_WAIT_US": "LWAIT",
     "STRICT_PPT": "SPPT",
     "NETWORK_DELAY": "NDLY",
     "NETWORK_DELAY_TEST": "NDT",
@@ -152,6 +153,38 @@ def ycsb_single_node():
         [wl, n, algo, base_table_size * n, tup_wr_perc, txn_wr_perc, ld, sk, thr]
         for thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo in itertools.product(
             tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, algos
+        )
+    ]
+    return fmt, exp
+
+
+def life_wait_sweep():
+    wl = "YCSB"
+    nnodes = [2]
+    algos = ["LIFE"]
+    waits = [0, 1, 10, 100, 1000, 10000, 100000, 500000, 1000000, 2000000]
+    base_table_size = 2097152 * 8
+    txn_write_perc = [0.5]
+    tup_write_perc = [0.5]
+    load = [10000]
+    tcnt = [4]
+    skew = [0.6]
+    fmt = [
+        "WORKLOAD",
+        "NODE_CNT",
+        "CC_ALG",
+        "LIFE_HELP_WAIT_US",
+        "SYNTH_TABLE_SIZE",
+        "TUP_WRITE_PERC",
+        "TXN_WRITE_PERC",
+        "MAX_TXN_IN_FLIGHT",
+        "ZIPF_THETA",
+        "THREAD_CNT",
+    ]
+    exp = [
+        [wl, n, algo, wait, base_table_size * n, tup_wr_perc, txn_wr_perc, ld, sk, thr]
+        for thr, txn_wr_perc, tup_wr_perc, sk, ld, n, wait, algo in itertools.product(
+            tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, waits, algos
         )
     ]
     return fmt, exp
@@ -728,6 +761,7 @@ experiment_map = {
     "pps_scaling": pps_scaling,
     "ycsb_scaling": ycsb_scaling,
     "ycsb_single_node": ycsb_single_node,
+    "life_wait_sweep": life_wait_sweep,
     "ycsb_single_node_plot": ycsb_single_node_plot,
     "ppr_ycsb_single_node": ycsb_single_node,
     "ppr_ycsb_single_node_plot": ycsb_single_node_plot,
@@ -805,6 +839,7 @@ configs = {
     "NETWORK_TEST": "false",
     "ABORT_PENALTY": "10 * 1000000UL   // in ns.",
     "ABORT_PENALTY_MAX": "5 * 100 * 1000000UL   // in ns.",
+    "LIFE_HELP_WAIT_US": 0,
     "MSG_TIME_LIMIT": "0",
     "MSG_SIZE_MAX": 4096,
     "TXN_WRITE_PERC": 0.0,

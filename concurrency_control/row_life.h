@@ -33,6 +33,10 @@ private:
   typedef std::unordered_map<LifeProcessId, LifeProcessRecord,
                              LifeProcessIdHash> ProcessSlots;
 
+  LifeExecuteResult execute(const LifeTxnDescriptor &tx,
+                            const LifeOperation &operation,
+                            bool allow_help_wait);
+
   const LifeTxnDescriptor::TouchedObject *
   touched_object(const LifeTxnDescriptor &tx) const;
   const LifeHistoryIndices *object_history_indices(

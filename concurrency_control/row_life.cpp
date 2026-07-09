@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <unistd.h>
 
 namespace {
 
@@ -291,6 +292,12 @@ bool Row_life::apply_committed_operation(const LifeOperation &operation) {
 
 LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
                                     const LifeOperation &operation) {
+  return execute(tx, operation, true);
+}
+
+LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
+                                    const LifeOperation &operation,
+                                    bool allow_help_wait) {
   const uint64_t tuple_size = _row->get_tuple_size();
   assert(tuple_size <= MAX_TUPLE_SIZE);
   if (tuple_size > MAX_TUPLE_SIZE)
@@ -370,6 +377,16 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 
     if (context_status == LifeTxnStatus::Prepared) {
 
+#if LIFE_HELP_WAIT_US > 0
+      if (allow_help_wait) {
+        guard.unlock();
+        usleep(LIFE_HELP_WAIT_US);
+        return execute(tx, operation, false);
+      }
+#else
+      (void)allow_help_wait;
+#endif
+
       if (!inline_operation || tx.tid <= inline_operation->transaction->tid) {
         LifeInlineOperation pending;
         pending.transaction = std::make_shared<LifeTxnDescriptor>(tx);
@@ -386,6 +403,16 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
     }
 
     if (context_tid < tx.tid) {
+#if LIFE_HELP_WAIT_US > 0
+      if (allow_help_wait) {
+        guard.unlock();
+        usleep(LIFE_HELP_WAIT_US);
+        return execute(tx, operation, false);
+      }
+#else
+      (void)allow_help_wait;
+#endif
+
       LifeExecuteResult result = make_result(LifeResultCode::Help);
       assert(context != NULL && context->transaction);
       const LifeTxnDescriptorPtr context_transaction = context->transaction;
