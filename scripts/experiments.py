@@ -64,6 +64,8 @@ YCSB_ALGOS = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP", "LIF
 YCSB_SINGLE_NODE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 YCSB_LIFE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 TESTING = ["LIFE"]
+TESTN = [4]
+NORMAL = [2, 4, 8, 16, 32, 64]
 ##############################
 # PLOTS
 ##############################
@@ -81,14 +83,14 @@ def pps_scaling():
 
 def ycsb_scaling():
     wl = "YCSB"
-    nnodes = [2, 4, 8, 16, 32, 64]
-    algos = TESTING
+    nnodes = NORMAL
+    algos = YCSB_LIFE_ALGOS
     base_table_size = 2097152 * 8
     txn_write_perc = [0.5]
     tup_write_perc = [0.5]
     load = [10000]
     tcnt = [4]
-    skew = [0.6, 0.7]
+    skew = [0.3, 0.4]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",

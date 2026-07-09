@@ -296,6 +296,12 @@ RC WorkerThread::run() {
 
     if(msg->rtype != CL_QRY || CC_ALG == CALVIN) {
       txn_man = get_transaction_manager(msg);
+#if CC_ALG == LIFE
+      if (txn_man == NULL) {
+        work_queue.enqueue(get_thd_id(),msg,true);
+        continue;
+      }
+#endif
 
       if (CC_ALG != CALVIN && IS_LOCAL(txn_man->get_txn_id())) {
         if (msg->rtype != RTXN_CONT && ((msg->rtype != RACK_PREP) || (txn_man->get_rsp_cnt() == 1))) {
@@ -330,7 +336,11 @@ RC WorkerThread::run() {
 
 
       ready_starttime = get_sys_clock();
+#if CC_ALG == LIFE
+      bool ready = true;
+#else
       bool ready = txn_man->unset_ready();
+#endif
       INC_STATS(get_thd_id(),worker_activate_txn_time,get_sys_clock() - ready_starttime);
       if(!ready) {
         // Return to work queue, end processing
@@ -767,9 +777,14 @@ RC WorkerThread::process_rtxn(Message * msg) {
 
 					// Put txn in txn_table
           txn_man = txn_table.get_transaction_manager(get_thd_id(),txn_id,0);
+          assert(txn_man);
           txn_man->register_thread(this);
           uint64_t ready_starttime = get_sys_clock();
+#if CC_ALG == LIFE
+          bool ready = true;
+#else
           bool ready = txn_man->unset_ready();
+#endif
           INC_STATS(get_thd_id(),worker_activate_txn_time,get_sys_clock() - ready_starttime);
           assert(ready);
 					if (CC_ALG == WAIT_DIE) {

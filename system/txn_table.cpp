@@ -181,6 +181,11 @@ TxnManager * TxnTable::get_transaction_manager(uint64_t thd_id, uint64_t txn_id,
 
   }
 
+#if CC_ALG == LIFE
+  if (txn_man && !txn_man->unset_ready())
+    txn_man = NULL;
+#endif
+
 #if CC_ALG == MVCC
   if(txn_man->get_timestamp() < pool[pool_id]->min_ts)
     pool[pool_id]->min_ts = txn_man->get_timestamp();
