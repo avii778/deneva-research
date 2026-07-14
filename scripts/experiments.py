@@ -66,7 +66,7 @@ YCSB_SINGLE_NODE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 YCSB_LIFE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 TESTING = ["LIFE"]
 TESTN = [4]
-NORMAL = [2, 4, 8, 16, 32, 64]
+NORMAL = [2, 4, 8, 16]
 ##############################
 # PLOTS
 ##############################
@@ -168,7 +168,7 @@ def life_wait_sweep():
     tup_write_perc = [0.5]
     load = [10000]
     tcnt = [4]
-    skew = [0.6]
+    skew = [0.4]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",

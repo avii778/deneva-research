@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Find the LIFE help delay with the highest median YCSB throughput.
 
 The default search stays in the microsecond-scale range, but --waits can sweep
@@ -9,24 +9,110 @@ is used.
 import argparse
 import atexit
 import csv
+import glob
+import io
+import multiprocessing
 import os
-from pathlib import Path
 import re
-import statistics
-import subprocess
 import sys
 import time
 
+try:
+    import subprocess32 as subprocess
+except ImportError:
+    import subprocess
 
-ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / "config.h"
-RESULTS = ROOT / "results" / "life_wait_tuning"
+
+PY2 = sys.version_info[0] == 2
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+CONFIG = os.path.join(ROOT, "config.h")
+RESULTS = os.path.join(ROOT, "results", "life_wait_tuning")
 DEFAULT_WAITS_US = (0, 1, 2, 5, 10, 20, 50, 100)
 MAX_WAIT_US = 2 * 1000 * 1000
-DEFAULT_ZIPF_THETA = 0.99
-DEFAULT_SYNTH_TABLE_SIZE = 1024
-DEFAULT_TXN_WRITE_PERC = 1.0
+YCSB_SCALING_BASE_TABLE_SIZE = 2097152 * 8
+DEFAULT_NODE_CNT = 2
+DEFAULT_CLIENT_NODE_CNT = DEFAULT_NODE_CNT
+DEFAULT_THREAD_CNT = 4
+DEFAULT_MAX_TXN_IN_FLIGHT = 10000
+DEFAULT_ZIPF_THETA = 0.4
+DEFAULT_TXN_WRITE_PERC = 0.5
 DEFAULT_TUP_WRITE_PERC = 0.5
+DEVNULL = open(os.devnull, "wb")
+
+try:
+    monotonic = time.monotonic
+except AttributeError:
+    monotonic = time.time
+
+try:
+    TimeoutExpired = subprocess.TimeoutExpired
+except AttributeError:
+    class TimeoutExpired(Exception):
+        def __init__(self, cmd, timeout):
+            super(TimeoutExpired, self).__init__(
+                "Command '{}' timed out after {} seconds".format(cmd, timeout))
+            self.cmd = cmd
+            self.timeout = timeout
+
+
+class CompletedProcess(object):
+    def __init__(self, args, returncode):
+        self.args = args
+        self.returncode = returncode
+
+
+def run_command(args, cwd=None, check=False, stdout=None, stderr=None):
+    process = subprocess.Popen(args, cwd=cwd, stdout=stdout, stderr=stderr)
+    returncode = process.wait()
+    if check and returncode != 0:
+        raise subprocess.CalledProcessError(returncode, args)
+    return CompletedProcess(args, returncode)
+
+
+def wait_process(process, timeout=None):
+    if timeout is None:
+        return process.wait()
+    deadline = time.time() + timeout
+    while process.poll() is None:
+        if time.time() >= deadline:
+            raise TimeoutExpired(getattr(process, "args", None), timeout)
+        time.sleep(0.1)
+    return process.returncode
+
+
+def read_text(path):
+    with io.open(path, "r", encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+def write_text(path, data):
+    with io.open(path, "w", encoding="utf-8") as handle:
+        handle.write(data)
+
+
+def mkdir_p(path):
+    if not os.path.isdir(path):
+        os.makedirs(path)
+
+
+def median(values):
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+
+
+def cpu_count():
+    try:
+        return multiprocessing.cpu_count()
+    except NotImplementedError:
+        return 1
+
+
+def log(message=""):
+    print(message)
+    sys.stdout.flush()
 
 
 def replace_define(config, name, value):
@@ -38,13 +124,20 @@ def replace_define(config, name, value):
     return updated
 
 
+def ycsb_scaling_table_size(node_cnt):
+    return YCSB_SCALING_BASE_TABLE_SIZE * node_cnt
+
+
 def configure(original, algorithm, wait_us, duration_s, warmup_s,
+              node_cnt, client_node_cnt, thread_cnt, max_txn_in_flight,
               zipf_theta, synth_table_size, txn_write_perc, tup_write_perc):
     config = original
     config = replace_define(config, "WORKLOAD", "YCSB")
-    config = replace_define(config, "NODE_CNT", 1)
-    config = replace_define(config, "PART_CNT", 1)
-    config = replace_define(config, "CLIENT_NODE_CNT", 1)
+    config = replace_define(config, "NODE_CNT", node_cnt)
+    config = replace_define(config, "PART_CNT", node_cnt)
+    config = replace_define(config, "CLIENT_NODE_CNT", client_node_cnt)
+    config = replace_define(config, "THREAD_CNT", thread_cnt)
+    config = replace_define(config, "MAX_TXN_IN_FLIGHT", max_txn_in_flight)
     config = replace_define(config, "SERVER_GENERATE_QUERIES", "false")
     config = replace_define(config, "CC_ALG", algorithm)
     config = replace_define(config, "LIFE_HELP_WAIT_US", wait_us)
@@ -53,6 +146,8 @@ def configure(original, algorithm, wait_us, duration_s, warmup_s,
     config = replace_define(config, "SYNTH_TABLE_SIZE", synth_table_size)
     config = replace_define(config, "TXN_WRITE_PERC", txn_write_perc)
     config = replace_define(config, "TUP_WRITE_PERC", tup_write_perc)
+    config = replace_define(config, "PART_PER_TXN", "PART_CNT")
+    config = replace_define(config, "NUM_WH", "PART_CNT")
     config = replace_define(config, "DONE_TIMER", "{} * BILLION".format(duration_s))
     config = replace_define(config, "WARMUP_TIMER", "{} * BILLION".format(warmup_s))
     return config
@@ -60,7 +155,7 @@ def configure(original, algorithm, wait_us, duration_s, warmup_s,
 
 def parse_summary(path):
     summaries = []
-    with path.open(errors="replace") as output:
+    with io.open(path, "r", encoding="utf-8", errors="replace") as output:
         for line in output:
             if line.startswith("[summary] "):
                 values = {}
@@ -74,10 +169,13 @@ def parse_summary(path):
     return summaries[-1]
 
 
+def parse_client_throughput(paths):
+    return sum(float(parse_summary(path)["tput"]) for path in paths)
+
+
 def build(jobs):
-    subprocess.run(["make", "clean"], cwd=ROOT, check=True,
-                   stdout=subprocess.DEVNULL)
-    subprocess.run(["make", "-j{}".format(jobs)], cwd=ROOT, check=True)
+    run_command(["make", "clean"], cwd=ROOT, check=True, stdout=DEVNULL)
+    run_command(["make", "-j{}".format(jobs)], cwd=ROOT, check=True)
 
 
 def stop_process(process):
@@ -85,16 +183,16 @@ def stop_process(process):
         return
     process.terminate()
     try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
+        wait_process(process, timeout=5)
+    except TimeoutExpired:
         process.kill()
         process.wait()
 
 
 def database_processes_running():
     for name in ("rundb", "runcl"):
-        result = subprocess.run(["pgrep", "-x", name], stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, check=False)
+        result = run_command(["pgrep", "-x", name], stdout=DEVNULL,
+                             stderr=DEVNULL, check=False)
         if result.returncode == 0:
             return True
         if result.returncode != 1:
@@ -103,13 +201,19 @@ def database_processes_running():
 
 
 def clean_ipc_endpoints():
-    for endpoint in ROOT.glob("node_*.ipc"):
-        endpoint.unlink()
+    for endpoint in glob.glob(os.path.join(ROOT, "node_*.ipc")):
+        os.unlink(endpoint)
+
+
+def write_local_ifconfig(total_node_cnt):
+    with open(os.path.join(ROOT, "ifconfig.txt"), "w") as output:
+        for _ in range(total_node_cnt):
+            output.write("127.0.0.1\n")
 
 
 def read_latest_counter(path, names):
     try:
-        data = path.read_text(errors="replace")
+        data = read_text(path)
     except OSError:
         return None
     for name in names:
@@ -119,82 +223,109 @@ def read_latest_counter(path, names):
     return None
 
 
-def print_transaction_progress(server_path, client_path, started,
+def print_transaction_progress(server_paths, client_paths, started,
                                previous_snapshot=None):
-    value = read_latest_counter(client_path, ("txn_cnt",))
+    counters = []
+    for path in client_paths:
+        value = read_latest_counter(path, ("txn_cnt",))
+        if value is not None:
+            counters.append(value)
     source = "client txn_cnt"
-    if value is None:
-        value = read_latest_counter(server_path, (
-            "total_txn_commit_cnt", "local_txn_commit_cnt", "txn_cnt"))
+    if not counters:
         source = "server commits"
-    elapsed = int(time.monotonic() - started)
-    if value is not None:
+        for path in server_paths:
+            value = read_latest_counter(path, (
+                "total_txn_commit_cnt", "local_txn_commit_cnt", "txn_cnt"))
+            if value is not None:
+                counters.append(value)
+    elapsed = int(monotonic() - started)
+    if counters:
+        value = sum(counters)
         snapshot = (source, value)
         freshness = "unchanged" if snapshot == previous_snapshot else "updated"
-        print("  [progress] elapsed={}s completed_transactions={} source={} "
-              "snapshot={}".format(elapsed, value, source, freshness), flush=True)
+        log("  [progress] elapsed={}s completed_transactions={} source={} "
+            "snapshot={}".format(elapsed, value, source, freshness))
         return snapshot
-    elif server_path.exists() and server_path.stat().st_size > 0:
-        print("  [progress] elapsed={}s completed_transactions=0 source=no stats yet".format(
-            elapsed), flush=True)
+    elif any(os.path.exists(path) and os.path.getsize(path) > 0
+             for path in server_paths):
+        log("  [progress] elapsed={}s completed_transactions=0 source=no stats yet".format(
+            elapsed))
     else:
-        print("  [progress] elapsed={}s completed_transactions=unknown".format(
-            elapsed), flush=True)
+        log("  [progress] elapsed={}s completed_transactions=unknown".format(
+            elapsed))
     return previous_snapshot
 
 
 def process_reached_run_phase(path):
     try:
-        data = path.read_text(errors="replace")
+        data = read_text(path)
     except OSError:
         return False
     return re.search(r"^Running \d+:\d+", data, re.MULTILINE) is not None
 
 
-def run_trial(label, duration_s, warmup_s, startup_timeout_s, trial):
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    server_path = RESULTS / "{}_trial{}_server.out".format(label, trial)
-    client_path = RESULTS / "{}_trial{}_client.out".format(label, trial)
+def run_trial(label, duration_s, warmup_s, startup_timeout_s, trial,
+              node_cnt, client_node_cnt):
+    mkdir_p(RESULTS)
+    server_paths = [
+        os.path.join(RESULTS, "{}_trial{}_server{}.out".format(label, trial, node_id))
+        for node_id in range(node_cnt)
+    ]
+    client_paths = [
+        os.path.join(RESULTS, "{}_trial{}_client{}.out".format(
+            label, trial, node_id))
+        for node_id in range(node_cnt, node_cnt + client_node_cnt)
+    ]
     processes = []
     if database_processes_running():
         raise RuntimeError("rundb or runcl is already running; stop it before tuning")
     clean_ipc_endpoints()
+    write_local_ifconfig(node_cnt + client_node_cnt)
     try:
-        commands = (
-            ("rundb", [str(ROOT / "rundb"), "-nid0"], server_path),
-            ("runcl", [str(ROOT / "runcl"), "-nid1"], client_path),
-        )
+        commands = []
+        for node_id in range(node_cnt):
+            commands.append((
+                "rundb",
+                [os.path.join(ROOT, "rundb"), "-nid{}".format(node_id)],
+                server_paths[node_id],
+            ))
+        for index, node_id in enumerate(range(node_cnt, node_cnt + client_node_cnt)):
+            commands.append((
+                "runcl",
+                [os.path.join(ROOT, "runcl"), "-nid{}".format(node_id)],
+                client_paths[index],
+            ))
         for name, command, output_path in commands:
-            with output_path.open("w") as output:
+            with open(output_path, "w") as output:
                 process = subprocess.Popen(command, cwd=ROOT,
                                            stdout=output, stderr=subprocess.STDOUT)
             processes.append((name, process, output_path))
-            print("  {} started (pid {}, log: {})".format(
-                name, process.pid, output_path), flush=True)
+            log("  {} started (pid {}, log: {})".format(
+                name, process.pid, output_path))
 
-        started = time.monotonic()
+        started = monotonic()
         run_deadline = None
         next_progress = started
         progress_snapshot = None
         while any(process.poll() is None for _, process, _ in processes):
-            now = time.monotonic()
+            now = monotonic()
             if run_deadline is None:
                 if all(process_reached_run_phase(path)
                        for _, _, path in processes):
                     run_deadline = now + duration_s + warmup_s + 120
-                    print("  database and client entered the run phase", flush=True)
+                    log("  database and client entered the run phase")
                 elif now - started >= startup_timeout_s:
-                    raise subprocess.TimeoutExpired(
+                    raise TimeoutExpired(
                         "rundb/runcl initialization", startup_timeout_s)
             if now >= next_progress:
                 progress_snapshot = print_transaction_progress(
-                    server_path, client_path, started, progress_snapshot)
+                    server_paths, client_paths, started, progress_snapshot)
                 next_progress = now + 5
             if run_deadline is not None and now >= run_deadline:
-                raise subprocess.TimeoutExpired(
+                raise TimeoutExpired(
                     "rundb/runcl trial", duration_s + warmup_s + 120)
             time.sleep(1)
-        print_transaction_progress(server_path, client_path, started,
+        print_transaction_progress(server_paths, client_paths, started,
                                    progress_snapshot)
 
         failures = [(name, process.returncode, path)
@@ -208,8 +339,7 @@ def run_trial(label, duration_s, warmup_s, startup_timeout_s, trial):
             stop_process(process)
         clean_ipc_endpoints()
 
-    summary = parse_summary(client_path)
-    return float(summary["tput"])
+    return parse_client_throughput(client_paths)
 
 
 def parse_waits(value):
@@ -233,13 +363,23 @@ def arguments():
                         help="measured seconds per trial")
     parser.add_argument("--warmup", type=int, default=5,
                         help="warmup seconds per trial")
-    parser.add_argument("--jobs", type=int, default=max(1, os.cpu_count() or 1))
+    parser.add_argument("--jobs", type=int, default=max(1, cpu_count()))
     parser.add_argument("--startup-timeout", type=int, default=600,
                         help="seconds allowed for database/client initialization")
+    parser.add_argument("--node-count", type=int, default=DEFAULT_NODE_CNT,
+                        help="server node count; defaults to ycsb_scaling's first point")
+    parser.add_argument("--client-node-count", type=int,
+                        default=DEFAULT_CLIENT_NODE_CNT,
+                        help="client node count; defaults to matching server nodes")
+    parser.add_argument("--thread-count", type=int, default=DEFAULT_THREAD_CNT,
+                        help="worker threads per server node")
+    parser.add_argument("--max-txn-in-flight", type=int,
+                        default=DEFAULT_MAX_TXN_IN_FLIGHT,
+                        help="MAX_TXN_IN_FLIGHT used during tuning")
     parser.add_argument("--zipf-theta", type=float, default=DEFAULT_ZIPF_THETA,
                         help="YCSB Zipf theta used during tuning (default: %(default)s)")
-    parser.add_argument("--table-size", type=int, default=DEFAULT_SYNTH_TABLE_SIZE,
-                        help="YCSB table size used during tuning (default: %(default)s)")
+    parser.add_argument("--table-size", type=int, default=None,
+                        help="YCSB table size; default is 2097152 * 8 * node-count")
     parser.add_argument("--txn-write-perc", type=float,
                         default=DEFAULT_TXN_WRITE_PERC,
                         help="fraction of update transactions during tuning "
@@ -257,6 +397,12 @@ def arguments():
             args.jobs < 1 or args.startup_timeout < 1):
         parser.error("repeats, duration, jobs, and startup-timeout must be positive; "
                      "warmup cannot be negative")
+    if (args.node_count < 1 or args.client_node_count < 1 or
+            args.thread_count < 1 or args.max_txn_in_flight < 1):
+        parser.error("node-count, client-node-count, thread-count, and "
+                     "max-txn-in-flight must be positive")
+    if args.table_size is None:
+        args.table_size = ycsb_scaling_table_size(args.node_count)
     if not 0.0 <= args.zipf_theta < 1.0:
         parser.error("zipf-theta must be in [0.0, 1.0)")
     if args.table_size < 64:
@@ -272,64 +418,70 @@ def arguments():
 
 def main():
     args = arguments()
-    original = CONFIG.read_text()
+    original = read_text(CONFIG)
     restored = [False]
 
     def restore_config():
         if not restored[0]:
-            CONFIG.write_text(original)
+            write_text(CONFIG, original)
             restored[0] = True
 
-    print("LIFE waits (us): {}".format(", ".join(map(str, args.waits))),
-          flush=True)
-    print("Trials: {} x {}s, {}s warmup".format(
-        args.repeats, args.duration, args.warmup), flush=True)
-    print("Contention profile: zipf_theta={}, table_size={}, txn_write_perc={}, "
-          "tup_write_perc={}".format(
-              args.zipf_theta, args.table_size, args.txn_write_perc,
-              args.tup_write_perc), flush=True)
+    log("LIFE waits (us): {}".format(", ".join(map(str, args.waits))))
+    log("Trials: {} x {}s, {}s warmup".format(
+        args.repeats, args.duration, args.warmup))
+    log("YCSB scaling profile: node_count={}, client_node_count={}, "
+        "thread_count={}, max_txn_in_flight={}".format(
+            args.node_count, args.client_node_count, args.thread_count,
+            args.max_txn_in_flight))
+    log("Contention profile: zipf_theta={}, table_size={}, txn_write_perc={}, "
+        "tup_write_perc={}".format(
+            args.zipf_theta, args.table_size, args.txn_write_perc,
+            args.tup_write_perc))
     if args.dry_run:
         return 0
 
     atexit.register(restore_config)
     rows = []
     for wait_us in args.waits:
-        print("\nTesting LIFE_HELP_WAIT_US={} us: configuring and building...".format(
-            wait_us), flush=True)
-        CONFIG.write_text(configure(original, "LIFE", wait_us,
-                                    args.duration, args.warmup,
-                                    args.zipf_theta, args.table_size,
-                                    args.txn_write_perc, args.tup_write_perc))
+        log("\nTesting LIFE_HELP_WAIT_US={} us: configuring and building...".format(
+            wait_us))
+        write_text(CONFIG, configure(original, "LIFE", wait_us,
+                                     args.duration, args.warmup,
+                                     args.node_count, args.client_node_count,
+                                     args.thread_count, args.max_txn_in_flight,
+                                     args.zipf_theta, args.table_size,
+                                     args.txn_write_perc, args.tup_write_perc))
         build(args.jobs)
         throughputs = []
         for trial in range(1, args.repeats + 1):
-            print("LIFE {:>4} us trial {}/{}: running ({}s warmup + {}s measured)...".format(
-                wait_us, trial, args.repeats, args.warmup, args.duration),
-                flush=True)
+            log("LIFE {:>4} us trial {}/{}: running ({}s warmup + {}s measured)...".format(
+                wait_us, trial, args.repeats, args.warmup, args.duration))
             throughput = run_trial("life_{}us".format(wait_us), args.duration,
-                                   args.warmup, args.startup_timeout, trial)
+                                   args.warmup, args.startup_timeout, trial,
+                                   args.node_count, args.client_node_count)
             throughputs.append(throughput)
-            print("LIFE {:>4} us trial {}/{}: {:.2f} txn/s".format(
-                wait_us, trial, args.repeats, throughput), flush=True)
-        rows.append((wait_us, statistics.median(throughputs), throughputs))
+            log("LIFE {:>4} us trial {}/{}: {:.2f} txn/s".format(
+                wait_us, trial, args.repeats, throughput))
+        rows.append((wait_us, median(throughputs), throughputs))
 
     best_wait, best_median, _ = max(rows, key=lambda row: row[1])
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    csv_path = RESULTS / "summary.csv"
-    with csv_path.open("w", newline="") as output:
+    mkdir_p(RESULTS)
+    csv_path = os.path.join(RESULTS, "summary.csv")
+    csv_mode = "wb" if PY2 else "w"
+    with open(csv_path, csv_mode) as output:
         writer = csv.writer(output)
         writer.writerow(("wait_us", "median_tput", "trial_tputs"))
-        for wait_us, median, throughputs in rows:
-            writer.writerow((wait_us, median, " ".join(map(str, throughputs))))
+        for wait_us, median_tput, throughputs in rows:
+            writer.writerow((wait_us, median_tput, " ".join(map(str, throughputs))))
 
     restore_config()
     if args.apply_best:
         applied = replace_define(original, "CC_ALG", "LIFE")
         applied = replace_define(applied, "LIFE_HELP_WAIT_US", best_wait)
-        CONFIG.write_text(applied)
-    print("Best LIFE_HELP_WAIT_US: {} ({:.2f} median txn/s)".format(
-        best_wait, best_median), flush=True)
-    print("Results: {}".format(csv_path), flush=True)
+        write_text(CONFIG, applied)
+    log("Best LIFE_HELP_WAIT_US: {} ({:.2f} median txn/s)".format(
+        best_wait, best_median))
+    log("Results: {}".format(csv_path))
     return 0
 
 
