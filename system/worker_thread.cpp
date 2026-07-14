@@ -76,6 +76,12 @@ void life_dbg_count_execute_rsp_code(LifeResultCode code) {
   (void)code;
 #endif
 }
+
+static RC life_note_wait_start(TxnManager *txn_man, RC rc) {
+  if (rc == WAIT_REM && txn_man != NULL)
+    txn_man->txn_stats.wait_starttime = get_sys_clock();
+  return rc;
+}
 #endif
 
 void WorkerThread::setup() {
@@ -559,6 +565,7 @@ RC WorkerThread::process_life_execute_rsp(Message *msg) {
                                                 life_msg->wait_id);
   LIFE_DBG_INC(life_dbg_execute_rsp_applied);
   check_if_done(rc);
+  life_note_wait_start(txn_man, rc);
   if (!IS_LOCAL(msg->get_txn_id()) && txn_man != NULL && rc != WAIT_REM)
     release_txn_man();
   return rc;
@@ -606,6 +613,7 @@ RC WorkerThread::process_life_prepare_rsp(Message *msg) {
                                                 life_msg->tid,
                                                 msg->return_node_id);
   check_if_done(rc);
+  life_note_wait_start(txn_man, rc);
   if (!IS_LOCAL(msg->get_txn_id()) && txn_man != NULL && rc != WAIT_REM)
     release_txn_man();
   return rc;
@@ -638,8 +646,9 @@ RC WorkerThread::process_life_help(Message *msg) {
   }
 
   LifeHelpMessage *life_msg = (LifeHelpMessage *)msg;
-  return life_txn->apply_life_help_request(life_msg->descriptor,
-                                           msg->return_node_id);
+  RC rc = life_txn->apply_life_help_request(life_msg->descriptor,
+                                            msg->return_node_id);
+  return life_note_wait_start(txn_man, rc);
 }
 
 RC WorkerThread::process_life_help_apply(Message *msg) {
@@ -649,6 +658,7 @@ RC WorkerThread::process_life_help_apply(Message *msg) {
   ((YCSBTxnManager *)txn_man)->mark_life_active();
   LifeHelpApplyMessage *life_msg = (LifeHelpApplyMessage *)msg;
   RC rc = ((YCSBTxnManager *)txn_man)->help_life_remote(life_msg->descriptor);
+  life_note_wait_start(txn_man, rc);
   if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM)
     release_txn_man();
   return rc;
@@ -667,6 +677,7 @@ RC WorkerThread::process_life_finalize(Message *msg) {
                                                 msg->return_node_id,
                                                 life_msg->requester_txn_id);
   check_if_done(rc);
+  life_note_wait_start(txn_man, rc);
   return rc;
 }
 
@@ -685,6 +696,7 @@ RC WorkerThread::process_life_finalize_rsp(Message *msg) {
   LifeFinalizeResponseMessage *life_msg = (LifeFinalizeResponseMessage *)msg;
   RC rc = life_txn->apply_life_finalize_response(life_msg->result);
   check_if_done(rc);
+  life_note_wait_start(txn_man, rc);
   if (!IS_LOCAL(msg->get_txn_id()) && txn_man != NULL && rc != WAIT_REM)
     release_txn_man();
   return rc;
