@@ -90,7 +90,13 @@ public:
   //uint64_t get_new_wq_cnt() {return new_query_queue.size();}
 
 private:
+#if CC_ALG == LIFE
+  // LIFE transaction ids encode their owning worker. Serializing all messages
+  // for a transaction on that worker avoids transaction-manager retry churn.
+  boost::lockfree::queue<work_queue_entry* > ** work_queue;
+#else
   boost::lockfree::queue<work_queue_entry* > * work_queue;
+#endif
   boost::lockfree::queue<work_queue_entry* > * new_txn_queue;
   boost::lockfree::queue<work_queue_entry* > * seq_queue;
   boost::lockfree::queue<work_queue_entry* > ** sched_queue;

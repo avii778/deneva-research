@@ -26,7 +26,13 @@ void QWorkQueue::init() {
   last_sched_dq = NULL;
   sched_ptr = 0;
   seq_queue = new boost::lockfree::queue<work_queue_entry* > (0);
+#if CC_ALG == LIFE
+  work_queue = new boost::lockfree::queue<work_queue_entry* > * [g_thread_cnt];
+  for (uint64_t i = 0; i < g_thread_cnt; i++)
+    work_queue[i] = new boost::lockfree::queue<work_queue_entry* > (0);
+#else
   work_queue = new boost::lockfree::queue<work_queue_entry* > (0);
+#endif
   new_txn_queue = new boost::lockfree::queue<work_queue_entry* >(0);
   sched_queue = new boost::lockfree::queue<work_queue_entry* > * [g_node_cnt];
   for ( uint64_t i = 0; i < g_node_cnt; i++) {
@@ -168,7 +174,14 @@ void QWorkQueue::enqueue(uint64_t thd_id, Message * msg,bool busy) {
   if(msg->rtype == CL_QRY) {
     while(!new_txn_queue->push(entry) && !simulation->is_done()) {}
   } else {
+#if CC_ALG == LIFE
+    assert(msg->txn_id != UINT64_MAX);
+    const uint64_t owner =
+        (msg->txn_id / g_node_cnt) % g_thread_cnt;
+    while(!work_queue[owner]->push(entry) && !simulation->is_done()) {}
+#else
     while(!work_queue->push(entry) && !simulation->is_done()) {}
+#endif
   }
   INC_STATS(thd_id,mtx[13],get_sys_clock() - mtx_wait_starttime);
 
@@ -185,7 +198,12 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
   Message * msg = NULL;
   work_queue_entry * entry = NULL;
   uint64_t mtx_wait_starttime = get_sys_clock();
+#if CC_ALG == LIFE
+  assert(thd_id < g_thread_cnt);
+  bool valid = work_queue[thd_id]->pop(entry);
+#else
   bool valid = work_queue->pop(entry);
+#endif
   if(!valid) {
 #if SERVER_GENERATE_QUERIES
     if(ISSERVER) {
@@ -215,7 +233,13 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
       INC_STATS(thd_id,work_queue_old_wait_time,queue_time);
       INC_STATS(thd_id,work_queue_old_cnt,1);
     }
+#if CC_ALG == LIFE
+    // A fallback ownership conflict can re-enqueue the same logical message.
+    // Keep all queue segments instead of replacing the previous segment.
+    msg->wq_time += queue_time;
+#else
     msg->wq_time = queue_time;
+#endif
     //DEBUG("DEQUEUE (%ld,%ld) %ld; %ld; %d, 0x%lx\n",msg->txn_id,msg->batch_id,msg->return_node_id,queue_time,msg->rtype,(uint64_t)msg);
     DEBUG("Work Dequeue (%ld,%ld)\n",entry->txn_id,entry->batch_id);
     DEBUG_M("QWorkQueue::dequeue work_queue_entry free\n");
@@ -231,4 +255,3 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
 #endif
   return msg;
 }
-
