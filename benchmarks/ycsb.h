@@ -78,7 +78,8 @@ public:
                         uint64_t stop_record_id,
                         LifeExecuteResult &immediate_result);
   RC apply_life_execute_response(const LifeExecuteResult &result,
-                                 uint64_t wait_id);
+                                 uint64_t wait_id,
+                                 uint64_t history_base_size);
   LifeExecuteResult prepare_life_remote(const LifeTxnDescriptor &descriptor);
   LifeExecuteResult finish_life_remote(const LifeTxnDescriptor &descriptor,
                                        RC decision);
@@ -128,9 +129,10 @@ private:
   void collect_life_objects(const LifeTxnDescriptor &descriptor,
                             std::vector<LifeFinalizeObject> &objects);
   void copy_life_descriptor_to_workload(const LifeTxnDescriptor &descriptor);
-  uint64_t save_life_wait_stack(const std::vector<LifeTxnDescriptor> &txns,
-                                uint32_t reason, uint64_t remote_node_id,
-                                uint64_t remote_key);
+  uint64_t allocate_life_wait_id();
+  void save_life_wait_stack(std::vector<LifeTxnDescriptor> &txns,
+                            uint64_t wait_id, uint32_t reason,
+                            uint64_t remote_node_id, uint64_t remote_key);
   bool take_life_wait_stack(uint64_t wait_id,
                             std::vector<LifeTxnDescriptor> &txns);
   bool take_life_wait_stack_by_reason(uint32_t reason,

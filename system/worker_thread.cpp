@@ -536,6 +536,16 @@ RC WorkerThread::process_life_execute(Message *msg) {
                                life_msg->operation,
                                life_msg->stop_record_id,
                                response->result);
+  response->history_base_size = life_msg->descriptor.history.size();
+  if (response->result.code == LifeResultCode::Success) {
+    std::vector<LifeHistoryEntry> &history =
+        response->result.transaction.history;
+    assert(history.size() >= response->history_base_size);
+    history.erase(history.begin(),
+                  history.begin() + response->history_base_size);
+    response->result.transaction.ycsb.requests.clear();
+    response->result.transaction.touched_objects.clear();
+  }
 
   msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
   LIFE_DBG_INC(life_dbg_execute_rsp_sent);
@@ -562,7 +572,8 @@ RC WorkerThread::process_life_execute_rsp(Message *msg) {
   LifeExecuteResponseMessage *life_msg = (LifeExecuteResponseMessage *)msg;
   life_dbg_count_execute_rsp_code(life_msg->result.code);
   RC rc = life_txn->apply_life_execute_response(life_msg->result,
-                                                life_msg->wait_id);
+                                                life_msg->wait_id,
+                                                life_msg->history_base_size);
   LIFE_DBG_INC(life_dbg_execute_rsp_applied);
   check_if_done(rc);
   life_note_wait_start(txn_man, rc);

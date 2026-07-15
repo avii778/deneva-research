@@ -15,6 +15,7 @@ mem_alloc mem_allocator;
 bool volatile warmup_done = false;
 UInt32 g_node_cnt = 1;
 UInt32 g_part_cnt = 1;
+UInt32 g_thread_cnt = 1;
 UInt32 g_req_per_query = 3;
 
 void *mem_alloc::alloc(uint64_t size) { return std::malloc(size); }
@@ -23,6 +24,14 @@ void *mem_alloc::realloc(void *ptr, uint64_t size) {
   return std::realloc(ptr, size);
 }
 void mem_alloc::free(void *ptr, uint64_t) { std::free(ptr); }
+
+void BaseQuery::init() {}
+void YCSBQuery::init() {}
+void YCSBQuery::print() {}
+bool YCSBQuery::readonly() { return true; }
+LifeTxnDescriptor TxnManager::life_descriptor() const {
+  return LifeTxnDescriptor();
+}
 
 void table_t::init(Catalog *host_schema) {
   schema = host_schema;
@@ -484,7 +493,16 @@ void test_prepared_rows_share_one_frozen_descriptor() {
   assert(second_life_row.prepare(frozen).code == LifeResultCode::Success);
   assert(frozen.use_count() == 3);
 
-  first_life_row.commit(frozen, std::vector<size_t>(1, 0));
+  std::shared_ptr<LifeTxnDescriptor> filtered_first =
+      std::make_shared<LifeTxnDescriptor>();
+  filtered_first->pid = tx.pid;
+  filtered_first->tid = tx.tid;
+  filtered_first->history.push_back(tx.history[0]);
+  first_life_row.commit(filtered_first, std::vector<size_t>(1, 0));
+  const LifeExecuteResult committed_first =
+      first_life_row.execute(tx, first_read);
+  assert(committed_first.code == LifeResultCode::Committed);
+  assert(committed_first.transaction.history.size() == tx.history.size());
   second_life_row.commit(frozen, std::vector<size_t>(1, 1));
   assert(frozen.use_count() == 3);
   assert(!retained.expired());

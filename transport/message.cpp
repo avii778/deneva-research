@@ -225,6 +225,14 @@ uint64_t life_result_size(const LifeExecuteResult &result) {
          life_descriptor_size(result.transaction) + sizeof(uint64_t);
 }
 
+uint64_t life_execute_success_result_size(const LifeExecuteResult &result) {
+  uint64_t size = sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) +
+                  sizeof(uint64_t) + sizeof(uint64_t);
+  for (size_t i = 0; i < result.transaction.history.size(); ++i)
+    size += life_history_entry_size(result.transaction.history[i]);
+  return size;
+}
+
 void life_write_result(char *buf, uint64_t &ptr,
                        const LifeExecuteResult &result) {
   const uint32_t code = static_cast<uint32_t>(result.code);
@@ -1391,7 +1399,11 @@ void LifeExecuteMessage::copy_to_buf(char *buf) {
 }
 
 uint64_t LifeExecuteResponseMessage::get_size() {
-  return Message::mget_size() + sizeof(wait_id) + life_result_size(result);
+  const uint64_t result_size = result.code == LifeResultCode::Success
+                                   ? life_execute_success_result_size(result)
+                                   : life_result_size(result);
+  return Message::mget_size() + sizeof(wait_id) + sizeof(history_base_size) +
+         result_size;
 }
 
 void LifeExecuteResponseMessage::copy_from_txn(TxnManager *txn) {
@@ -1406,7 +1418,25 @@ void LifeExecuteResponseMessage::copy_from_buf(char *buf) {
   Message::mcopy_from_buf(buf);
   uint64_t ptr = Message::mget_size();
   COPY_VAL(wait_id, buf, ptr);
-  life_read_result(buf, ptr, result);
+  COPY_VAL(history_base_size, buf, ptr);
+  uint32_t code;
+  COPY_VAL(code, buf, ptr);
+  result = LifeExecuteResult();
+  result.code = static_cast<LifeResultCode>(code);
+  if (result.code == LifeResultCode::Success) {
+    COPY_VAL(result.observed_attempt, buf, ptr);
+    COPY_VAL(result.transaction.ycsb.state, buf, ptr);
+    COPY_VAL(result.transaction.ycsb.next_record_id, buf, ptr);
+    uint64_t delta_size;
+    COPY_VAL(delta_size, buf, ptr);
+    result.transaction.history.resize(delta_size);
+    for (uint64_t i = 0; i < delta_size; ++i)
+      life_read_history_entry(buf, ptr, result.transaction.history[i]);
+  } else {
+    life_read_response(buf, ptr, result.response);
+    life_read_descriptor(buf, ptr, result.transaction);
+    COPY_VAL(result.observed_attempt, buf, ptr);
+  }
   assert(ptr == get_size());
 }
 
@@ -1415,7 +1445,22 @@ void LifeExecuteResponseMessage::copy_to_buf(char *buf) {
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   COPY_BUF(buf, wait_id, ptr);
-  life_write_result(buf, ptr, result);
+  COPY_BUF(buf, history_base_size, ptr);
+  const uint32_t code = static_cast<uint32_t>(result.code);
+  COPY_BUF(buf, code, ptr);
+  if (result.code == LifeResultCode::Success) {
+    COPY_BUF(buf, result.observed_attempt, ptr);
+    COPY_BUF(buf, result.transaction.ycsb.state, ptr);
+    COPY_BUF(buf, result.transaction.ycsb.next_record_id, ptr);
+    const uint64_t delta_size = result.transaction.history.size();
+    COPY_BUF(buf, delta_size, ptr);
+    for (uint64_t i = 0; i < delta_size; ++i)
+      life_write_history_entry(buf, ptr, result.transaction.history[i]);
+  } else {
+    life_write_response(buf, ptr, result.response);
+    life_write_descriptor(buf, ptr, result.transaction);
+    COPY_BUF(buf, result.observed_attempt, ptr);
+  }
   assert(ptr == get_size());
 }
 

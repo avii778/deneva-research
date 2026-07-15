@@ -225,6 +225,9 @@ public:
 
   LifeExecuteResult result;
   uint64_t wait_id;
+  // Successful remote batches return only history appended after this index.
+  // The requester reconstructs the descriptor from its saved wait stack.
+  uint64_t history_base_size;
 };
 
 class LifePrepareMessage : public Message {

@@ -56,6 +56,25 @@ make_life_finalization_message_descriptor(const LifeTxnDescriptor &descriptor) {
   return message_descriptor;
 }
 
+LifeTxnDescriptor
+make_life_finish_message_descriptor(const LifeTxnDescriptor &descriptor,
+                                    uint64_t node_id) {
+  LifeTxnDescriptor message_descriptor;
+  message_descriptor.pid = descriptor.pid;
+  message_descriptor.tid = descriptor.tid;
+  message_descriptor.ycsb.state = descriptor.ycsb.state;
+  message_descriptor.ycsb.next_record_id = descriptor.ycsb.next_record_id;
+  message_descriptor.history.reserve(descriptor.history.size());
+  message_descriptor.touched_objects.reserve(descriptor.touched_objects.size());
+  for (std::vector<LifeHistoryEntry>::const_iterator it =
+           descriptor.history.begin();
+       it != descriptor.history.end(); ++it) {
+    if (GET_NODE_ID(it->operation.object.partition_id) == node_id)
+      life_append_history(message_descriptor, *it);
+  }
+  return message_descriptor;
+}
+
 #if LOG_LIFE
 pthread_mutex_t life_log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -334,7 +353,8 @@ bool YCSBTxnManager::try_life_transactions(
       life_finalize_time += get_sys_clock() - finalize_start;
 #endif
       if (life_finalize_waiting) {
-        save_life_wait_stack(txns, 2,
+        const uint64_t wait_id = allocate_life_wait_id();
+        save_life_wait_stack(txns, wait_id, 2,
                              GET_NODE_ID(life_pending_finalize.tid.time),
                              life_pending_finalize.tid.time);
         return false;
@@ -361,9 +381,9 @@ bool YCSBTxnManager::try_life_transactions(
       if (has_life_wait_stack(ctx, 1, GET_NODE_ID(part_id), request.key))
         LIFE_DBG_INC(life_dbg_execute_duplicate_wait);
 #endif
-      const uint64_t wait_id =
-          save_life_wait_stack(txns, 1, GET_NODE_ID(part_id), request.key);
+      const uint64_t wait_id = allocate_life_wait_id();
       send_life_execute(ctx, operation, wait_id);
+      save_life_wait_stack(txns, wait_id, 1, GET_NODE_ID(part_id), request.key);
       return false;
     }
 
@@ -393,17 +413,20 @@ bool YCSBTxnManager::try_life_transactions(
 #if LOG_LIFE
       const uint64_t finalize_start = get_sys_clock();
 #endif
-      const bool finalized = finalize_life_descriptor(response);
+      finalize_life_descriptor(response);
 #if LOG_LIFE
       life_finalize_time += get_sys_clock() - finalize_start;
 #endif
       if (life_finalize_waiting) {
-        save_life_wait_stack(txns, 2,
+        const uint64_t wait_id = allocate_life_wait_id();
+        save_life_wait_stack(txns, wait_id, 2,
                              GET_NODE_ID(life_pending_finalize.tid.time),
                              life_pending_finalize.tid.time);
         return false;
       }
-      if (finalized && response_time < ctx_time)
+      // Algorithm 2/3 continues helping an older descriptor even when
+      // finalization reset it to a newer attempt.
+      if (response_time < ctx_time)
         txns.push_back(response);
       break;
     }
@@ -746,21 +769,24 @@ void YCSBTxnManager::copy_life_descriptor_to_workload(
   next_record_id = descriptor.ycsb.next_record_id;
 }
 
-uint64_t
-YCSBTxnManager::save_life_wait_stack(const std::vector<LifeTxnDescriptor> &txns,
-                                     uint32_t reason, uint64_t remote_node_id,
-                                     uint64_t remote_key) {
+uint64_t YCSBTxnManager::allocate_life_wait_id() {
+  uint64_t wait_id = life_next_wait_id++;
+  if (wait_id == UINT64_MAX)
+    wait_id = life_next_wait_id++;
+  return wait_id;
+}
+
+void YCSBTxnManager::save_life_wait_stack(
+    std::vector<LifeTxnDescriptor> &txns, uint64_t wait_id, uint32_t reason,
+    uint64_t remote_node_id, uint64_t remote_key) {
   assert(!txns.empty());
   LifeWaitContext context;
-  context.wait_id = life_next_wait_id++;
-  if (context.wait_id == UINT64_MAX)
-    context.wait_id = life_next_wait_id++;
+  context.wait_id = wait_id;
   context.reason = reason;
   context.remote_node_id = remote_node_id;
   context.remote_key = remote_key;
-  context.stack = txns;
-  life_wait_stacks->push_back(context);
-  return context.wait_id;
+  context.stack.swap(txns);
+  life_wait_stacks->push_back(std::move(context));
 }
 
 bool YCSBTxnManager::has_life_wait_stack(const LifeTxnDescriptor &descriptor,
@@ -788,7 +814,7 @@ bool YCSBTxnManager::take_life_wait_stack(
        it != life_wait_stacks->end(); ++it) {
     if (it->wait_id != wait_id)
       continue;
-    txns = it->stack;
+    txns.swap(it->stack);
     life_wait_stacks->erase(it);
     return true;
   }
@@ -801,7 +827,7 @@ bool YCSBTxnManager::take_life_wait_stack_by_reason(
        it != life_wait_stacks->end(); ++it) {
     if (it->reason != reason)
       continue;
-    txns = it->stack;
+    txns.swap(it->stack);
     life_wait_stacks->erase(it);
     return true;
   }
@@ -829,7 +855,7 @@ bool YCSBTxnManager::take_life_wait_stack_by_descriptor(
     if (!found)
       continue;
 
-    txns = it->stack;
+    txns.swap(it->stack);
     life_wait_stacks->erase(it);
     return true;
   }
@@ -964,14 +990,12 @@ void YCSBTxnManager::send_life_prepare_messages(
 void YCSBTxnManager::send_life_finish_messages(
     const LifeTxnDescriptor &descriptor, const std::vector<uint64_t> &nodes,
     RC decision) {
-  const LifeTxnDescriptor message_descriptor =
-      make_life_finalization_message_descriptor(descriptor);
   for (std::vector<uint64_t>::const_iterator it = nodes.begin();
        it != nodes.end(); ++it) {
     LifeFinishMessage *msg =
         (LifeFinishMessage *)Message::create_message(RLIFE_FINISH);
     msg->txn_id = get_txn_id();
-    msg->descriptor = message_descriptor;
+    msg->descriptor = make_life_finish_message_descriptor(descriptor, *it);
     msg->decision = decision;
     LIFE_DBG_INC(life_dbg_finish_sent);
     msg_queue.enqueue(get_thd_id(), msg, *it);
@@ -979,7 +1003,8 @@ void YCSBTxnManager::send_life_finish_messages(
 }
 
 RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
-                                               uint64_t wait_id) {
+                                               uint64_t wait_id,
+                                               uint64_t history_base_size) {
   life_response_stack.clear();
   std::vector<LifeTxnDescriptor> &txns = life_response_stack;
   const bool has_saved_stack = take_life_wait_stack(wait_id, txns);
@@ -988,25 +1013,24 @@ RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
     return WAIT_REM;
   }
 
-  LifeTxnDescriptor descriptor = LifeTxnDescriptor();
-  bool has_current_descriptor = false;
-
   switch (result.code) {
 
   case LifeResultCode::Success: {
-    const LifeTxnDescriptor &response = result.transaction;
-    const bool owns_response =
-        response.pid == txn->life_pid && response.tid == txn->life_tid;
-    if (!owns_response) {
-      if (has_saved_stack && !txns.empty()) {
-        txns.back() = response;
-        return try_life_transactions(txns) ? continue_life_after_stack()
-                                           : WAIT_REM;
-      }
-      return continue_life_after_stack();
+    if (txns.empty() || txns.back().history.size() != history_base_size) {
+      LIFE_DBG_INC(life_dbg_execute_rsp_stale);
+      return Abort;
     }
-    copy_life_descriptor_to_workload(response);
-    break;
+
+    LifeTxnDescriptor &response = txns.back();
+    for (std::vector<LifeHistoryEntry>::const_iterator it =
+             result.transaction.history.begin();
+         it != result.transaction.history.end(); ++it)
+      life_append_history(response, *it);
+    response.ycsb.state = result.transaction.ycsb.state;
+    response.ycsb.next_record_id =
+        result.transaction.ycsb.next_record_id;
+    return try_life_transactions(txns) ? continue_life_after_stack()
+                                       : WAIT_REM;
   }
 
   case LifeResultCode::Committed: {
@@ -1041,15 +1065,14 @@ RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
 
   case LifeResultCode::Finalize: {
     LifeTxnDescriptor finalize = result.transaction;
-    const bool finalized = finalize_life_descriptor(finalize);
+    finalize_life_descriptor(finalize);
     if (life_finalize_waiting) {
-      save_life_wait_stack(txns, 2, GET_NODE_ID(life_pending_finalize.tid.time),
+      const uint64_t finalize_wait_id = allocate_life_wait_id();
+      save_life_wait_stack(txns, finalize_wait_id, 2,
+                           GET_NODE_ID(life_pending_finalize.tid.time),
                            life_pending_finalize.tid.time);
       return WAIT_REM;
     }
-    if (!finalized)
-      return try_life_transactions(txns) ? continue_life_after_stack()
-                                         : WAIT_REM;
     const uint64_t ctx_time =
         txns.empty() ? finalize.tid.time : txns.back().tid.time;
     if (finalize.tid.time >= ctx_time)
@@ -1066,14 +1089,6 @@ RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
                                       result.transaction.history.empty()
                                   ? txns.back()
                                   : result.transaction;
-    const bool owns_retry =
-        retry.pid == txn->life_pid && retry.tid.time == txn->life_tid.time;
-    if (owns_retry && !has_current_descriptor && !txns.empty()) {
-      descriptor = txns.back();
-      has_current_descriptor = true;
-    }
-    if (owns_retry && has_current_descriptor)
-      retry = descriptor;
     rollback_life_descriptor(retry);
     retry.tid.attempt =
         std::max(retry.tid.attempt, result.observed_attempt) + 1;
@@ -1081,11 +1096,6 @@ RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
     retry.touched_objects.clear();
     retry.ycsb.next_record_id = 0;
     retry.ycsb.state = YCSB_0;
-    if (owns_retry) {
-      copy_life_descriptor_to_workload(retry);
-      break;
-    }
-
     txns.back() = retry;
     return try_life_transactions(txns) ? continue_life_after_stack() : WAIT_REM;
   } break;

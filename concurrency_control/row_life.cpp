@@ -614,12 +614,17 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
       (void)applied;
     }
 
+    LifeTxnDescriptorPtr retained_transaction = tx;
+    if (local != NULL && local->tid == tx->tid &&
+        local->status == LifeTxnStatus::Prepared && local->transaction)
+      retained_transaction = local->transaction;
+
     LifeProcessRecord &updated = mutable_process_record(tx->pid);
     // Keep the committed descriptor until a later transaction is admitted on
     // this row. Algorithm 1 stores P[pid] = (tx, Committed); retaining tx keeps
     // duplicate commits idempotent and lets stale helpers replay/observe the
     // same committed transaction instead of losing the row-local history.
-    updated.transaction = tx;
+    updated.transaction = retained_transaction;
     updated.tid = tx->tid;
     updated.status = LifeTxnStatus::Committed;
     updated.has_value = true;
