@@ -21,6 +21,16 @@
 #include "client_query.h"
 #include <boost/lockfree/queue.hpp>
 
+#if CC_ALG == LIFE
+namespace {
+// The measured LIFE event mix is roughly seven to nine continuation events per
+// admitted home transaction. One admission opportunity after seven old events
+// keeps the transaction pipeline populated without starving durable-manager
+// continuations. A failed admission attempt immediately falls back to old work.
+const uint32_t kLifeMaxOldDequeueStreak = 7;
+}
+#endif
+
 void QWorkQueue::init() {
 
   last_sched_dq = NULL;
@@ -28,6 +38,7 @@ void QWorkQueue::init() {
   seq_queue = new boost::lockfree::queue<work_queue_entry* > (0);
 #if CC_ALG == LIFE
   work_queue = new boost::lockfree::queue<work_queue_entry* > * [g_thread_cnt];
+  life_old_dequeue_streak = new uint32_t[g_thread_cnt]();
   for (uint64_t i = 0; i < g_thread_cnt; i++)
     work_queue[i] = new boost::lockfree::queue<work_queue_entry* > (0);
 #else
@@ -200,7 +211,19 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
   uint64_t mtx_wait_starttime = get_sys_clock();
 #if CC_ALG == LIFE
   assert(thd_id < g_thread_cnt);
-  bool valid = work_queue[thd_id]->pop(entry);
+  // Durable LIFE managers require owner-worker affinity, but affinity does not
+  // require draining continuation work forever. Periodically offer the worker
+  // a new transaction, then fall back immediately if the admission queue is
+  // empty. Only this worker mutates its streak counter.
+  bool valid = false;
+#if !SERVER_GENERATE_QUERIES
+  const bool prefer_new =
+      life_old_dequeue_streak[thd_id] >= kLifeMaxOldDequeueStreak;
+  if (prefer_new)
+    valid = new_txn_queue->pop(entry);
+#endif
+  if (!valid)
+    valid = work_queue[thd_id]->pop(entry);
 #else
   bool valid = work_queue->pop(entry);
 #endif
@@ -222,6 +245,14 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
   if(valid) {
     msg = entry->msg;
     assert(msg);
+#if CC_ALG == LIFE
+    if (msg->rtype == CL_QRY) {
+      life_old_dequeue_streak[thd_id] = 0;
+    } else if (life_old_dequeue_streak[thd_id] <
+               kLifeMaxOldDequeueStreak) {
+      ++life_old_dequeue_streak[thd_id];
+    }
+#endif
     //printf("%ld WQdequeue %ld\n",thd_id,entry->txn_id);
     uint64_t queue_time = get_sys_clock() - entry->starttime;
     INC_STATS(thd_id,work_queue_wait_time,queue_time);

@@ -17,6 +17,9 @@ UInt32 g_node_cnt = 1;
 UInt32 g_part_cnt = 1;
 UInt32 g_thread_cnt = 1;
 UInt32 g_req_per_query = 3;
+#if CC_ALG == LIFE
+UInt32 g_node_id = 0;
+#endif
 
 void *mem_alloc::alloc(uint64_t size) { return std::malloc(size); }
 void *mem_alloc::align_alloc(uint64_t size) { return std::malloc(size); }
@@ -135,6 +138,38 @@ void test_snapshot_is_owned() {
 
   query.requests.release();
 }
+
+#if CC_ALG == LIFE
+void test_snapshot_stably_groups_destinations_home_first() {
+  g_node_cnt = 3;
+  g_part_cnt = 3;
+  g_node_id = 1;
+
+  YCSBQuery query;
+  query.requests.init(6);
+  ycsb_request requests[6];
+  const uint64_t keys[6] = {0, 1, 5, 4, 3, 2};
+  for (uint64_t i = 0; i < 6; ++i) {
+    requests[i].acctype = RD;
+    requests[i].key = keys[i];
+    requests[i].value = static_cast<char>(i);
+    query.requests.add(&requests[i]);
+  }
+
+  const LifeYcsbSnapshot snapshot = make_life_ycsb_snapshot(query, YCSB_0, 0);
+  const uint64_t expected[6] = {1, 4, 0, 3, 5, 2};
+  const uint8_t expected_values[6] = {1, 3, 0, 4, 2, 5};
+  for (uint64_t i = 0; i < 6; ++i) {
+    assert(snapshot.requests[i].key == expected[i]);
+    assert(snapshot.requests[i].value == expected_values[i]);
+  }
+
+  query.requests.release();
+  g_node_id = 0;
+  g_node_cnt = 1;
+  g_part_cnt = 1;
+}
+#endif
 
 void test_execute_stale_history_refresh_and_help() {
   Catalog schema;
@@ -571,6 +606,9 @@ int main() {
   static_assert(sizeof(LifeBytes) <= 16,
                 "LIFE values must remain inline and compact");
   test_snapshot_is_owned();
+#if CC_ALG == LIFE
+  test_snapshot_stably_groups_destinations_home_first();
+#endif
   test_execute_stale_history_refresh_and_help();
   test_rollback_runs_inline_help();
   test_prepare_retry_and_commit_publish();
