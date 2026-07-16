@@ -204,13 +204,16 @@ public:
   void copy_from_txn(TxnManager *txn);
   void copy_to_txn(TxnManager *txn);
   uint64_t get_size();
-  void init() {}
+  void init() { prepare_after_execute = false; }
   void release() {}
 
   LifeTxnDescriptor descriptor;
   LifeOperation operation;
   uint64_t wait_id;
   uint64_t stop_record_id;
+  // Set only for an owned transaction whose contiguous remote batch reaches
+  // the natural end of the request sequence.
+  bool prepare_after_execute = false;
 };
 
 class LifeExecuteResponseMessage : public Message {
@@ -220,7 +223,7 @@ public:
   void copy_from_txn(TxnManager *txn);
   void copy_to_txn(TxnManager *txn);
   uint64_t get_size();
-  void init() {}
+  void init() { prepared = false; }
   void release() {}
 
   LifeExecuteResult result;
@@ -228,6 +231,9 @@ public:
   // Successful remote batches return only history appended after this index.
   // The requester reconstructs the descriptor from its saved wait stack.
   uint64_t history_base_size;
+  // True only when the remote node prepared the descriptor after executing
+  // the returned success delta.
+  bool prepared = false;
 };
 
 class LifePrepareMessage : public Message {

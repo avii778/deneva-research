@@ -531,11 +531,13 @@ RC WorkerThread::process_life_execute(Message *msg) {
       (LifeExecuteResponseMessage *)Message::create_message(RLIFE_EXECUTE_RSP);
   response->txn_id = msg->get_txn_id();
   response->wait_id = life_msg->wait_id;
+  response->prepared = false;
   YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
   life_txn->serve_life_execute(life_msg->descriptor,
                                life_msg->operation,
                                life_msg->stop_record_id,
-                               response->result);
+                               life_msg->prepare_after_execute,
+                               response->result, response->prepared);
   response->history_base_size = life_msg->descriptor.history.size();
   const LifeResultCode result_code = response->result.code;
   if (response->result.code == LifeResultCode::Success) {
@@ -586,7 +588,9 @@ RC WorkerThread::process_life_execute_rsp(Message *msg) {
   life_dbg_count_execute_rsp_code(life_msg->result.code);
   RC rc = life_txn->apply_life_execute_response(life_msg->result,
                                                 life_msg->wait_id,
-                                                life_msg->history_base_size);
+                                                life_msg->history_base_size,
+                                                life_msg->prepared,
+                                                msg->return_node_id);
   LIFE_DBG_INC(life_dbg_execute_rsp_applied);
   check_if_done(rc);
   life_note_wait_start(txn_man, rc);

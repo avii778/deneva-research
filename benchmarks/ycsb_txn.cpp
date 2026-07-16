@@ -148,7 +148,9 @@ extern volatile uint64_t life_dbg_prepare_rsp_duplicate;
 #endif
 
 YCSBTxnManager::YCSBTxnManager()
-    : life_finalize_requester_nodes(NULL),
+    : life_piggyback_prepared_tid(),
+      life_piggyback_prepared_tid_valid(false),
+      life_finalize_requester_nodes(NULL),
       life_finalize_requester_txn_ids(NULL), life_wait_stacks(NULL),
       life_active(false), life_next_wait_id(1) {
   h_thd = NULL;
@@ -179,6 +181,8 @@ void YCSBTxnManager::init(uint64_t thd_id, Workload *h_wl) {
   life_finalize_requester_txn_ids->reserve(g_node_cnt);
   life_wait_stacks->reserve(g_req_per_query);
   life_prepare_response_nodes.reserve(g_node_cnt);
+  life_pending_prepare_nodes.reserve(g_node_cnt);
+  life_piggyback_prepared_nodes.reserve(g_node_cnt);
   life_txn_stack.reserve(g_req_per_query);
   life_response_stack.reserve(g_req_per_query);
   life_object_scratch.reserve(g_req_per_query);
@@ -194,6 +198,7 @@ void YCSBTxnManager::reset() {
   life_active = false;
   reset_pending_life_finalize();
   life_wait_stacks->clear();
+  reset_life_piggyback_prepare();
   life_next_wait_id = 1;
 #endif
 #if LOG_LIFE
@@ -209,6 +214,7 @@ void YCSBTxnManager::life_reset_workload() {
   state = YCSB_0;
   next_record_id = 0;
   reset_pending_life_finalize();
+  reset_life_piggyback_prepare();
 }
 
 bool YCSBTxnManager::is_life_active() const { return life_active; }
@@ -221,6 +227,7 @@ void YCSBTxnManager::clear_life_active() {
   next_record_id = 0;
   reset_pending_life_finalize();
   life_wait_stacks->clear();
+  reset_life_piggyback_prepare();
   life_next_wait_id = 1;
 }
 #endif
@@ -488,6 +495,13 @@ RC YCSBTxnManager::send_life_execute(const LifeTxnDescriptor &descriptor,
   msg->operation = operation;
   msg->wait_id = wait_id;
   msg->stop_record_id = stop_record_id;
+  // attempt changes on retry while txn->life_tid retains the transaction's
+  // stable identity, so ownership is pid + logical timestamp, not attempt.
+  const bool owns_descriptor =
+      descriptor.pid == txn->life_pid &&
+      descriptor.tid.time == txn->life_tid.time;
+  msg->prepare_after_execute =
+      owns_descriptor && stop_record_id == descriptor.ycsb.requests.size();
   LIFE_DBG_INC(life_dbg_execute_sent);
   msg_queue.enqueue(get_thd_id(), msg, dest_node_id);
   return WAIT_REM;
@@ -510,7 +524,10 @@ YCSBTxnManager::execute_life_remote(const LifeTxnDescriptor &descriptor,
 RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
                                       const LifeOperation &operation,
                                       uint64_t stop_record_id,
-                                      LifeExecuteResult &immediate_result) {
+                                      bool prepare_after_execute,
+                                      LifeExecuteResult &immediate_result,
+                                      bool &prepared) {
+  prepared = false;
   LifeTxnDescriptor response_descriptor = descriptor;
   if (stop_record_id <= response_descriptor.ycsb.next_record_id)
     stop_record_id = response_descriptor.ycsb.next_record_id + 1;
@@ -548,6 +565,29 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
   if (immediate_result.code == LifeResultCode::Success) {
     immediate_result.transaction = response_descriptor;
     immediate_result.observed_attempt = response_descriptor.tid.attempt;
+
+    if (prepare_after_execute) {
+      // Never prepare a prefix that merely stopped at a destination change.
+      assert(response_descriptor.ycsb.next_record_id ==
+             response_descriptor.ycsb.requests.size());
+      if (response_descriptor.ycsb.next_record_id !=
+          response_descriptor.ycsb.requests.size()) {
+        immediate_result.code = LifeResultCode::InvalidOperation;
+      } else {
+        const LifeExecuteResult prepare_result =
+            prepare_life_remote(response_descriptor);
+        if (prepare_result.code == LifeResultCode::Success) {
+          prepared = true;
+        } else {
+          // prepare_life_remote() can prepare an earlier row before a later row
+          // rejects the attempt. Roll back the complete local descriptor so a
+          // retry cannot leave an unrecorded prepared suffix behind.
+          if (prepare_result.code != LifeResultCode::Committed)
+            finish_life_remote(response_descriptor, Abort);
+          immediate_result = prepare_result;
+        }
+      }
+    }
   }
 
   if (immediate_result.code == LifeResultCode::Retry)
@@ -894,6 +934,41 @@ bool YCSBTxnManager::note_life_prepare_response(uint64_t responder_node_id) {
   return true;
 }
 
+void YCSBTxnManager::reset_life_piggyback_prepare() {
+  life_piggyback_prepared_nodes.clear();
+  life_piggyback_prepared_tid = LifeTxnId();
+  life_piggyback_prepared_tid_valid = false;
+}
+
+void YCSBTxnManager::note_life_piggyback_prepare(
+    const LifeTxnDescriptor &descriptor, uint64_t node_id) {
+  // Helped descriptors deliberately keep the existing distributed finalize
+  // path because their envelope transaction can have a different owner.
+  if (descriptor.pid != txn->life_pid ||
+      descriptor.tid.time != txn->life_tid.time)
+    return;
+
+  if (!life_piggyback_prepared_tid_valid ||
+      life_piggyback_prepared_tid != descriptor.tid) {
+    life_piggyback_prepared_nodes.clear();
+    life_piggyback_prepared_tid = descriptor.tid;
+    life_piggyback_prepared_tid_valid = true;
+  }
+  add_unique_life_node(life_piggyback_prepared_nodes, node_id);
+}
+
+bool YCSBTxnManager::has_life_piggyback_prepare(
+    const LifeTxnDescriptor &descriptor, uint64_t node_id) const {
+  if (!life_piggyback_prepared_tid_valid ||
+      life_piggyback_prepared_tid != descriptor.tid ||
+      descriptor.pid != txn->life_pid ||
+      descriptor.tid.time != txn->life_tid.time)
+    return false;
+  return std::find(life_piggyback_prepared_nodes.begin(),
+                   life_piggyback_prepared_nodes.end(),
+                   node_id) != life_piggyback_prepared_nodes.end();
+}
+
 void YCSBTxnManager::debug_life_state() const {
   uint32_t wait_reason = 0;
   uint64_t wait_node = UINT64_MAX;
@@ -926,6 +1001,7 @@ void YCSBTxnManager::reset_pending_life_finalize() {
   life_pending_finalize = LifeTxnDescriptor();
   life_pending_objects.clear();
   life_pending_remote_nodes.clear();
+  life_pending_prepare_nodes.clear();
   life_prepare_response_nodes.clear();
   life_finalize_requester_nodes->clear();
   life_finalize_requester_txn_ids->clear();
@@ -1018,7 +1094,9 @@ void YCSBTxnManager::send_life_finish_messages(
 
 RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
                                                uint64_t wait_id,
-                                               uint64_t history_base_size) {
+                                               uint64_t history_base_size,
+                                               bool prepared,
+                                               uint64_t responder_node_id) {
   life_response_stack.clear();
   std::vector<LifeTxnDescriptor> &txns = life_response_stack;
   const bool has_saved_stack = take_life_wait_stack(wait_id, txns);
@@ -1043,6 +1121,13 @@ RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
     response.ycsb.state = result.transaction.ycsb.state;
     response.ycsb.next_record_id =
         result.transaction.ycsb.next_record_id;
+    if (prepared) {
+      if (response.ycsb.next_record_id != response.ycsb.requests.size()) {
+        LIFE_DBG_INC(life_dbg_execute_rsp_stale);
+        return Abort;
+      }
+      note_life_piggyback_prepare(response, responder_node_id);
+    }
     return try_life_transactions(txns) ? continue_life_after_stack()
                                        : WAIT_REM;
   }
@@ -1103,6 +1188,9 @@ RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
                                       result.transaction.history.empty()
                                   ? txns.back()
                                   : result.transaction;
+    if (retry.pid == txn->life_pid &&
+        retry.tid.time == txn->life_tid.time)
+      reset_life_piggyback_prepare();
     rollback_life_descriptor(retry);
     retry.tid.attempt =
         std::max(retry.tid.attempt, result.observed_attempt) + 1;
@@ -1306,13 +1394,19 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
   const std::vector<LifeFinalizeObject> &objects = frozen->touched_objects;
 
   std::vector<uint64_t> &remote_nodes = life_pending_remote_nodes;
+  std::vector<uint64_t> &prepare_nodes = life_pending_prepare_nodes;
   remote_nodes.clear();
+  prepare_nodes.clear();
   remote_nodes.reserve(g_node_cnt);
+  prepare_nodes.reserve(g_node_cnt);
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
        it != objects.end(); ++it) {
     const uint64_t node_id = GET_NODE_ID(it->object.partition_id);
-    if (node_id != g_node_id)
+    if (node_id != g_node_id) {
       add_unique_life_node(remote_nodes, node_id);
+      if (!has_life_piggyback_prepare(descriptor, node_id))
+        add_unique_life_node(prepare_nodes, node_id);
+    }
   }
 
   uint64_t observed_attempt = descriptor.tid.attempt;
@@ -1347,32 +1441,43 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
     return false;
   }
 
-  if (!remote_nodes.empty()) {
+  if (!prepare_nodes.empty()) {
     life_finalize_waiting = true;
-    life_prepare_pending = remote_nodes.size();
+    life_prepare_pending = prepare_nodes.size();
     life_prepare_failed = false;
     life_prepare_observed_attempt = descriptor.tid.attempt;
     life_pending_finalize = descriptor;
     life_pending_finalize.touched_objects = objects;
     life_pending_objects = objects;
     send_life_prepare_messages(life_pending_finalize,
-                               life_pending_remote_nodes);
+                               life_pending_prepare_nodes);
     return false;
   }
 
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
        it != objects.end(); ++it) {
+    if (GET_NODE_ID(it->object.partition_id) != g_node_id)
+      continue;
+
     Row_life *manager = it->manager;
     if (manager == NULL)
       manager = lookup_life_row(it->object)->manager;
     assert(manager != NULL);
     manager->commit(frozen, it->history_indices);
   }
+
+  // Piggyback preparation suppresses only the prepare round trip. Finish is
+  // still required to publish commit and release each durable remote manager.
+  if (!remote_nodes.empty())
+    send_life_finish_messages(descriptor, remote_nodes, Commit);
   return true;
 }
 
 void YCSBTxnManager::reset_life_descriptor(LifeTxnDescriptor &descriptor,
                                            uint64_t observed_attempt) {
+  if (descriptor.pid == txn->life_pid &&
+      descriptor.tid.time == txn->life_tid.time)
+    reset_life_piggyback_prepare();
   rollback_life_descriptor(descriptor);
   descriptor.tid.attempt =
       std::max(descriptor.tid.attempt, observed_attempt) + 1;

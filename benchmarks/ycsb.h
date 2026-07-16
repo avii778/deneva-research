@@ -76,10 +76,13 @@ public:
   RC serve_life_execute(const LifeTxnDescriptor &descriptor,
                         const LifeOperation &operation,
                         uint64_t stop_record_id,
-                        LifeExecuteResult &immediate_result);
+                        bool prepare_after_execute,
+                        LifeExecuteResult &immediate_result,
+                        bool &prepared);
   RC apply_life_execute_response(const LifeExecuteResult &result,
                                  uint64_t wait_id,
-                                 uint64_t history_base_size);
+                                 uint64_t history_base_size, bool prepared,
+                                 uint64_t responder_node_id);
   LifeExecuteResult prepare_life_remote(const LifeTxnDescriptor &descriptor);
   LifeExecuteResult finish_life_remote(const LifeTxnDescriptor &descriptor,
                                        RC decision);
@@ -146,6 +149,11 @@ private:
   bool pending_life_finalize_matches(const LifeProcessId &pid,
                                      const LifeTxnId &tid) const;
   bool note_life_prepare_response(uint64_t responder_node_id);
+  void note_life_piggyback_prepare(const LifeTxnDescriptor &descriptor,
+                                   uint64_t node_id);
+  bool has_life_piggyback_prepare(const LifeTxnDescriptor &descriptor,
+                                  uint64_t node_id) const;
+  void reset_life_piggyback_prepare();
   row_t *lookup_life_row(const LifeObjectId &object) const;
   row_t *lookup_life_row(uint64_t key) const;
   uint64_t life_remote_batch_stop(const LifeTxnDescriptor &descriptor,
@@ -186,7 +194,11 @@ private:
   LifeTxnDescriptor life_pending_finalize;
   std::vector<LifeFinalizeObject> life_pending_objects;
   std::vector<uint64_t> life_pending_remote_nodes;
+  std::vector<uint64_t> life_pending_prepare_nodes;
   std::vector<uint64_t> life_prepare_response_nodes;
+  std::vector<uint64_t> life_piggyback_prepared_nodes;
+  LifeTxnId life_piggyback_prepared_tid;
+  bool life_piggyback_prepared_tid_valid;
   std::vector<LifeTxnDescriptor> life_txn_stack;
   std::vector<LifeTxnDescriptor> life_response_stack;
   std::vector<LifeFinalizeObject> life_object_scratch;

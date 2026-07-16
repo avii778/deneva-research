@@ -1366,7 +1366,7 @@ void PrepareMessage::copy_to_buf(char * buf) {
 uint64_t LifeExecuteMessage::get_size() {
   return Message::mget_size() + life_descriptor_size(descriptor) +
          life_operation_size(operation) + sizeof(wait_id) +
-         sizeof(stop_record_id);
+         sizeof(stop_record_id) + sizeof(prepare_after_execute);
 }
 
 void LifeExecuteMessage::copy_from_txn(TxnManager *txn) {
@@ -1384,6 +1384,7 @@ void LifeExecuteMessage::copy_from_buf(char *buf) {
   life_read_operation(buf, ptr, operation);
   COPY_VAL(wait_id, buf, ptr);
   COPY_VAL(stop_record_id, buf, ptr);
+  COPY_VAL(prepare_after_execute, buf, ptr);
   assert(ptr == get_size());
 }
 
@@ -1395,6 +1396,7 @@ void LifeExecuteMessage::copy_to_buf(char *buf) {
   life_write_operation(buf, ptr, operation);
   COPY_BUF(buf, wait_id, ptr);
   COPY_BUF(buf, stop_record_id, ptr);
+  COPY_BUF(buf, prepare_after_execute, ptr);
   assert(ptr == get_size());
 }
 
@@ -1403,7 +1405,7 @@ uint64_t LifeExecuteResponseMessage::get_size() {
                                    ? life_execute_success_result_size(result)
                                    : life_result_size(result);
   return Message::mget_size() + sizeof(wait_id) + sizeof(history_base_size) +
-         result_size;
+         sizeof(prepared) + result_size;
 }
 
 void LifeExecuteResponseMessage::copy_from_txn(TxnManager *txn) {
@@ -1419,6 +1421,7 @@ void LifeExecuteResponseMessage::copy_from_buf(char *buf) {
   uint64_t ptr = Message::mget_size();
   COPY_VAL(wait_id, buf, ptr);
   COPY_VAL(history_base_size, buf, ptr);
+  COPY_VAL(prepared, buf, ptr);
   uint32_t code;
   COPY_VAL(code, buf, ptr);
   result = LifeExecuteResult();
@@ -1446,6 +1449,7 @@ void LifeExecuteResponseMessage::copy_to_buf(char *buf) {
   uint64_t ptr = Message::mget_size();
   COPY_BUF(buf, wait_id, ptr);
   COPY_BUF(buf, history_base_size, ptr);
+  COPY_BUF(buf, prepared, ptr);
   const uint32_t code = static_cast<uint32_t>(result.code);
   COPY_BUF(buf, code, ptr);
   if (result.code == LifeResultCode::Success) {
