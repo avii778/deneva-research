@@ -537,6 +537,7 @@ RC WorkerThread::process_life_execute(Message *msg) {
                                life_msg->stop_record_id,
                                response->result);
   response->history_base_size = life_msg->descriptor.history.size();
+  const LifeResultCode result_code = response->result.code;
   if (response->result.code == LifeResultCode::Success) {
     std::vector<LifeHistoryEntry> &history =
         response->result.transaction.history;
@@ -549,7 +550,19 @@ RC WorkerThread::process_life_execute(Message *msg) {
 
   msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
   LIFE_DBG_INC(life_dbg_execute_rsp_sent);
-  if (!IS_LOCAL(msg->get_txn_id()))
+
+  // Ordinary remote LIFE execution is part of a longer envelope transaction.
+  // Keep its manager in the transaction table so later execute/prepare/finish
+  // messages reuse the same initialized manager instead of cycling it through
+  // TxnManPool for every round trip. The txn id pins all of those messages to
+  // one worker, and the ready flag serializes table acquisition.
+  //
+  // Committed and InvalidOperation are terminal execute results: the requester
+  // will not run the normal prepare/finish path for this remote manager. Release
+  // immediately so stale or invalid messages cannot leave orphaned entries.
+  if (!IS_LOCAL(msg->get_txn_id()) &&
+      (result_code == LifeResultCode::Committed ||
+       result_code == LifeResultCode::InvalidOperation))
     release_txn_man();
   return RCOK;
 }
@@ -596,9 +609,16 @@ RC WorkerThread::process_life_prepare(Message *msg) {
   response->tid = life_msg->descriptor.tid;
   response->result =
       ((YCSBTxnManager *)txn_man)->prepare_life_remote(life_msg->descriptor);
+  const LifeResultCode result_code = response->result.code;
   msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
   LIFE_DBG_INC(life_dbg_prepare_rsp_sent);
-  if (!IS_LOCAL(msg->get_txn_id()))
+
+  // Success means at least one row is prepared and RLIFE_FINISH is expected;
+  // retain the manager until that terminal message. Other results need no
+  // manager-local continuity. Releasing them also handles duplicate prepare
+  // requests that observe rows already committed after the original finish.
+  if (!IS_LOCAL(msg->get_txn_id()) &&
+      result_code != LifeResultCode::Success)
     release_txn_man();
   return RCOK;
 }
@@ -639,6 +659,10 @@ RC WorkerThread::process_life_finish(Message *msg) {
   LifeFinishMessage *life_msg = (LifeFinishMessage *)msg;
   ((YCSBTxnManager *)txn_man)
       ->finish_life_remote(life_msg->descriptor, life_msg->decision);
+  // RLIFE_FINISH is the terminal owner of a durable remote LIFE manager. It
+  // commits/rolls back row-owned state above, then removes the manager from the
+  // transaction table and returns it to TxnManPool. Duplicate finishes safely
+  // create and immediately release a fresh manager.
   if (!IS_LOCAL(msg->get_txn_id()))
     release_txn_man();
   return RCOK;

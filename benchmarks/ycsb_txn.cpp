@@ -581,11 +581,14 @@ YCSBTxnManager::prepare_life_remote(const LifeTxnDescriptor &descriptor) {
   response.code = LifeResultCode::Success;
   response.transaction = descriptor;
   response.observed_attempt = descriptor.tid.attempt;
+  bool prepared_object = false;
+  bool found_local_object = false;
 
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects->begin();
        it != objects->end(); ++it) {
     if (GET_NODE_ID(it->object.partition_id) != g_node_id)
       continue;
+    found_local_object = true;
 
     Row_life *manager = it->manager;
     if (manager == NULL)
@@ -593,8 +596,11 @@ YCSBTxnManager::prepare_life_remote(const LifeTxnDescriptor &descriptor) {
     assert(manager != NULL);
 
     const LifeExecuteResult result = manager->prepare(frozen);
-    if (result.code == LifeResultCode::Success ||
-        result.code == LifeResultCode::Committed) {
+    if (result.code == LifeResultCode::Success) {
+      prepared_object = true;
+      continue;
+    }
+    if (result.code == LifeResultCode::Committed) {
       continue;
     }
 
@@ -603,6 +609,14 @@ YCSBTxnManager::prepare_life_remote(const LifeTxnDescriptor &descriptor) {
     response.code = result.code;
     return response;
   }
+
+  // A duplicate prepare can arrive after the original finish released its
+  // remote transaction manager. Report an all-committed result distinctly so
+  // the worker does not retain a newly created manager that will never receive
+  // another finish. If any row was newly/repeatedly prepared, Success remains
+  // the correct response and the manager stays durable until RLIFE_FINISH.
+  if (found_local_object && !prepared_object)
+    response.code = LifeResultCode::Committed;
 
   return response;
 }
