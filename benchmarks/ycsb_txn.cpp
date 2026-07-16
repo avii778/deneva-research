@@ -328,6 +328,10 @@ RC YCSBTxnManager::run_life_txn() {
   if (!complete)
     return WAIT_REM;
 
+  return complete_life_home_transaction();
+}
+
+RC YCSBTxnManager::complete_life_home_transaction() {
   if (query == NULL || query->partitions_touched.size() == 0)
     return RCOK;
 
@@ -368,10 +372,20 @@ bool YCSBTxnManager::try_life_transactions(
       }
 
       if (finalized) {
-        if (ctx.pid == txn->life_pid && ctx.tid.time == txn->life_tid.time) {
+        const bool owns_descriptor =
+            ctx.pid == txn->life_pid &&
+            ctx.tid.time == txn->life_tid.time;
+        if (owns_descriptor) {
+          // The owned descriptor is the bottom of the coordinator's stack.
+          // If it is ready to pop, every helped descriptor above it has
+          // already completed. Record protocol completion before the stack is
+          // emptied so response handlers run only the framework epilogue
+          // instead of reconstructing and finalizing this descriptor again.
+          assert(txns.size() == 1);
           txn->life_tid = ctx.tid;
           txn->life_history = ctx.history;
           txn->life_objects.clear();
+          txn->life_status = LifeTxnStatus::Committed;
           state = YCSB_FIN;
           next_record_id = ctx.ycsb.next_record_id;
         }
@@ -1502,7 +1516,20 @@ void YCSBTxnManager::append_life_success(LifeTxnDescriptor &descriptor,
 }
 
 RC YCSBTxnManager::continue_life_after_stack() {
-  return query == NULL ? RCOK : run_life_txn();
+  if (query == NULL)
+    return RCOK;
+
+  // A successfully finalized owned descriptor has already committed its LIFE
+  // rows and sent the one terminal finish per remote node. Only transaction
+  // manager bookkeeping remains; running the workload again would rebuild the
+  // completed descriptor and emit duplicate finish messages.
+  if (txn->life_status == LifeTxnStatus::Committed) {
+    assert(state == YCSB_FIN);
+    assert(next_record_id == ((YCSBQuery *)query)->requests.size());
+    return complete_life_home_transaction();
+  }
+
+  return run_life_txn();
 }
 
 void YCSBTxnManager::push_life_help_descriptor(

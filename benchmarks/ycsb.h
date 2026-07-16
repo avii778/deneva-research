@@ -116,6 +116,7 @@ private:
   };
 #if CC_ALG == LIFE
   RC run_life_txn();
+  RC complete_life_home_transaction();
   bool try_life_transactions(std::vector<LifeTxnDescriptor> &txns);
   LifeExecuteResult execute_life_operation(LifeTxnDescriptor &descriptor,
                                            LifeOperation &operation);
