@@ -140,7 +140,7 @@ void test_snapshot_is_owned() {
 }
 
 #if CC_ALG == LIFE
-void test_snapshot_stably_groups_destinations_home_first() {
+void test_query_stably_groups_destinations_home_first() {
   g_node_cnt = 3;
   g_part_cnt = 3;
   g_node_id = 1;
@@ -156,12 +156,12 @@ void test_snapshot_stably_groups_destinations_home_first() {
     query.requests.add(&requests[i]);
   }
 
-  const LifeYcsbSnapshot snapshot = make_life_ycsb_snapshot(query, YCSB_0, 0);
+  query.stable_group_requests_by_destination(g_node_id);
   const uint64_t expected[6] = {1, 4, 0, 3, 5, 2};
   const uint8_t expected_values[6] = {1, 3, 0, 4, 2, 5};
   for (uint64_t i = 0; i < 6; ++i) {
-    assert(snapshot.requests[i].key == expected[i]);
-    assert(snapshot.requests[i].value == expected_values[i]);
+    assert(query.requests[i]->key == expected[i]);
+    assert(static_cast<uint8_t>(query.requests[i]->value) == expected_values[i]);
   }
 
   query.requests.release();
@@ -607,7 +607,7 @@ int main() {
                 "LIFE values must remain inline and compact");
   test_snapshot_is_owned();
 #if CC_ALG == LIFE
-  test_snapshot_stably_groups_destinations_home_first();
+  test_query_stably_groups_destinations_home_first();
 #endif
   test_execute_stale_history_refresh_and_help();
   test_rollback_runs_inline_help();

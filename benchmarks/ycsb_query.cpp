@@ -38,14 +38,16 @@ void YCSBQueryGenerator::init() {
 }
 
 BaseQuery * YCSBQueryGenerator::create_query(Workload * h_wl, uint64_t home_partition_id) {
-  BaseQuery * query;
+  YCSBQuery * query = NULL;
   if (SKEW_METHOD == HOT) {
-    query = gen_requests_hot(home_partition_id, h_wl);
+    query = static_cast<YCSBQuery *>(gen_requests_hot(home_partition_id, h_wl));
   } else if (SKEW_METHOD == ZIPF){
     assert(the_n != 0);
-    query = gen_requests_zipf(home_partition_id, h_wl);
+    query = static_cast<YCSBQuery *>(gen_requests_zipf(home_partition_id, h_wl));
   }
 
+  assert(query != NULL);
+  query->stable_group_requests_by_destination(GET_NODE_ID(home_partition_id));
   return query;
 }
 

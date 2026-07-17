@@ -21,6 +21,8 @@
 #include "helper.h"
 #include "query.h"
 #include "array.h"
+#include <algorithm>
+#include <vector>
 
 class Workload;
 class Message;
@@ -88,7 +90,26 @@ public:
   static void copy_request_to_msg(YCSBQuery * ycsb_query, YCSBQueryMessage * msg, uint64_t id); 
   uint64_t participants(bool *& pps,Workload * wl); 
   bool readonly();
-	
+  void stable_group_requests_by_destination(uint64_t home_node_id) {
+    std::vector<ycsb_request *> grouped_requests;
+    grouped_requests.reserve(requests.size());
+    for (uint64_t i = 0; i < requests.size(); ++i)
+      grouped_requests.push_back(requests[i]);
+
+    std::stable_sort(
+        grouped_requests.begin(), grouped_requests.end(),
+        [home_node_id](const ycsb_request * lhs, const ycsb_request * rhs) {
+          const uint64_t lhs_node = GET_NODE_ID(lhs->key % g_part_cnt);
+          const uint64_t rhs_node = GET_NODE_ID(rhs->key % g_part_cnt);
+          const uint64_t lhs_rank = lhs_node == home_node_id ? 0 : lhs_node + 1;
+          const uint64_t rhs_rank = rhs_node == home_node_id ? 0 : rhs_node + 1;
+          return lhs_rank < rhs_rank;
+        });
+
+    for (uint64_t i = 0; i < grouped_requests.size(); ++i)
+      requests.set(i, grouped_requests[i]);
+  }
+
 
   //std::vector<ycsb_request> requests;
   Array<ycsb_request*> requests;
