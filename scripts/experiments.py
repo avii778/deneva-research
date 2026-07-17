@@ -65,8 +65,28 @@ YCSB_ALGOS = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP", "LIF
 YCSB_SINGLE_NODE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 YCSB_LIFE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 TESTING = ["LIFE"]
-TESTN = [4]
+TESTN = [2]
 NORMAL = [2, 4, 8, 16]
+
+WORKER_THREAD_CNTS = {
+    "WAIT_DIE": 5,
+    "LIFE": 6,
+}
+
+
+def thread_count_for_algo(algo):
+    return WORKER_THREAD_CNTS.get(algo, 4)
+
+
+def apply_algo_thread_counts(fmt, exp):
+    if "THREAD_CNT" not in fmt or "CC_ALG" not in fmt:
+        return fmt, exp
+
+    algo_idx = fmt.index("CC_ALG")
+    thread_idx = fmt.index("THREAD_CNT")
+    for row in exp:
+        row[thread_idx] = thread_count_for_algo(row[algo_idx])
+    return fmt, exp
 ##############################
 # PLOTS
 ##############################
@@ -84,14 +104,14 @@ def pps_scaling():
 
 def ycsb_scaling():
     wl = "YCSB"
-    nnodes = NORMAL
+    nnodes = TESTN
     algos = YCSB_LIFE_ALGOS
     base_table_size = 2097152 * 8
-    txn_write_perc = [0.5]
+    txn_write_perc = [1.0]
     tup_write_perc = [0.5]
     load = [10000]
     tcnt = [4]
-    skew = [0.3, 0.4]
+    skew = [0.3]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",
@@ -109,9 +129,38 @@ def ycsb_scaling():
             tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, algos
         )
     ]
-    txn_write_perc = [0.0]
+    txn_write_perc = [1.0]
     skew = [0.0]
     exp = exp + [
+        [wl, n, algo, base_table_size, tup_wr_perc, txn_wr_perc, ld, sk, thr]
+        for thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo in itertools.product(
+            tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, algos
+        )
+    ]
+    return fmt, exp
+
+def life_test(): 
+    wl = "YCSB"
+    nnodes = TESTN
+    algos = TESTING
+    base_table_size = 2097152 * 8
+    txn_write_perc = [1]
+    tup_write_perc = [0.5]
+    load = [10000]
+    tcnt = [4]
+    skew = [0.3]
+    fmt = [
+        "WORKLOAD",
+        "NODE_CNT",
+        "CC_ALG",
+        "SYNTH_TABLE_SIZE",
+        "TUP_WRITE_PERC",
+        "TXN_WRITE_PERC",
+        "MAX_TXN_IN_FLIGHT",
+        "ZIPF_THETA",
+        "THREAD_CNT",
+    ]
+    exp = [
         [wl, n, algo, base_table_size * n, tup_wr_perc, txn_wr_perc, ld, sk, thr]
         for thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo in itertools.product(
             tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, algos
@@ -753,69 +802,78 @@ def network_sweep():
     return fmt, exp
 
 
+
+
+def with_algo_thread_counts(generator):
+    def wrapped():
+        return apply_algo_thread_counts(*generator())
+
+    return wrapped
+
 ##############################
 # END PLOTS
 ##############################
 
 experiment_map = {
-    "pps_scaling": pps_scaling,
-    "ycsb_scaling": ycsb_scaling,
-    "ycsb_single_node": ycsb_single_node,
-    "life_wait_sweep": life_wait_sweep,
+    "pps_scaling": with_algo_thread_counts(pps_scaling),
+    "ycsb_scaling": with_algo_thread_counts(ycsb_scaling),
+    "ycsb_single_node": with_algo_thread_counts(ycsb_single_node),
+    "life_wait_sweep": with_algo_thread_counts(life_wait_sweep),
     "ycsb_single_node_plot": ycsb_single_node_plot,
-    "ppr_ycsb_single_node": ycsb_single_node,
+    "ppr_ycsb_single_node": with_algo_thread_counts(ycsb_single_node),
     "ppr_ycsb_single_node_plot": ycsb_single_node_plot,
-    "ycsb_single_node_writes": ycsb_single_node_writes,
+    "ycsb_single_node_writes": with_algo_thread_counts(ycsb_single_node_writes),
     "ycsb_single_node_writes_plot": ycsb_single_node_writes_plot,
-    "ppr_ycsb_single_node_writes": ycsb_single_node_writes,
+    "ppr_ycsb_single_node_writes": with_algo_thread_counts(ycsb_single_node_writes),
     "ppr_ycsb_single_node_writes_plot": ycsb_single_node_writes_plot,
-    "ycsb_scaling_abort": ycsb_scaling_abort,
-    "ppr_ycsb_scaling_abort": ycsb_scaling_abort,
+    "ycsb_scaling_abort": with_algo_thread_counts(ycsb_scaling_abort),
+    "ppr_ycsb_scaling_abort": with_algo_thread_counts(ycsb_scaling_abort),
     "ppr_ycsb_scaling_abort_plot": ppr_ycsb_scaling_abort_plot,
-    "ycsb_writes": ycsb_writes,
-    "ycsb_skew": ycsb_skew,
-    "isolation_levels": isolation_levels,
-    "ycsb_partitions": ycsb_partitions,
-    "ycsb_partitions_abort": ycsb_partitions_abort,
-    "ppr_ycsb_partitions_abort": ycsb_partitions_abort,
+    "ycsb_writes": with_algo_thread_counts(ycsb_writes),
+    "ycsb_skew": with_algo_thread_counts(ycsb_skew),
+    "isolation_levels": with_algo_thread_counts(isolation_levels),
+    "ycsb_partitions": with_algo_thread_counts(ycsb_partitions),
+    "ycsb_partitions_abort": with_algo_thread_counts(ycsb_partitions_abort),
+    "ppr_ycsb_partitions_abort": with_algo_thread_counts(ycsb_partitions_abort),
     "ppr_ycsb_partitions_abort_plot": ppr_ycsb_partitions_abort_plot,
-    "tpcc_scaling": tpcc_scaling,
-    "tpcc_scaling2": tpcc_scaling2,
-    "tpcc_scaling_whset": tpcc_scaling_whset,
-    "ycsb_skew_abort": ycsb_skew_abort,
-    "ppr_pps_scaling": pps_scaling,
+    "tpcc_scaling": with_algo_thread_counts(tpcc_scaling),
+    "tpcc_scaling2": with_algo_thread_counts(tpcc_scaling2),
+    "tpcc_scaling_whset": with_algo_thread_counts(tpcc_scaling_whset),
+    "ycsb_skew_abort": with_algo_thread_counts(ycsb_skew_abort),
+    "ppr_pps_scaling": with_algo_thread_counts(pps_scaling),
     "ppr_pps_scaling_plot": ppr_pps_scaling_plot,
-    "ppr_ycsb_scaling": ycsb_scaling,
+    "ppr_ycsb_scaling": with_algo_thread_counts(ycsb_scaling),
     "ppr_ycsb_scaling_plot": ppr_ycsb_scaling_plot,
-    "ecwc": ecwc,
-    "ppr_ecwc": ecwc,
+    "ecwc": with_algo_thread_counts(ecwc),
+    "ppr_ecwc": with_algo_thread_counts(ecwc),
     "ppr_ecwc_plot": ppr_ecwc_plot,
-    "ppr_ycsb_skew": ycsb_skew,
+    "ppr_ycsb_skew": with_algo_thread_counts(ycsb_skew),
     "ppr_ycsb_skew_plot": ppr_ycsb_skew_plot,
-    "ppr_ycsb_skew_abort": ycsb_skew_abort,
+    "ppr_ycsb_skew_abort": with_algo_thread_counts(ycsb_skew_abort),
     "ppr_ycsb_skew_abort_plot": ppr_ycsb_skew_abort_plot,
-    "ppr_ycsb_writes": ycsb_writes,
+    "ppr_ycsb_writes": with_algo_thread_counts(ycsb_writes),
     "ppr_ycsb_writes_plot": ppr_ycsb_writes_plot,
-    "ppr_ycsb_partitions": ycsb_partitions,
+    "ppr_ycsb_partitions": with_algo_thread_counts(ycsb_partitions),
     "ppr_ycsb_partitions_plot": ppr_ycsb_partitions_plot,
-    "ppr_isolation_levels": isolation_levels,
+    "ppr_isolation_levels": with_algo_thread_counts(isolation_levels),
     "ppr_isolation_levels_plot": ppr_isolation_levels_plot,
-    "ppr_tpcc_scaling": tpcc_scaling,
+    "ppr_tpcc_scaling": with_algo_thread_counts(tpcc_scaling),
     "ppr_tpcc_scaling_plot": ppr_tpcc_scaling_plot,
-    "network_sweep": network_sweep,
-    "ppr_network": network_sweep,
+    "network_sweep": with_algo_thread_counts(network_sweep),
+    "ppr_network": with_algo_thread_counts(network_sweep),
     "ppr_network_plot": ppr_network_plot,
+    "life_test" : with_algo_thread_counts(life_test),
 }
 
 
 # Default values for variable configurations
 configs = {
     "NODE_CNT": 16,
-    "THREAD_CNT": 4,
+    "THREAD_CNT": thread_count_for_algo("WAIT_DIE"),
     "REPLICA_CNT": 0,
     "REPLICA_TYPE": "AP",
-    "REM_THREAD_CNT": "THREAD_CNT",
-    "SEND_THREAD_CNT": "THREAD_CNT",
+    "REM_THREAD_CNT": 4,
+    "SEND_THREAD_CNT": 4,
     "CLIENT_NODE_CNT": "NODE_CNT",
     "CLIENT_THREAD_CNT": 4,
     "CLIENT_REM_THREAD_CNT": 2,
@@ -839,8 +897,7 @@ configs = {
     "NETWORK_TEST": "false",
     "ABORT_PENALTY": "10 * 1000000UL   // in ns.",
     "ABORT_PENALTY_MAX": "5 * 100 * 1000000UL   // in ns.",
-    "LIFE_HELP_WAIT_US": 0,
-    "MSG_TIME_LIMIT": "0",
+    "MSG_TIME_LIMIT": "10",
     "MSG_SIZE_MAX": 4096,
     "TXN_WRITE_PERC": 0.0,
     "PRIORITY": "PRIORITY_ACTIVE",
