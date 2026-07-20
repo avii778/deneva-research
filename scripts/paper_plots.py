@@ -4,6 +4,34 @@ import pprint
 def plot_all():
     return 0
 
+def ycsb_scaling_current_plot(summary,summary_cl):
+    """Plot the configurations produced by the current ycsb_scaling sweep."""
+    from experiments import ycsb_scaling, apply_algo_thread_counts
+    from helper import plot_prep
+    from plot_helper import tput, latency, abort_rate, time_breakdown_line
+
+    nfmt,nexp = apply_algo_thread_counts(*ycsb_scaling())
+    x_name = "ZIPF_THETA"
+    v_name = "CC_ALG"
+    x_vals,v_vals,fmt,exp,lst = plot_prep(nexp,nfmt,x_name,v_name)
+
+    common = {
+        "cfg_fmt": fmt,
+        "cfg": list(exp),
+        "xname": x_name,
+        "vname": v_name,
+        "xlab": "Skew Factor (Theta)",
+        "new_cfgs": lst,
+    }
+    tput(x_vals,v_vals,summary,summary_cl,
+         name="tput_ycsb_scaling_current",**common)
+    latency(x_vals,v_vals,summary,summary_cl,
+            name="latency_ycsb_scaling_current",**common)
+    abort_rate(x_vals,v_vals,summary,summary_cl,
+               name="aborts_ycsb_scaling_current",**common)
+    time_breakdown_line(x_vals,v_vals,summary,
+                        name="time_break_line_ycsb_scaling_current",**common)
+
 def ppr_ycsb_scaling_plot(summary,summary_cl):
     from experiments import ycsb_scaling
     from helper import plot_prep

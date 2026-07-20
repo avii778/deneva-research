@@ -6,7 +6,7 @@
 // Simulation + Hardware
 /***********************************************/
 #define NODE_CNT 2
-#define THREAD_CNT 6
+#define THREAD_CNT 4
 #define REM_THREAD_CNT 4
 #define SEND_THREAD_CNT 4
 #define CORE_CNT 8
@@ -103,7 +103,7 @@
 // Concurrency Control
 /***********************************************/
 // WAIT_DIE, NO_WAIT, TIMESTAMP, MVCC, CALVIN, MAAT
-#define CC_ALG LIFE
+#define CC_ALG CALVIN
 #define ISOLATION_LEVEL SERIALIZABLE
 #define YCSB_ABORT_MODE false
 
@@ -175,8 +175,8 @@
 #define DATA_PERC 100
 #define ACCESS_PERC 0.03
 #define INIT_PARALLELISM 8
-#define SYNTH_TABLE_SIZE 16777216
-#define ZIPF_THETA 0.0
+#define SYNTH_TABLE_SIZE 33554432
+#define ZIPF_THETA 0.7
 #define TXN_WRITE_PERC 1.0
 #define TUP_WRITE_PERC 0.5
 #define SCAN_PERC 0
@@ -341,10 +341,10 @@ enum PPSTxnType {
 
 #if CC_ALG == LIFE
 #undef THREAD_CNT
-#define THREAD_CNT 6
+#define THREAD_CNT 4
 #elif CC_ALG == WAIT_DIE
 #undef THREAD_CNT
-#define THREAD_CNT 6
+#define THREAD_CNT 4
 #endif
 // Replication
 #define AA 1

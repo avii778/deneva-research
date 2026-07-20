@@ -111,7 +111,7 @@ def ycsb_scaling():
     tup_write_perc = [0.5]
     load = [10000]
     tcnt = [4]
-    skew = [0.3]
+    skew = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",
@@ -129,14 +129,7 @@ def ycsb_scaling():
             tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, algos
         )
     ]
-    txn_write_perc = [1.0]
-    skew = [0.0]
-    exp = exp + [
-        [wl, n, algo, base_table_size, tup_wr_perc, txn_wr_perc, ld, sk, thr]
-        for thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo in itertools.product(
-            tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, algos
-        )
-    ]
+
     return fmt, exp
 
 def life_test(): 
@@ -820,6 +813,7 @@ experiment_map = {
     "ycsb_single_node": with_algo_thread_counts(ycsb_single_node),
     "life_wait_sweep": with_algo_thread_counts(life_wait_sweep),
     "ycsb_single_node_plot": ycsb_single_node_plot,
+    "ycsb_scaling_plot": ycsb_scaling_current_plot,
     "ppr_ycsb_single_node": with_algo_thread_counts(ycsb_single_node),
     "ppr_ycsb_single_node_plot": ycsb_single_node_plot,
     "ycsb_single_node_writes": with_algo_thread_counts(ycsb_single_node_writes),
