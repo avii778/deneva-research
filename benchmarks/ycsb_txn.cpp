@@ -512,9 +512,15 @@ RC YCSBTxnManager::send_life_execute(const LifeTxnDescriptor &descriptor,
   const bool owns_descriptor =
       descriptor.pid == txn->life_pid &&
       descriptor.tid.time == txn->life_tid.time;
+  // YCSB knows statically that its final destination batch reaches program
+  // end. PPS is data-dependent, so ask the receiver to prepare only if this
+  // execute happens to finish the program. The existing response bookkeeping
+  // records preparation against the exact attempt and responder node.
   msg->prepare_after_execute =
-      owns_descriptor && descriptor.workload == LifeWorkloadKind::Ycsb &&
-      stop_record_id == descriptor.ycsb.requests.size();
+      owns_descriptor &&
+      ((descriptor.workload == LifeWorkloadKind::Ycsb &&
+        stop_record_id == descriptor.ycsb.requests.size()) ||
+       descriptor.workload == LifeWorkloadKind::Pps);
   LIFE_DBG_INC(life_dbg_execute_sent);
   msg_queue.enqueue(get_thd_id(), msg, dest_node_id);
   return WAIT_REM;
@@ -545,40 +551,54 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
   if (stop_record_id <= life_program_position(response_descriptor))
     stop_record_id = life_program_position(response_descriptor) + 1;
 
+  // Validate the routing operation against the continuation exactly as the
+  // sender saw it. PPS reconciliation can legitimately replace this operation
+  // without advancing the history position when the owner of a relation index
+  // discovers end-of-scan. Comparing after reconciliation would mistake that
+  // phase transition for a corrupted request.
+  assert(!life_program_done(response_descriptor));
+  const LifeOperation requested_operation =
+      life_current_operation(response_descriptor);
+  if (requested_operation.object != operation.object) {
+    std::fprintf(stderr,
+                 "LIFE execute object mismatch: expected=(%lu,%lu,%lu,%lu) "
+                 "received=(%lu,%lu,%lu,%lu) position=%lu history=%lu\n",
+                 requested_operation.object.table_id,
+                 requested_operation.object.partition_id,
+                 requested_operation.object.primary_key,
+                 requested_operation.object.row_id, operation.object.table_id,
+                 operation.object.partition_id, operation.object.primary_key,
+                 operation.object.row_id, life_program_position(descriptor),
+                 static_cast<unsigned long>(descriptor.history.size()));
+  }
+  assert(requested_operation.object == operation.object);
+  assert(GET_NODE_ID(operation.object.partition_id) == g_node_id);
+
   immediate_result = LifeExecuteResult();
   immediate_result.code = LifeResultCode::InvalidOperation;
-  bool executed_operation = false;
   while (life_program_position(response_descriptor) < stop_record_id) {
     life_reconcile_descriptor(response_descriptor);
-    if (life_program_done(response_descriptor))
+    if (life_program_done(response_descriptor)) {
+      // Reconciliation itself may complete an empty PPS scan. Returning the
+      // updated continuation with no history delta lets the coordinator
+      // finalize without another execute round trip.
+      immediate_result.code = LifeResultCode::Success;
       break;
+    }
     LifeOperation local_operation =
         life_current_operation(response_descriptor);
     const uint64_t part_id = local_operation.object.partition_id;
-    if (GET_NODE_ID(part_id) != g_node_id)
+    if (GET_NODE_ID(part_id) != g_node_id) {
+      // A PPS scan can end on this node and expose a part whose owner is a
+      // different node. Return the reconciled program state immediately so
+      // the coordinator can route there. If the part remains local, continue
+      // below and retain destination batching throughput.
+      immediate_result.code = LifeResultCode::Success;
       break;
-
-    if (life_program_position(response_descriptor) ==
-        life_program_position(descriptor)) {
-      if (local_operation.object != operation.object) {
-        std::fprintf(stderr,
-                     "LIFE execute object mismatch: expected=(%lu,%lu,%lu,%lu) "
-                     "received=(%lu,%lu,%lu,%lu) position=%lu history=%lu\n",
-                     local_operation.object.table_id,
-                     local_operation.object.partition_id,
-                     local_operation.object.primary_key,
-                     local_operation.object.row_id, operation.object.table_id,
-                     operation.object.partition_id,
-                     operation.object.primary_key, operation.object.row_id,
-                     life_program_position(descriptor),
-                     static_cast<unsigned long>(descriptor.history.size()));
-      }
-      assert(local_operation.object == operation.object);
     }
 
     immediate_result =
         execute_life_remote(response_descriptor, local_operation);
-    executed_operation = true;
 
     if (immediate_result.code != LifeResultCode::Success)
       break;
@@ -586,30 +606,26 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
     life_advance_program(response_descriptor, local_operation,
                          immediate_result.response);
   }
-  assert(executed_operation);
 
   if (immediate_result.code == LifeResultCode::Success) {
     immediate_result.transaction = response_descriptor;
     immediate_result.observed_attempt = response_descriptor.tid.attempt;
 
-    if (prepare_after_execute) {
-      // Never prepare a prefix that merely stopped at a destination change.
-      assert(life_program_done(response_descriptor));
-      if (!life_program_done(response_descriptor)) {
-        immediate_result.code = LifeResultCode::InvalidOperation;
+    // PPS cannot know at send time which remote execute will finish its
+    // data-dependent scan/program. Treat the request bit as "prepare if done"
+    // and never prepare a prefix that stopped at a destination change.
+    if (prepare_after_execute && life_program_done(response_descriptor)) {
+      const LifeExecuteResult prepare_result =
+          prepare_life_remote(response_descriptor);
+      if (prepare_result.code == LifeResultCode::Success) {
+        prepared = true;
       } else {
-        const LifeExecuteResult prepare_result =
-            prepare_life_remote(response_descriptor);
-        if (prepare_result.code == LifeResultCode::Success) {
-          prepared = true;
-        } else {
-          // prepare_life_remote() can prepare an earlier row before a later row
-          // rejects the attempt. Roll back the complete local descriptor so a
-          // retry cannot leave an unrecorded prepared suffix behind.
-          if (prepare_result.code != LifeResultCode::Committed)
-            finish_life_remote(response_descriptor, Abort);
-          immediate_result = prepare_result;
-        }
+        // prepare_life_remote() can prepare an earlier row before a later row
+        // rejects the attempt. Roll back the complete local descriptor so a
+        // retry cannot leave an unrecorded prepared suffix behind.
+        if (prepare_result.code != LifeResultCode::Committed)
+          finish_life_remote(response_descriptor, Abort);
+        immediate_result = prepare_result;
       }
     }
   }

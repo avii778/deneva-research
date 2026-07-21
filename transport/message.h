@@ -211,8 +211,10 @@ public:
   LifeOperation operation;
   uint64_t wait_id;
   uint64_t stop_record_id;
-  // Set only for an owned transaction whose contiguous remote batch reaches
-  // the natural end of the request sequence.
+  // Set only for an owned transaction. The receiver prepares after execution
+  // iff the returned continuation has reached program end. YCSB can predict
+  // that final batch; PPS uses the same bit as a conditional request because
+  // scan termination is data-dependent.
   bool prepare_after_execute = false;
 };
 
