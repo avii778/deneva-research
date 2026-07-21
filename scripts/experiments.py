@@ -104,14 +104,14 @@ def pps_scaling():
 
 def ycsb_scaling():
     wl = "YCSB"
-    nnodes = TESTN
+    nnodes = NORMAL
     algos = YCSB_LIFE_ALGOS
     base_table_size = 2097152 * 8
     txn_write_perc = [1.0]
     tup_write_perc = [0.5]
     load = [10000]
     tcnt = [4]
-    skew = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+    skew = [0.3, 0.4]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",

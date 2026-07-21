@@ -6,7 +6,7 @@
 // Simulation + Hardware
 /***********************************************/
 #define NODE_CNT 2
-#define THREAD_CNT 4
+#define THREAD_CNT 5
 #define REM_THREAD_CNT 4
 #define SEND_THREAD_CNT 4
 #define CORE_CNT 8
@@ -175,10 +175,10 @@
 #define DATA_PERC 100
 #define ACCESS_PERC 0.03
 #define INIT_PARALLELISM 8
-#define SYNTH_TABLE_SIZE 33554432
-#define ZIPF_THETA 0.7
-#define TXN_WRITE_PERC 1.0
-#define TUP_WRITE_PERC 0.5
+#define SYNTH_TABLE_SIZE 65536
+#define ZIPF_THETA 0.3
+#define TXN_WRITE_PERC 0.0
+#define TUP_WRITE_PERC 0.0
 #define SCAN_PERC 0
 #define SCAN_LEN 20
 #define PART_PER_TXN 2
@@ -341,10 +341,10 @@ enum PPSTxnType {
 
 #if CC_ALG == LIFE
 #undef THREAD_CNT
-#define THREAD_CNT 4
+#define THREAD_CNT 5
 #elif CC_ALG == WAIT_DIE
 #undef THREAD_CNT
-#define THREAD_CNT 4
+#define THREAD_CNT 5
 #endif
 // Replication
 #define AA 1
