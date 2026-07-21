@@ -93,7 +93,7 @@ void TxnTable::dump() {
         printf("TT (%ld,%ld)\n",t_node->txn_man->get_txn_id(),t_node->txn_man->get_batch_id()
             );
 #if CC_ALG == LIFE && WORKLOAD == YCSB
-        ((YCSBTxnManager *)t_node->txn_man)->debug_life_state();
+        ((LifeTxnManager *)t_node->txn_man)->debug_life_state();
         printf("\n");
 #endif
         t_node = t_node->next;

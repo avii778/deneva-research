@@ -201,7 +201,7 @@ void WorkerThread::check_if_done(RC rc) {
 
 void WorkerThread::release_txn_man() {
 #if CC_ALG == LIFE && WORKLOAD == YCSB
-  ((YCSBTxnManager *)txn_man)->clear_life_active();
+  ((LifeTxnManager *)txn_man)->clear_life_active();
 #endif
   txn_table.release_transaction_manager(get_thd_id(),txn_man->get_txn_id(),txn_man->get_batch_id());
   txn_man = NULL;
@@ -525,14 +525,14 @@ RC WorkerThread::process_life_execute(Message *msg) {
   assert(CC_ALG == LIFE);
   LIFE_DBG_INC(life_dbg_execute_recv);
 
-  ((YCSBTxnManager *)txn_man)->mark_life_active();
+  ((LifeTxnManager *)txn_man)->mark_life_active();
   LifeExecuteMessage *life_msg = (LifeExecuteMessage *)msg;
   LifeExecuteResponseMessage *response =
       (LifeExecuteResponseMessage *)Message::create_message(RLIFE_EXECUTE_RSP);
   response->txn_id = msg->get_txn_id();
   response->wait_id = life_msg->wait_id;
   response->prepared = false;
-  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  LifeTxnManager *life_txn = (LifeTxnManager *)txn_man;
   life_txn->serve_life_execute(life_msg->descriptor,
                                life_msg->operation,
                                life_msg->stop_record_id,
@@ -574,7 +574,7 @@ RC WorkerThread::process_life_execute_rsp(Message *msg) {
   assert(CC_ALG == LIFE);
   LIFE_DBG_INC(life_dbg_execute_rsp_recv);
 
-  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  LifeTxnManager *life_txn = (LifeTxnManager *)txn_man;
   if (!life_txn->is_life_active()) {
     LIFE_DBG_INC(life_dbg_inactive_msg_dropped);
     release_txn_man();
@@ -604,7 +604,7 @@ RC WorkerThread::process_life_prepare(Message *msg) {
   assert(CC_ALG == LIFE);
   LIFE_DBG_INC(life_dbg_prepare_recv);
 
-  ((YCSBTxnManager *)txn_man)->mark_life_active();
+  ((LifeTxnManager *)txn_man)->mark_life_active();
   LifePrepareMessage *life_msg = (LifePrepareMessage *)msg;
   LifePrepareResponseMessage *response =
       (LifePrepareResponseMessage *)Message::create_message(RLIFE_PREPARE_RSP);
@@ -612,7 +612,7 @@ RC WorkerThread::process_life_prepare(Message *msg) {
   response->pid = life_msg->descriptor.pid;
   response->tid = life_msg->descriptor.tid;
   response->result =
-      ((YCSBTxnManager *)txn_man)->prepare_life_remote(life_msg->descriptor);
+      ((LifeTxnManager *)txn_man)->prepare_life_remote(life_msg->descriptor);
   const LifeResultCode result_code = response->result.code;
   msg_queue.enqueue(get_thd_id(), response, msg->return_node_id);
   LIFE_DBG_INC(life_dbg_prepare_rsp_sent);
@@ -632,7 +632,7 @@ RC WorkerThread::process_life_prepare_rsp(Message *msg) {
   assert(CC_ALG == LIFE);
   LIFE_DBG_INC(life_dbg_prepare_rsp_recv);
 
-  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  LifeTxnManager *life_txn = (LifeTxnManager *)txn_man;
   if (!life_txn->is_life_active()) {
     LIFE_DBG_INC(life_dbg_inactive_msg_dropped);
     release_txn_man();
@@ -659,9 +659,9 @@ RC WorkerThread::process_life_finish(Message *msg) {
   assert(CC_ALG == LIFE);
   LIFE_DBG_INC(life_dbg_finish_recv);
 
-  ((YCSBTxnManager *)txn_man)->mark_life_active();
+  ((LifeTxnManager *)txn_man)->mark_life_active();
   LifeFinishMessage *life_msg = (LifeFinishMessage *)msg;
-  ((YCSBTxnManager *)txn_man)
+  ((LifeTxnManager *)txn_man)
       ->finish_life_remote(life_msg->descriptor, life_msg->decision);
   // RLIFE_FINISH is the terminal owner of a durable remote LIFE manager. It
   // commits/rolls back row-owned state above, then removes the manager from the
@@ -677,7 +677,7 @@ RC WorkerThread::process_life_help(Message *msg) {
   assert(CC_ALG == LIFE);
   assert(IS_LOCAL(msg->get_txn_id()));
 
-  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  LifeTxnManager *life_txn = (LifeTxnManager *)txn_man;
   if (!life_txn->is_life_active()) {
     LIFE_DBG_INC(life_dbg_inactive_msg_dropped);
     release_txn_man();
@@ -694,9 +694,9 @@ RC WorkerThread::process_life_help_apply(Message *msg) {
   DEBUG("RLIFE_HELP_APPLY %ld\n", msg->get_txn_id());
   assert(CC_ALG == LIFE);
 
-  ((YCSBTxnManager *)txn_man)->mark_life_active();
+  ((LifeTxnManager *)txn_man)->mark_life_active();
   LifeHelpApplyMessage *life_msg = (LifeHelpApplyMessage *)msg;
-  RC rc = ((YCSBTxnManager *)txn_man)->help_life_remote(life_msg->descriptor);
+  RC rc = ((LifeTxnManager *)txn_man)->help_life_remote(life_msg->descriptor);
   life_note_wait_start(txn_man, rc);
   if (!IS_LOCAL(msg->get_txn_id()) && rc != WAIT_REM)
     release_txn_man();
@@ -709,7 +709,7 @@ RC WorkerThread::process_life_finalize(Message *msg) {
   assert(IS_LOCAL(msg->get_txn_id()));
   LIFE_DBG_INC(life_dbg_finalize_recv);
 
-  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  LifeTxnManager *life_txn = (LifeTxnManager *)txn_man;
   life_txn->mark_life_active();
   LifeFinalizeMessage *life_msg = (LifeFinalizeMessage *)msg;
   RC rc = life_txn->apply_life_finalize_request(life_msg->descriptor,
@@ -725,7 +725,7 @@ RC WorkerThread::process_life_finalize_rsp(Message *msg) {
   assert(CC_ALG == LIFE);
   LIFE_DBG_INC(life_dbg_finalize_rsp_recv);
 
-  YCSBTxnManager *life_txn = (YCSBTxnManager *)txn_man;
+  LifeTxnManager *life_txn = (LifeTxnManager *)txn_man;
   if (!life_txn->is_life_active()) {
     LIFE_DBG_INC(life_dbg_inactive_msg_dropped);
     release_txn_man();
@@ -808,7 +808,7 @@ RC WorkerThread::process_rtxn(Message * msg) {
           txn_man->txn_stats.restart_starttime = txn_man->txn_stats.starttime;
           msg->copy_to_txn(txn_man);
 #if CC_ALG == LIFE && WORKLOAD == YCSB
-          ((YCSBTxnManager *)txn_man)->mark_life_active();
+          ((LifeTxnManager *)txn_man)->mark_life_active();
 #endif
           DEBUG("START %ld %f %lu\n",txn_man->get_txn_id(),simulation->seconds_from_start(get_sys_clock()),txn_man->txn_stats.starttime);
           INC_STATS(get_thd_id(),local_txn_start_cnt,1);

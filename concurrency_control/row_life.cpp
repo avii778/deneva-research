@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <unistd.h>
@@ -152,6 +153,7 @@ LifeObjectId Row_life::object_id() const {
   id.table_id = _row->get_table()->get_table_id();
   id.partition_id = _row->get_part_id();
   id.primary_key = _row->get_primary_key();
+  id.row_id = _row->get_primary_key();
   return id;
 }
 
@@ -168,6 +170,15 @@ bool Row_life::apply_operation(const LifeOperation &operation, uint8_t *state,
 
   if (operation.object != object_id() || operation.field_id >= field_count ||
       state == NULL || state_size != _row->get_tuple_size()) {
+    std::fprintf(stderr,
+                 "LIFE invalid operation: table=%lu key=%lu row=%lu "
+                 "field=%u fields=%lu object_match=%d state_size=%lu "
+                 "tuple_size=%lu\n",
+                 operation.object.table_id, operation.object.primary_key,
+                 operation.object.row_id, operation.field_id, field_count,
+                 operation.object == object_id(),
+                 static_cast<unsigned long>(state_size),
+                 static_cast<unsigned long>(_row->get_tuple_size()));
     return false;
   }
 
@@ -197,6 +208,21 @@ bool Row_life::apply_operation(const LifeOperation &operation, uint8_t *state,
     std::copy(operation.argument.begin(), operation.argument.end(),
               state + field_offset);
 
+    return true;
+  }
+
+  if (operation.kind == LifeOperationKind::AddInt64) {
+    if (operation.value_size != sizeof(int64_t) ||
+        operation.argument.size() != sizeof(int64_t) ||
+        field_size < sizeof(int64_t))
+      return false;
+
+    uint64_t current;
+    int64_t delta;
+    std::memcpy(&current, state + field_offset, sizeof(current));
+    std::memcpy(&delta, operation.argument.data(), sizeof(delta));
+    current += static_cast<uint64_t>(delta);
+    std::memcpy(state + field_offset, &current, sizeof(current));
     return true;
   }
 
@@ -255,8 +281,11 @@ bool Row_life::validate_committed_operation(
   if (operation.kind == LifeOperationKind::ReadField)
     return operation.argument.empty();
 
-  return operation.kind == LifeOperationKind::WriteField &&
-         operation.argument.size() == operation.value_size;
+  if (operation.kind == LifeOperationKind::WriteField)
+    return operation.argument.size() == operation.value_size;
+  return operation.kind == LifeOperationKind::AddInt64 &&
+         operation.value_size == sizeof(int64_t) &&
+         operation.argument.size() == sizeof(int64_t);
 }
 
 bool Row_life::evaluate_committed_operation(const LifeOperation &operation,
@@ -265,7 +294,8 @@ bool Row_life::evaluate_committed_operation(const LifeOperation &operation,
   if (!validate_committed_operation(operation))
     return false;
 
-  if (operation.kind == LifeOperationKind::WriteField)
+  if (operation.kind == LifeOperationKind::WriteField ||
+      operation.kind == LifeOperationKind::AddInt64)
     return true;
 
   const uint64_t field_offset =
@@ -285,8 +315,18 @@ bool Row_life::apply_committed_operation(const LifeOperation &operation) {
 
   const uint64_t field_offset =
       _row->get_schema()->get_field_index(operation.field_id);
-  std::memcpy(_row->get_data() + field_offset, operation.argument.data(),
-              operation.value_size);
+  if (operation.kind == LifeOperationKind::WriteField) {
+    std::memcpy(_row->get_data() + field_offset, operation.argument.data(),
+                operation.value_size);
+    return true;
+  }
+
+  uint64_t current;
+  int64_t delta;
+  std::memcpy(&current, _row->get_data() + field_offset, sizeof(current));
+  std::memcpy(&delta, operation.argument.data(), sizeof(delta));
+  current += static_cast<uint64_t>(delta);
+  std::memcpy(_row->get_data() + field_offset, &current, sizeof(current));
   return true;
 }
 
@@ -433,6 +473,13 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
       const LifeHistoryEntry *stored_entry =
           object_history_entry(*local->transaction, tx_object_history_size);
       if (stored_entry == NULL || stored_entry->operation != operation) {
+        std::fprintf(stderr,
+                     "LIFE history mismatch: table=%lu key=%lu row=%lu "
+                     "object_history=%lu local_history=%lu\n",
+                     operation.object.table_id, operation.object.primary_key,
+                     operation.object.row_id,
+                     static_cast<unsigned long>(tx_object_history_size),
+                     static_cast<unsigned long>(local_object_history_size));
         return make_result(LifeResultCode::InvalidOperation);
       }
 

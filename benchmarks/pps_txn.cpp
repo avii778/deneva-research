@@ -27,12 +27,21 @@
 #include "transport.h"
 #include "msg_queue.h"
 #include "message.h"
+#include <algorithm>
+#include <cstring>
+
+PPSTxnManager::PPSTxnManager()
+    : _wl(NULL), _rc(RCOK), row(NULL), parts_processed_count(0),
+      life_part_index(0) {}
 
 void PPSTxnManager::init(uint64_t thd_id, Workload * h_wl) {
+#if CC_ALG == LIFE
+    YCSBTxnManager::init(thd_id, h_wl);
+#else
     TxnManager::init(thd_id, h_wl);
+#endif
     _wl = (PPSWorkload *) h_wl;
     reset();
-	TxnManager::reset();
 }
 
 void PPSTxnManager::reset() {
@@ -67,8 +76,13 @@ void PPSTxnManager::reset() {
     }
 
     parts_processed_count = 0;
+    life_part_index = 0;
     pps_query->part_keys.clear();
+#if CC_ALG == LIFE
+    YCSBTxnManager::reset();
+#else
     TxnManager::reset();
+#endif
 }
 
 RC PPSTxnManager::run_txn_post_wait() {
@@ -88,6 +102,9 @@ RC PPSTxnManager::run_txn() {
 #if CC_ALG == CALVIN
   rc = run_calvin_txn();
   return rc;
+#endif
+#if CC_ALG == LIFE
+  return run_life_txn();
 #endif
 
   if(IS_LOCAL(txn->txn_id) && 
@@ -1005,6 +1022,351 @@ inline RC PPSTxnManager::run_updatepart_1(row_t *& r_local) {
   return RCOK;
 }
 
+#if CC_ALG == LIFE
+namespace {
+
+uint32_t pps_initial_life_state(uint32_t txn_type) {
+  switch (txn_type) {
+  case PPS_GETPART: return PPS_GETPART0;
+  case PPS_GETSUPPLIER: return PPS_GETSUPPLIER0;
+  case PPS_GETPRODUCT: return PPS_GETPRODUCT0;
+  case PPS_GETPARTBYSUPPLIER: return PPS_GETPARTBYSUPPLIER0;
+  case PPS_GETPARTBYPRODUCT: return PPS_GETPARTBYPRODUCT0;
+  case PPS_ORDERPRODUCT: return PPS_ORDERPRODUCT0;
+  case PPS_UPDATEPRODUCTPART: return PPS_UPDATEPRODUCTPART0;
+  case PPS_UPDATEPART: return PPS_UPDATEPART0;
+  default: assert(false); return PPS_FIN;
+  }
+}
+
+uint64_t pps_relation_row_id(uint64_t parent_key, uint64_t slot) {
+  assert(parent_key <= UINT32_MAX && slot < UINT32_MAX);
+  return (parent_key << 32) | (slot + 1);
+}
+
+uint64_t pps_relation_parent(uint64_t row_id) { return row_id >> 32; }
+uint64_t pps_relation_slot(uint64_t row_id) {
+  assert((row_id & UINT32_MAX) != 0);
+  return (row_id & UINT32_MAX) - 1;
+}
+
+void pps_consume_life_response(LifePpsSnapshot &pps,
+                               const LifeResponse &response) {
+  switch (pps.state) {
+  case PPS_GETPART0:
+  case PPS_GETPRODUCT0:
+  case PPS_GETSUPPLIER0:
+  case PPS_UPDATEPRODUCTPART0:
+  case PPS_UPDATEPART0:
+    pps.state = PPS_FIN;
+    break;
+  case PPS_GETPARTBYSUPPLIER0:
+    pps.state = PPS_GETPARTBYSUPPLIER2;
+    break;
+  case PPS_GETPARTBYPRODUCT0:
+    pps.state = PPS_GETPARTBYPRODUCT2;
+    break;
+  case PPS_ORDERPRODUCT0:
+    pps.state = PPS_ORDERPRODUCT2;
+    break;
+  case PPS_GETPARTBYSUPPLIER2:
+  case PPS_GETPARTBYPRODUCT2:
+  case PPS_ORDERPRODUCT2: {
+    assert(response.value.size() == sizeof(uint64_t));
+    uint64_t key;
+    std::memcpy(&key, response.value.data(), sizeof(key));
+    pps.part_keys.push_back(key);
+    ++pps.scan_index;
+    break;
+  }
+  case PPS_GETPARTBYSUPPLIER4:
+  case PPS_GETPARTBYPRODUCT4:
+  case PPS_ORDERPRODUCT4:
+    ++pps.part_index;
+    break;
+  default:
+    assert(false);
+  }
+}
+
+} // namespace
+
+LifeTxnDescriptor PPSTxnManager::life_descriptor() const {
+  LifeTxnDescriptor descriptor = TxnManager::life_descriptor();
+  const PPSQuery *pps_query = static_cast<const PPSQuery *>(query);
+  descriptor.workload = LifeWorkloadKind::Pps;
+  descriptor.pps.txn_type = static_cast<uint32_t>(pps_query->txn_type);
+  descriptor.pps.state = static_cast<uint32_t>(state);
+  descriptor.pps.part_key = pps_query->part_key;
+  descriptor.pps.supplier_key = pps_query->supplier_key;
+  descriptor.pps.product_key = pps_query->product_key;
+  descriptor.pps.scan_index = parts_processed_count;
+  descriptor.pps.part_index = life_part_index;
+  descriptor.pps.program_index = descriptor.history.size();
+  descriptor.pps.part_keys.reserve(pps_query->part_keys.size());
+  for (uint64_t i = 0; i < pps_query->part_keys.size(); ++i)
+    descriptor.pps.part_keys.push_back(pps_query->part_keys[i]);
+  descriptor.history.reserve(MAX_PPS_PARTS_PER * 2 + 2);
+  descriptor.touched_objects.reserve(MAX_PPS_PARTS_PER * 2 + 2);
+  return descriptor;
+}
+
+void PPSTxnManager::life_reset_workload() {
+  PPSQuery *pps_query = static_cast<PPSQuery *>(query);
+  state = static_cast<PPSRemTxnType>(
+      pps_initial_life_state(static_cast<uint32_t>(pps_query->txn_type)));
+  parts_processed_count = 0;
+  life_part_index = 0;
+  pps_query->part_keys.clear();
+  reset_pending_life_finalize();
+  reset_life_piggyback_prepare();
+}
+
+RC PPSTxnManager::complete_life_home_transaction() {
+  return YCSBTxnManager::complete_life_home_transaction();
+}
+
+LifeOperation PPSTxnManager::make_life_pps_operation(
+    uint64_t table_id, uint64_t partition_id, uint64_t logical_row_id,
+    LifeOperationKind kind, uint32_t field_id, int64_t argument) const {
+  LifeOperation operation;
+  operation.object.table_id = table_id;
+  operation.object.partition_id = partition_id;
+  operation.object.primary_key = logical_row_id;
+  operation.object.row_id = logical_row_id;
+  operation.kind = kind;
+  operation.field_id = field_id;
+  operation.value_size = sizeof(uint64_t);
+  if (kind != LifeOperationKind::ReadField) {
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&argument);
+    operation.argument.assign(bytes, bytes + sizeof(argument));
+  }
+  return operation;
+}
+
+row_t *PPSTxnManager::lookup_life_row(const LifeObjectId &object) const {
+  INDEX *index = NULL;
+  uint64_t lookup_key = object.primary_key;
+  uint64_t count = 0;
+
+  if (object.table_id == _wl->t_parts->get_table_id()) {
+    index = _wl->i_parts;
+  } else if (object.table_id == _wl->t_products->get_table_id()) {
+    index = _wl->i_products;
+  } else if (object.table_id == _wl->t_suppliers->get_table_id()) {
+    index = _wl->i_suppliers;
+  } else if (object.table_id == _wl->t_uses->get_table_id()) {
+    index = _wl->i_uses;
+    lookup_key = pps_relation_parent(object.primary_key);
+    count = pps_relation_slot(object.primary_key);
+  } else if (object.table_id == _wl->t_supplies->get_table_id()) {
+    index = _wl->i_supplies;
+    lookup_key = pps_relation_parent(object.primary_key);
+    count = pps_relation_slot(object.primary_key);
+  } else {
+    assert(false);
+  }
+
+  itemid_t *item = const_cast<PPSTxnManager *>(this)->index_read(
+      index, lookup_key, object.partition_id, count);
+  assert(item != NULL);
+  row_t *result = static_cast<row_t *>(item->location);
+  assert(result->get_primary_key() == object.primary_key);
+  return result;
+}
+
+void PPSTxnManager::life_reconcile_descriptor(
+    LifeTxnDescriptor &descriptor) {
+  LifePpsSnapshot &pps = descriptor.pps;
+  assert(descriptor.workload == LifeWorkloadKind::Pps);
+  assert(pps.program_index <= descriptor.history.size());
+
+  // Algorithm 2 advances run(state, response) after Execute has appended the
+  // operation. Row_life can expose that durable descriptor to a helper first,
+  // so consume every response not yet reflected in the PPS continuation.
+  while (pps.program_index < descriptor.history.size()) {
+    pps_consume_life_response(
+        pps, descriptor.history[pps.program_index].response);
+    ++pps.program_index;
+  }
+
+  INDEX *scan_index = NULL;
+  uint64_t scan_key = 0;
+  uint64_t scan_partition = 0;
+  uint32_t part_state = PPS_FIN;
+
+  if (pps.state == PPS_GETPARTBYSUPPLIER2) {
+    scan_index = _wl->i_supplies;
+    scan_key = pps.supplier_key;
+    scan_partition = suppliers_to_partition(scan_key);
+    part_state = PPS_GETPARTBYSUPPLIER4;
+  } else if (pps.state == PPS_GETPARTBYPRODUCT2) {
+    scan_index = _wl->i_uses;
+    scan_key = pps.product_key;
+    scan_partition = products_to_partition(scan_key);
+    part_state = PPS_GETPARTBYPRODUCT4;
+  } else if (pps.state == PPS_ORDERPRODUCT2) {
+    scan_index = _wl->i_uses;
+    scan_key = pps.product_key;
+    scan_partition = products_to_partition(scan_key);
+    part_state = PPS_ORDERPRODUCT4;
+  }
+
+  if (scan_index != NULL && GET_NODE_ID(scan_partition) == g_node_id) {
+    itemid_t *item = index_read(scan_index, scan_key, scan_partition,
+                                static_cast<int>(pps.scan_index));
+    if (item == NULL) {
+      pps.state = part_state;
+      pps.part_index = 0;
+    }
+  }
+
+  if ((pps.state == PPS_GETPARTBYSUPPLIER4 ||
+       pps.state == PPS_GETPARTBYPRODUCT4 ||
+       pps.state == PPS_ORDERPRODUCT4) &&
+      pps.part_index >= pps.part_keys.size())
+    pps.state = PPS_FIN;
+}
+
+bool PPSTxnManager::life_program_done(
+    const LifeTxnDescriptor &descriptor) const {
+  assert(descriptor.workload == LifeWorkloadKind::Pps);
+  assert(descriptor.pps.program_index <= descriptor.history.size());
+  if (descriptor.pps.state == PPS_FIN)
+    assert(descriptor.pps.program_index == descriptor.history.size());
+  return descriptor.pps.state == PPS_FIN;
+}
+
+LifeOperation PPSTxnManager::life_current_operation(
+    LifeTxnDescriptor &descriptor) const {
+  const LifePpsSnapshot &pps = descriptor.pps;
+  assert(descriptor.workload == LifeWorkloadKind::Pps);
+  assert(pps.program_index == descriptor.history.size());
+  const uint32_t state = pps.state;
+
+  if (state == PPS_GETPART0)
+    return make_life_pps_operation(_wl->t_parts->get_table_id(),
+        parts_to_partition(pps.part_key), pps.part_key,
+        LifeOperationKind::ReadField, 0);
+  if (state == PPS_GETPRODUCT0)
+    return make_life_pps_operation(_wl->t_products->get_table_id(),
+        products_to_partition(pps.product_key), pps.product_key,
+        LifeOperationKind::ReadField, 0);
+  if (state == PPS_GETSUPPLIER0)
+    return make_life_pps_operation(_wl->t_suppliers->get_table_id(),
+        suppliers_to_partition(pps.supplier_key), pps.supplier_key,
+        LifeOperationKind::ReadField, 0);
+
+  if (state == PPS_GETPARTBYSUPPLIER0)
+    return make_life_pps_operation(_wl->t_suppliers->get_table_id(),
+        suppliers_to_partition(pps.supplier_key), pps.supplier_key,
+        LifeOperationKind::ReadField, 0);
+  if (state == PPS_GETPARTBYPRODUCT0 || state == PPS_ORDERPRODUCT0)
+    return make_life_pps_operation(_wl->t_products->get_table_id(),
+        products_to_partition(pps.product_key), pps.product_key,
+        LifeOperationKind::ReadField, 0);
+
+  if (state == PPS_GETPARTBYSUPPLIER2)
+    return make_life_pps_operation(_wl->t_supplies->get_table_id(),
+        suppliers_to_partition(pps.supplier_key),
+        pps_relation_row_id(pps.supplier_key, pps.scan_index),
+        LifeOperationKind::ReadField, 1);
+  if (state == PPS_GETPARTBYPRODUCT2 || state == PPS_ORDERPRODUCT2)
+    return make_life_pps_operation(_wl->t_uses->get_table_id(),
+        products_to_partition(pps.product_key),
+        pps_relation_row_id(pps.product_key, pps.scan_index),
+        LifeOperationKind::ReadField, 1);
+
+  if (state == PPS_GETPARTBYSUPPLIER4 ||
+      state == PPS_GETPARTBYPRODUCT4) {
+    const uint64_t key = pps.part_keys[pps.part_index];
+    return make_life_pps_operation(_wl->t_parts->get_table_id(),
+        parts_to_partition(key), key, LifeOperationKind::ReadField, 0);
+  }
+  if (state == PPS_ORDERPRODUCT4) {
+    const uint64_t key = pps.part_keys[pps.part_index];
+    return make_life_pps_operation(_wl->t_parts->get_table_id(),
+        parts_to_partition(key), key, LifeOperationKind::AddInt64,
+        PART_AMOUNT, -1);
+  }
+  if (state == PPS_UPDATEPRODUCTPART0)
+    return make_life_pps_operation(_wl->t_uses->get_table_id(),
+        products_to_partition(pps.product_key),
+        pps_relation_row_id(pps.product_key, 0),
+        LifeOperationKind::WriteField, 1,
+        static_cast<int64_t>(pps.part_key));
+  if (state == PPS_UPDATEPART0)
+    return make_life_pps_operation(_wl->t_parts->get_table_id(),
+        parts_to_partition(pps.part_key), pps.part_key,
+        LifeOperationKind::AddInt64, 1, 100);
+
+  assert(false);
+  return LifeOperation();
+}
+
+LifeExecuteResult PPSTxnManager::execute_life_operation(
+    LifeTxnDescriptor &descriptor, LifeOperation &operation) {
+  operation = life_current_operation(descriptor);
+  row_t *life_row = lookup_life_row(operation.object);
+  operation.manager = life_row->manager;
+  return life_row->execute_life(descriptor, operation);
+}
+
+void PPSTxnManager::life_advance_program(LifeTxnDescriptor &descriptor,
+                                         const LifeOperation &operation,
+                                         const LifeResponse &response) {
+  LifeHistoryEntry entry;
+  entry.operation = operation;
+  entry.response = response;
+  life_append_history(descriptor, entry);
+  life_reconcile_descriptor(descriptor);
+}
+
+uint64_t PPSTxnManager::life_program_position(
+    const LifeTxnDescriptor &descriptor) const {
+  return descriptor.pps.program_index;
+}
+
+bool PPSTxnManager::life_program_present(
+    const LifeTxnDescriptor &descriptor) const {
+  return descriptor.workload == LifeWorkloadKind::Pps;
+}
+
+void PPSTxnManager::life_reset_program(LifeTxnDescriptor &descriptor) {
+  descriptor.pps.state = pps_initial_life_state(descriptor.pps.txn_type);
+  descriptor.pps.scan_index = 0;
+  descriptor.pps.part_index = 0;
+  descriptor.pps.program_index = 0;
+  descriptor.pps.part_keys.clear();
+}
+
+void PPSTxnManager::life_copy_program_to_workload(
+    const LifeTxnDescriptor &descriptor) {
+  const LifePpsSnapshot &pps = descriptor.pps;
+  PPSQuery *pps_query = static_cast<PPSQuery *>(query);
+  state = static_cast<PPSRemTxnType>(pps.state);
+  parts_processed_count = pps.scan_index;
+  life_part_index = pps.part_index;
+  pps_query->part_keys.clear();
+  for (size_t i = 0; i < pps.part_keys.size(); ++i)
+    pps_query->part_keys.add(pps.part_keys[i]);
+}
+
+void PPSTxnManager::life_copy_remote_program(
+    LifeTxnDescriptor &destination, const LifeTxnDescriptor &source) {
+  assert(destination.workload == LifeWorkloadKind::Pps);
+  assert(source.workload == LifeWorkloadKind::Pps);
+  assert(source.pps.program_index == destination.history.size());
+  destination.workload = source.workload;
+  destination.pps = source.pps;
+}
+
+uint64_t PPSTxnManager::life_remote_batch_stop(
+    const LifeTxnDescriptor &, uint64_t) const {
+  return UINT64_MAX;
+}
+#endif
+
 
 
 RC PPSTxnManager::run_calvin_txn() {
@@ -1269,4 +1631,3 @@ RC PPSTxnManager::run_pps_phase5() {
   return rc;
 
 }
-

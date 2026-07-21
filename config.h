@@ -42,7 +42,7 @@
 // # of transactions to run for warmup
 #define WARMUP 0
 // YCSB or TPCC or PPS
-#define WORKLOAD YCSB
+#define WORKLOAD PPS
 // print the transaction latency distribution
 #define PRT_LAT_DISTR false
 #define STATS_ENABLE true
@@ -103,7 +103,7 @@
 // Concurrency Control
 /***********************************************/
 // WAIT_DIE, NO_WAIT, TIMESTAMP, MVCC, CALVIN, MAAT
-#define CC_ALG CALVIN
+#define CC_ALG LIFE
 #define ISOLATION_LEVEL SERIALIZABLE
 #define YCSB_ABORT_MODE false
 

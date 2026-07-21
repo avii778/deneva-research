@@ -67,7 +67,7 @@ void life_read_bytes(char *buf, uint64_t &ptr, LifeBytes &bytes) {
 }
 
 uint64_t life_object_id_size() {
-  return sizeof(uint64_t) * 3;
+  return sizeof(uint64_t) * 4;
 }
 
 void life_write_object_id(char *buf, uint64_t &ptr,
@@ -75,12 +75,14 @@ void life_write_object_id(char *buf, uint64_t &ptr,
   COPY_BUF(buf, object.table_id, ptr);
   COPY_BUF(buf, object.partition_id, ptr);
   COPY_BUF(buf, object.primary_key, ptr);
+  COPY_BUF(buf, object.row_id, ptr);
 }
 
 void life_read_object_id(char *buf, uint64_t &ptr, LifeObjectId &object) {
   COPY_VAL(object.table_id, buf, ptr);
   COPY_VAL(object.partition_id, buf, ptr);
   COPY_VAL(object.primary_key, buf, ptr);
+  COPY_VAL(object.row_id, buf, ptr);
 }
 
 uint64_t life_operation_size(const LifeOperation &operation) {
@@ -163,7 +165,10 @@ void life_read_ycsb_request(char *buf, uint64_t &ptr,
 uint64_t life_descriptor_size(const LifeTxnDescriptor &descriptor) {
   uint64_t size = sizeof(descriptor.pid.node_id) +
                   sizeof(descriptor.pid.worker_id) + sizeof(uint64_t) * 2;
+  size += sizeof(uint32_t); // workload
   size += sizeof(uint32_t) + sizeof(uint64_t);
+  size += sizeof(uint32_t) * 2 + sizeof(uint64_t) * 6 + sizeof(size_t) +
+          sizeof(uint64_t) * descriptor.pps.part_keys.size();
 
   size += sizeof(size_t);
   for (size_t i = 0; i < descriptor.history.size(); ++i)
@@ -182,8 +187,23 @@ void life_write_descriptor(char *buf, uint64_t &ptr,
   COPY_BUF(buf, descriptor.pid.worker_id, ptr);
   COPY_BUF(buf, descriptor.tid.time, ptr);
   COPY_BUF(buf, descriptor.tid.attempt, ptr);
+  const uint32_t workload = static_cast<uint32_t>(descriptor.workload);
+  COPY_BUF(buf, workload, ptr);
   COPY_BUF(buf, descriptor.ycsb.state, ptr);
   COPY_BUF(buf, descriptor.ycsb.next_record_id, ptr);
+  COPY_BUF(buf, descriptor.pps.txn_type, ptr);
+  COPY_BUF(buf, descriptor.pps.state, ptr);
+  COPY_BUF(buf, descriptor.pps.part_key, ptr);
+  COPY_BUF(buf, descriptor.pps.supplier_key, ptr);
+  COPY_BUF(buf, descriptor.pps.product_key, ptr);
+  COPY_BUF(buf, descriptor.pps.scan_index, ptr);
+  COPY_BUF(buf, descriptor.pps.part_index, ptr);
+  COPY_BUF(buf, descriptor.pps.program_index, ptr);
+  size_t pps_size = descriptor.pps.part_keys.size();
+  COPY_BUF(buf, pps_size, ptr);
+  for (size_t i = 0; i < pps_size; ++i) {
+    COPY_BUF(buf, descriptor.pps.part_keys[i], ptr);
+  }
 
   size_t size = descriptor.history.size();
   COPY_BUF(buf, size, ptr);
@@ -203,8 +223,25 @@ void life_read_descriptor(char *buf, uint64_t &ptr,
   COPY_VAL(descriptor.pid.worker_id, buf, ptr);
   COPY_VAL(descriptor.tid.time, buf, ptr);
   COPY_VAL(descriptor.tid.attempt, buf, ptr);
+  uint32_t workload;
+  COPY_VAL(workload, buf, ptr);
+  descriptor.workload = static_cast<LifeWorkloadKind>(workload);
   COPY_VAL(descriptor.ycsb.state, buf, ptr);
   COPY_VAL(descriptor.ycsb.next_record_id, buf, ptr);
+  COPY_VAL(descriptor.pps.txn_type, buf, ptr);
+  COPY_VAL(descriptor.pps.state, buf, ptr);
+  COPY_VAL(descriptor.pps.part_key, buf, ptr);
+  COPY_VAL(descriptor.pps.supplier_key, buf, ptr);
+  COPY_VAL(descriptor.pps.product_key, buf, ptr);
+  COPY_VAL(descriptor.pps.scan_index, buf, ptr);
+  COPY_VAL(descriptor.pps.part_index, buf, ptr);
+  COPY_VAL(descriptor.pps.program_index, buf, ptr);
+  size_t pps_size;
+  COPY_VAL(pps_size, buf, ptr);
+  descriptor.pps.part_keys.resize(pps_size);
+  for (size_t i = 0; i < pps_size; ++i) {
+    COPY_VAL(descriptor.pps.part_keys[i], buf, ptr);
+  }
 
   size_t size;
   COPY_VAL(size, buf, ptr);
@@ -227,7 +264,10 @@ uint64_t life_result_size(const LifeExecuteResult &result) {
 
 uint64_t life_execute_success_result_size(const LifeExecuteResult &result) {
   uint64_t size = sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) +
-                  sizeof(uint64_t) + sizeof(uint64_t);
+                  sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) * 2 +
+                  sizeof(uint64_t) * 6 + sizeof(size_t) +
+                  sizeof(uint64_t) * result.transaction.pps.part_keys.size() +
+                  sizeof(uint64_t);
   for (size_t i = 0; i < result.transaction.history.size(); ++i)
     size += life_history_entry_size(result.transaction.history[i]);
   return size;
@@ -1428,8 +1468,25 @@ void LifeExecuteResponseMessage::copy_from_buf(char *buf) {
   result.code = static_cast<LifeResultCode>(code);
   if (result.code == LifeResultCode::Success) {
     COPY_VAL(result.observed_attempt, buf, ptr);
+    uint32_t workload;
+    COPY_VAL(workload, buf, ptr);
+    result.transaction.workload = static_cast<LifeWorkloadKind>(workload);
     COPY_VAL(result.transaction.ycsb.state, buf, ptr);
     COPY_VAL(result.transaction.ycsb.next_record_id, buf, ptr);
+    COPY_VAL(result.transaction.pps.txn_type, buf, ptr);
+    COPY_VAL(result.transaction.pps.state, buf, ptr);
+    COPY_VAL(result.transaction.pps.part_key, buf, ptr);
+    COPY_VAL(result.transaction.pps.supplier_key, buf, ptr);
+    COPY_VAL(result.transaction.pps.product_key, buf, ptr);
+    COPY_VAL(result.transaction.pps.scan_index, buf, ptr);
+    COPY_VAL(result.transaction.pps.part_index, buf, ptr);
+    COPY_VAL(result.transaction.pps.program_index, buf, ptr);
+    size_t pps_size;
+    COPY_VAL(pps_size, buf, ptr);
+    result.transaction.pps.part_keys.resize(pps_size);
+    for (size_t i = 0; i < pps_size; ++i) {
+      COPY_VAL(result.transaction.pps.part_keys[i], buf, ptr);
+    }
     uint64_t delta_size;
     COPY_VAL(delta_size, buf, ptr);
     result.transaction.history.resize(delta_size);
@@ -1454,8 +1511,24 @@ void LifeExecuteResponseMessage::copy_to_buf(char *buf) {
   COPY_BUF(buf, code, ptr);
   if (result.code == LifeResultCode::Success) {
     COPY_BUF(buf, result.observed_attempt, ptr);
+    const uint32_t workload =
+        static_cast<uint32_t>(result.transaction.workload);
+    COPY_BUF(buf, workload, ptr);
     COPY_BUF(buf, result.transaction.ycsb.state, ptr);
     COPY_BUF(buf, result.transaction.ycsb.next_record_id, ptr);
+    COPY_BUF(buf, result.transaction.pps.txn_type, ptr);
+    COPY_BUF(buf, result.transaction.pps.state, ptr);
+    COPY_BUF(buf, result.transaction.pps.part_key, ptr);
+    COPY_BUF(buf, result.transaction.pps.supplier_key, ptr);
+    COPY_BUF(buf, result.transaction.pps.product_key, ptr);
+    COPY_BUF(buf, result.transaction.pps.scan_index, ptr);
+    COPY_BUF(buf, result.transaction.pps.part_index, ptr);
+    COPY_BUF(buf, result.transaction.pps.program_index, ptr);
+    const size_t pps_size = result.transaction.pps.part_keys.size();
+    COPY_BUF(buf, pps_size, ptr);
+    for (size_t i = 0; i < pps_size; ++i) {
+      COPY_BUF(buf, result.transaction.pps.part_keys[i], ptr);
+    }
     const uint64_t delta_size = result.transaction.history.size();
     COPY_BUF(buf, delta_size, ptr);
     for (uint64_t i = 0; i < delta_size; ++i)

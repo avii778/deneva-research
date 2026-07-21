@@ -35,6 +35,8 @@ bool YCSBQuery::readonly() { return true; }
 LifeTxnDescriptor TxnManager::life_descriptor() const {
   return LifeTxnDescriptor();
 }
+int YCSBWorkload::key_to_part(uint64_t key) { return key % g_part_cnt; }
+row_t *YCSBTxnManager::lookup_life_row(uint64_t) const { return NULL; }
 
 void table_t::init(Catalog *host_schema) {
   schema = host_schema;
@@ -85,6 +87,7 @@ LifeOperation operation(row_t &row, LifeOperationKind kind, uint64_t value) {
   op.object.table_id = row.table->get_table_id();
   op.object.partition_id = row.get_part_id();
   op.object.primary_key = row.get_primary_key();
+  op.object.row_id = row.get_primary_key();
   op.kind = kind;
   op.field_id = 0;
   op.value_size = sizeof(uint64_t);
@@ -137,6 +140,62 @@ void test_snapshot_is_owned() {
   assert(snapshot.requests.size() == 3);
 
   query.requests.release();
+}
+
+void test_ycsb_reconcile_consumes_durable_response() {
+  LifeTxnDescriptor tx = descriptor(1, 12, 1, YCSB_0, 0);
+  LifeHistoryEntry entry;
+  entry.operation.object.table_id = 1;
+  entry.operation.object.partition_id = 0;
+  entry.operation.object.primary_key = 7;
+  entry.operation.object.row_id = 7;
+  tx.history.push_back(entry);
+
+  reconcile_life_ycsb_program(tx);
+
+  assert(tx.ycsb.next_record_id == tx.history.size());
+  assert(tx.ycsb.state == YCSB_FIN);
+}
+
+void test_add_int64_replays_and_commits() {
+  Catalog schema;
+  schema.table_id = 18;
+  schema.table_name = "PPS_TEST";
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+  table_t table;
+  table.init(&schema);
+  row_t row;
+  row.init(&table, 0, 9);
+  row.set_primary_key(9);
+  uint64_t value = 10;
+  std::memcpy(row.data, &value, sizeof(value));
+  Row_life life_row;
+  life_row.init(&row);
+
+  LifeTxnDescriptor tx = descriptor(1, 44, 1, YCSB_0, 0);
+  LifeOperation add = operation(row, LifeOperationKind::AddInt64, 0);
+  const int64_t delta = -3;
+  add.argument.assign(reinterpret_cast<const uint8_t *>(&delta),
+                      reinterpret_cast<const uint8_t *>(&delta) +
+                          sizeof(delta));
+  add.manager = &life_row;
+  const LifeExecuteResult result = life_row.execute(tx, add);
+  assert(result.code == LifeResultCode::Success);
+  LifeHistoryEntry entry;
+  entry.operation = add;
+  entry.response = result.response;
+  life_append_history(tx, entry);
+  assert(life_row.prepare(tx).code == LifeResultCode::Success);
+  life_row.commit(tx);
+  std::memcpy(&value, row.data, sizeof(value));
+  assert(value == 7);
+  std::free(row.data);
+  delete[] schema._columns;
 }
 
 #if CC_ALG == LIFE
@@ -606,6 +665,8 @@ int main() {
   static_assert(sizeof(LifeBytes) <= 16,
                 "LIFE values must remain inline and compact");
   test_snapshot_is_owned();
+  test_ycsb_reconcile_consumes_durable_response();
+  test_add_int64_replays_and_commits();
 #if CC_ALG == LIFE
   test_query_stably_groups_destinations_home_first();
 #endif

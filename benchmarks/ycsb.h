@@ -30,6 +30,7 @@ class ycsb_request;
 LifeYcsbRequest make_life_ycsb_request(const ycsb_request &request);
 LifeYcsbSnapshot make_life_ycsb_snapshot(const YCSBQuery &query, uint32_t state,
                                          uint64_t next_record_id);
+void reconcile_life_ycsb_program(LifeTxnDescriptor &descriptor);
 
 enum YCSBRemTxnType { YCSB_0, YCSB_1, YCSB_FIN, YCSB_RDONE };
 
@@ -66,7 +67,7 @@ public:
   RC run_txn();
   RC run_txn_post_wait();
   RC run_calvin_txn();
-  LifeTxnDescriptor life_descriptor() const;
+  virtual LifeTxnDescriptor life_descriptor() const;
 #if CC_ALG == LIFE
   void life_reset_workload();
   RC send_life_execute(const LifeTxnDescriptor &descriptor,
@@ -105,7 +106,7 @@ public:
 #endif
   void copy_remote_requests(YCSBQueryMessage *msg);
 
-private:
+protected:
   void next_ycsb_state();
   struct LifeWaitContext {
     uint64_t wait_id;
@@ -116,10 +117,26 @@ private:
   };
 #if CC_ALG == LIFE
   RC run_life_txn();
-  RC complete_life_home_transaction();
+  virtual RC complete_life_home_transaction();
   bool try_life_transactions(std::vector<LifeTxnDescriptor> &txns);
-  LifeExecuteResult execute_life_operation(LifeTxnDescriptor &descriptor,
-                                           LifeOperation &operation);
+  virtual LifeExecuteResult
+  execute_life_operation(LifeTxnDescriptor &descriptor,
+                         LifeOperation &operation);
+  virtual void life_reconcile_descriptor(LifeTxnDescriptor &descriptor);
+  virtual bool life_program_done(const LifeTxnDescriptor &descriptor) const;
+  virtual LifeOperation
+  life_current_operation(LifeTxnDescriptor &descriptor) const;
+  virtual void life_advance_program(LifeTxnDescriptor &descriptor,
+                                    const LifeOperation &operation,
+                                    const LifeResponse &response);
+  virtual uint64_t life_program_position(
+      const LifeTxnDescriptor &descriptor) const;
+  virtual bool life_program_present(const LifeTxnDescriptor &descriptor) const;
+  virtual void life_reset_program(LifeTxnDescriptor &descriptor);
+  virtual void life_copy_program_to_workload(
+      const LifeTxnDescriptor &descriptor);
+  virtual void life_copy_remote_program(LifeTxnDescriptor &destination,
+                                        const LifeTxnDescriptor &source);
   bool finalize_life_descriptor(LifeTxnDescriptor &descriptor);
   void reset_life_descriptor(LifeTxnDescriptor &descriptor,
                              uint64_t observed_attempt);
@@ -155,10 +172,10 @@ private:
   bool has_life_piggyback_prepare(const LifeTxnDescriptor &descriptor,
                                   uint64_t node_id) const;
   void reset_life_piggyback_prepare();
-  row_t *lookup_life_row(const LifeObjectId &object) const;
+  virtual row_t *lookup_life_row(const LifeObjectId &object) const;
   row_t *lookup_life_row(uint64_t key) const;
-  uint64_t life_remote_batch_stop(const LifeTxnDescriptor &descriptor,
-                                  uint64_t dest_node_id) const;
+  virtual uint64_t life_remote_batch_stop(const LifeTxnDescriptor &descriptor,
+                                          uint64_t dest_node_id) const;
   LifeOperation make_life_operation(const LifeYcsbRequest &req);
   LifeOperation make_life_operation(row_t *row, ycsb_request *req);
   LifeOperation make_life_operation(row_t *row, const LifeYcsbRequest &req);
@@ -214,5 +231,10 @@ private:
   uint64_t life_finalize_time;
 #endif
 };
+
+// Workload-neutral name used by LIFE dispatch. YCSBTxnManager retains its
+// historical name to avoid a disruptive ABI/source rename, while PPS derives
+// from the same protocol coordinator through this alias.
+typedef YCSBTxnManager LifeTxnManager;
 
 #endif

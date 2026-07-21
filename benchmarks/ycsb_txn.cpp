@@ -53,6 +53,7 @@ LifeTxnDescriptor
 make_life_finalization_message_descriptor(const LifeTxnDescriptor &descriptor) {
   LifeTxnDescriptor message_descriptor = descriptor;
   message_descriptor.ycsb.requests.clear();
+  message_descriptor.pps.part_keys.clear();
   return message_descriptor;
 }
 
@@ -62,8 +63,10 @@ make_life_finish_message_descriptor(const LifeTxnDescriptor &descriptor,
   LifeTxnDescriptor message_descriptor;
   message_descriptor.pid = descriptor.pid;
   message_descriptor.tid = descriptor.tid;
+  message_descriptor.workload = descriptor.workload;
   message_descriptor.ycsb.state = descriptor.ycsb.state;
   message_descriptor.ycsb.next_record_id = descriptor.ycsb.next_record_id;
+  message_descriptor.pps = descriptor.pps;
   message_descriptor.history.reserve(descriptor.history.size());
   message_descriptor.touched_objects.reserve(descriptor.touched_objects.size());
   for (std::vector<LifeHistoryEntry>::const_iterator it =
@@ -348,14 +351,9 @@ bool YCSBTxnManager::try_life_transactions(
     std::vector<LifeTxnDescriptor> &txns) {
   while (!txns.empty()) {
     LifeTxnDescriptor &ctx = txns.back();
+    life_reconcile_descriptor(ctx);
 
-    // Row records append successful operations to history before the workload
-    // cursor is advanced. A helper must reconcile that cursor before deciding
-    // whether another request exists.
-    if (ctx.ycsb.next_record_id < ctx.history.size())
-      ctx.ycsb.next_record_id = ctx.history.size();
-
-    if (ctx.ycsb.next_record_id >= ctx.ycsb.requests.size()) {
+    if (life_program_done(ctx)) {
 #if LOG_LIFE
       const uint64_t finalize_start = get_sys_clock();
 #endif
@@ -386,25 +384,25 @@ bool YCSBTxnManager::try_life_transactions(
           txn->life_history = ctx.history;
           txn->life_objects.clear();
           txn->life_status = LifeTxnStatus::Committed;
-          state = YCSB_FIN;
-          next_record_id = ctx.ycsb.next_record_id;
+          life_copy_program_to_workload(ctx);
         }
         txns.pop_back();
       }
       continue;
     }
 
-    const LifeYcsbRequest &request = ctx.ycsb.requests[ctx.ycsb.next_record_id];
-    const int part_id = _wl->key_to_part(request.key);
+    LifeOperation pending_operation = life_current_operation(ctx);
+    const uint64_t part_id = pending_operation.object.partition_id;
     if (GET_NODE_ID(part_id) != g_node_id) {
-      LifeOperation operation = make_life_operation(request);
 #if LIFE_DEBUG_COUNTERS
-      if (has_life_wait_stack(ctx, 1, GET_NODE_ID(part_id), request.key))
+      if (has_life_wait_stack(ctx, 1, GET_NODE_ID(part_id),
+                              pending_operation.object.primary_key))
         LIFE_DBG_INC(life_dbg_execute_duplicate_wait);
 #endif
       const uint64_t wait_id = allocate_life_wait_id();
-      send_life_execute(ctx, operation, wait_id);
-      save_life_wait_stack(txns, wait_id, 1, GET_NODE_ID(part_id), request.key);
+      send_life_execute(ctx, pending_operation, wait_id);
+      save_life_wait_stack(txns, wait_id, 1, GET_NODE_ID(part_id),
+                           pending_operation.object.primary_key);
       return false;
     }
 
@@ -424,7 +422,7 @@ bool YCSBTxnManager::try_life_transactions(
     switch (result.code) {
 
     case LifeResultCode::Success:
-      append_life_success(ctx, operation, result.response);
+      life_advance_program(ctx, operation, result.response);
       break;
 
     case LifeResultCode::Finalize: {
@@ -498,7 +496,7 @@ RC YCSBTxnManager::send_life_execute(const LifeTxnDescriptor &descriptor,
   assert(dest_node_id != g_node_id);
   const uint64_t stop_record_id =
       life_remote_batch_stop(descriptor, dest_node_id);
-  assert(stop_record_id > descriptor.ycsb.next_record_id);
+  assert(stop_record_id > life_program_position(descriptor));
   if (query != NULL)
     query->partitions_touched.add_unique(operation.object.partition_id);
 
@@ -515,7 +513,8 @@ RC YCSBTxnManager::send_life_execute(const LifeTxnDescriptor &descriptor,
       descriptor.pid == txn->life_pid &&
       descriptor.tid.time == txn->life_tid.time;
   msg->prepare_after_execute =
-      owns_descriptor && stop_record_id == descriptor.ycsb.requests.size();
+      owns_descriptor && descriptor.workload == LifeWorkloadKind::Ycsb &&
+      stop_record_id == descriptor.ycsb.requests.size();
   LIFE_DBG_INC(life_dbg_execute_sent);
   msg_queue.enqueue(get_thd_id(), msg, dest_node_id);
   return WAIT_REM;
@@ -543,26 +542,39 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
                                       bool &prepared) {
   prepared = false;
   LifeTxnDescriptor response_descriptor = descriptor;
-  if (stop_record_id <= response_descriptor.ycsb.next_record_id)
-    stop_record_id = response_descriptor.ycsb.next_record_id + 1;
-  if (stop_record_id > response_descriptor.ycsb.requests.size())
-    stop_record_id = response_descriptor.ycsb.requests.size();
+  if (stop_record_id <= life_program_position(response_descriptor))
+    stop_record_id = life_program_position(response_descriptor) + 1;
 
   immediate_result = LifeExecuteResult();
   immediate_result.code = LifeResultCode::InvalidOperation;
   bool executed_operation = false;
-  while (response_descriptor.ycsb.next_record_id < stop_record_id) {
-    const LifeYcsbRequest &request =
-        response_descriptor.ycsb
-            .requests[response_descriptor.ycsb.next_record_id];
-    const uint64_t part_id = _wl->key_to_part(request.key);
+  while (life_program_position(response_descriptor) < stop_record_id) {
+    life_reconcile_descriptor(response_descriptor);
+    if (life_program_done(response_descriptor))
+      break;
+    LifeOperation local_operation =
+        life_current_operation(response_descriptor);
+    const uint64_t part_id = local_operation.object.partition_id;
     if (GET_NODE_ID(part_id) != g_node_id)
       break;
 
-    LifeOperation local_operation = make_life_operation(request);
-    if (response_descriptor.ycsb.next_record_id ==
-        descriptor.ycsb.next_record_id)
+    if (life_program_position(response_descriptor) ==
+        life_program_position(descriptor)) {
+      if (local_operation.object != operation.object) {
+        std::fprintf(stderr,
+                     "LIFE execute object mismatch: expected=(%lu,%lu,%lu,%lu) "
+                     "received=(%lu,%lu,%lu,%lu) position=%lu history=%lu\n",
+                     local_operation.object.table_id,
+                     local_operation.object.partition_id,
+                     local_operation.object.primary_key,
+                     local_operation.object.row_id, operation.object.table_id,
+                     operation.object.partition_id,
+                     operation.object.primary_key, operation.object.row_id,
+                     life_program_position(descriptor),
+                     static_cast<unsigned long>(descriptor.history.size()));
+      }
       assert(local_operation.object == operation.object);
+    }
 
     immediate_result =
         execute_life_remote(response_descriptor, local_operation);
@@ -571,8 +583,8 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
     if (immediate_result.code != LifeResultCode::Success)
       break;
 
-    append_life_success(response_descriptor, local_operation,
-                        immediate_result.response);
+    life_advance_program(response_descriptor, local_operation,
+                         immediate_result.response);
   }
   assert(executed_operation);
 
@@ -582,10 +594,8 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
 
     if (prepare_after_execute) {
       // Never prepare a prefix that merely stopped at a destination change.
-      assert(response_descriptor.ycsb.next_record_id ==
-             response_descriptor.ycsb.requests.size());
-      if (response_descriptor.ycsb.next_record_id !=
-          response_descriptor.ycsb.requests.size()) {
+      assert(life_program_done(response_descriptor));
+      if (!life_program_done(response_descriptor)) {
         immediate_result.code = LifeResultCode::InvalidOperation;
       } else {
         const LifeExecuteResult prepare_result =
@@ -607,7 +617,7 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
   if (immediate_result.code == LifeResultCode::Retry)
     rollback_life_descriptor(response_descriptor);
 
-  if (immediate_result.transaction.ycsb.requests.empty())
+  if (!life_program_present(immediate_result.transaction))
     immediate_result.transaction = response_descriptor;
 
   // Match Algorithm 1: Execute returns Help/Finalize to its caller. The
@@ -777,14 +787,20 @@ RC YCSBTxnManager::apply_life_finalize_response(
         result.transaction.pid == txn->life_pid &&
         result.transaction.tid.time == txn->life_tid.time;
     if (has_saved_stack && !txns.empty()) {
-      LifeTxnDescriptor retry = result.transaction;
-      rollback_life_descriptor(retry);
+      // Finalization messages omit the workload program (YCSB requests and
+      // PPS-discovered keys). Use the returned history to undo row state, but
+      // reset the complete program retained on the coordinator stack as
+      // required by Algorithm 2's ResetTransaction.
+      LifeTxnDescriptor rollback = result.transaction;
+      rollback_life_descriptor(rollback);
+      LifeTxnDescriptor retry = txns.back();
       retry.tid.attempt =
-          std::max(retry.tid.attempt, result.observed_attempt) + 1;
+          std::max(std::max(retry.tid.attempt,
+                            result.transaction.tid.attempt),
+                   result.observed_attempt) + 1;
       retry.history.clear();
       retry.touched_objects.clear();
-      retry.ycsb.next_record_id = 0;
-      retry.ycsb.state = YCSB_0;
+      life_reset_program(retry);
       txns.back() = retry;
       return try_life_transactions(txns) ? continue_life_after_stack()
                                          : WAIT_REM;
@@ -813,11 +829,8 @@ RC YCSBTxnManager::apply_life_finalize_response(
       result.code == LifeResultCode::Finalize) {
     LifeTxnDescriptor descriptor = LifeTxnDescriptor();
     const bool has_current_descriptor = query != NULL;
-    if (has_current_descriptor) {
+    if (has_current_descriptor)
       descriptor = life_descriptor();
-      descriptor.ycsb =
-          make_life_ycsb_snapshot(*(YCSBQuery *)query, state, next_record_id);
-    }
 
     if (!has_saved_stack && has_current_descriptor)
       txns.push_back(descriptor);
@@ -833,8 +846,7 @@ void YCSBTxnManager::copy_life_descriptor_to_workload(
   txn->life_tid = descriptor.tid;
   txn->life_history = descriptor.history;
   txn->life_objects.clear();
-  state = static_cast<YCSBRemTxnType>(descriptor.ycsb.state);
-  next_record_id = descriptor.ycsb.next_record_id;
+  life_copy_program_to_workload(descriptor);
 }
 
 uint64_t YCSBTxnManager::allocate_life_wait_id() {
@@ -870,7 +882,7 @@ bool YCSBTxnManager::has_life_wait_stack(const LifeTxnDescriptor &descriptor,
     if (it->reason == reason && it->remote_node_id == remote_node_id &&
         it->remote_key == remote_key && waiting.pid == descriptor.pid &&
         waiting.tid == descriptor.tid &&
-        waiting.ycsb.next_record_id == descriptor.ycsb.next_record_id)
+        life_program_position(waiting) == life_program_position(descriptor))
       return true;
   }
   return false;
@@ -1132,11 +1144,9 @@ RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
              result.transaction.history.begin();
          it != result.transaction.history.end(); ++it)
       life_append_history(response, *it);
-    response.ycsb.state = result.transaction.ycsb.state;
-    response.ycsb.next_record_id =
-        result.transaction.ycsb.next_record_id;
+    life_copy_remote_program(response, result.transaction);
     if (prepared) {
-      if (response.ycsb.next_record_id != response.ycsb.requests.size()) {
+      if (!life_program_done(response)) {
         LIFE_DBG_INC(life_dbg_execute_rsp_stale);
         return Abort;
       }
@@ -1149,8 +1159,8 @@ RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
   case LifeResultCode::Committed: {
     if (has_saved_stack && !txns.empty()) {
       const LifeTxnDescriptor &committed =
-          result.transaction.ycsb.requests.empty() ? txns.back()
-                                                   : result.transaction;
+          !life_program_present(result.transaction) ? txns.back()
+                                                    : result.transaction;
       if (committed.pid == txn->life_pid &&
           committed.tid.time == txn->life_tid.time) {
         copy_life_descriptor_to_workload(committed);
@@ -1198,7 +1208,7 @@ RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
 
   case LifeResultCode::Retry: {
     assert(!txns.empty());
-    LifeTxnDescriptor retry = result.transaction.ycsb.requests.empty() &&
+    LifeTxnDescriptor retry = !life_program_present(result.transaction) &&
                                       result.transaction.history.empty()
                                   ? txns.back()
                                   : result.transaction;
@@ -1210,8 +1220,7 @@ RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
         std::max(retry.tid.attempt, result.observed_attempt) + 1;
     retry.history.clear();
     retry.touched_objects.clear();
-    retry.ycsb.next_record_id = 0;
-    retry.ycsb.state = YCSB_0;
+    life_reset_program(retry);
     txns.back() = retry;
     return try_life_transactions(txns) ? continue_life_after_stack() : WAIT_REM;
   } break;
@@ -1497,8 +1506,7 @@ void YCSBTxnManager::reset_life_descriptor(LifeTxnDescriptor &descriptor,
       std::max(descriptor.tid.attempt, observed_attempt) + 1;
   descriptor.history.clear();
   descriptor.touched_objects.clear();
-  descriptor.ycsb.next_record_id = 0;
-  descriptor.ycsb.state = YCSB_0;
+  life_reset_program(descriptor);
 }
 
 void YCSBTxnManager::append_life_success(LifeTxnDescriptor &descriptor,
@@ -1515,6 +1523,64 @@ void YCSBTxnManager::append_life_success(LifeTxnDescriptor &descriptor,
           : YCSB_0;
 }
 
+void YCSBTxnManager::life_reconcile_descriptor(
+    LifeTxnDescriptor &descriptor) {
+  // Row records append a successful operation before a helper advances the
+  // workload cursor. Reconcile both pieces of program state from that durable
+  // history. Keeping only the cursor in sync can leave a completed descriptor
+  // in YCSB_0, violating Algorithm 2's state=End completion invariant.
+  reconcile_life_ycsb_program(descriptor);
+}
+
+bool YCSBTxnManager::life_program_done(
+    const LifeTxnDescriptor &descriptor) const {
+  return descriptor.ycsb.next_record_id >= descriptor.ycsb.requests.size();
+}
+
+LifeOperation YCSBTxnManager::life_current_operation(
+    LifeTxnDescriptor &descriptor) const {
+  assert(!life_program_done(descriptor));
+  return const_cast<YCSBTxnManager *>(this)->make_life_operation(
+      descriptor.ycsb.requests[descriptor.ycsb.next_record_id]);
+}
+
+void YCSBTxnManager::life_advance_program(LifeTxnDescriptor &descriptor,
+                                          const LifeOperation &operation,
+                                          const LifeResponse &response) {
+  append_life_success(descriptor, operation, response);
+}
+
+uint64_t YCSBTxnManager::life_program_position(
+    const LifeTxnDescriptor &descriptor) const {
+  return descriptor.ycsb.next_record_id;
+}
+
+bool YCSBTxnManager::life_program_present(
+    const LifeTxnDescriptor &descriptor) const {
+  return !descriptor.ycsb.requests.empty();
+}
+
+void YCSBTxnManager::life_reset_program(LifeTxnDescriptor &descriptor) {
+  descriptor.ycsb.next_record_id = 0;
+  descriptor.ycsb.state = YCSB_0;
+}
+
+void YCSBTxnManager::life_copy_program_to_workload(
+    const LifeTxnDescriptor &descriptor) {
+  state = static_cast<YCSBRemTxnType>(descriptor.ycsb.state);
+  next_record_id = descriptor.ycsb.next_record_id;
+}
+
+void YCSBTxnManager::life_copy_remote_program(
+    LifeTxnDescriptor &destination, const LifeTxnDescriptor &source) {
+  assert(destination.workload == LifeWorkloadKind::Ycsb);
+  assert(source.workload == LifeWorkloadKind::Ycsb);
+  assert(source.ycsb.next_record_id <= destination.ycsb.requests.size());
+  destination.workload = source.workload;
+  destination.ycsb.state = source.ycsb.state;
+  destination.ycsb.next_record_id = source.ycsb.next_record_id;
+}
+
 RC YCSBTxnManager::continue_life_after_stack() {
   if (query == NULL)
     return RCOK;
@@ -1524,8 +1590,10 @@ RC YCSBTxnManager::continue_life_after_stack() {
   // manager bookkeeping remains; running the workload again would rebuild the
   // completed descriptor and emit duplicate finish messages.
   if (txn->life_status == LifeTxnStatus::Committed) {
+#if WORKLOAD == YCSB
     assert(state == YCSB_FIN);
     assert(next_record_id == ((YCSBQuery *)query)->requests.size());
+#endif
     return complete_life_home_transaction();
   }
 
@@ -1580,6 +1648,7 @@ YCSBTxnManager::make_life_operation(const LifeYcsbRequest &request) {
   operation.object.table_id = _wl->the_table->get_table_id();
   operation.object.partition_id = _wl->key_to_part(request.key);
   operation.object.primary_key = request.key;
+  operation.object.row_id = request.key;
   operation.field_id = 0;
   operation.value_size = sizeof(uint64_t);
 
@@ -1610,6 +1679,10 @@ YCSBTxnManager::make_life_operation(row_t *life_row,
   operation.object.table_id = life_row->get_table()->get_table_id();
   operation.object.partition_id = life_row->get_part_id();
   operation.object.primary_key = life_row->get_primary_key();
+  // Unique-index YCSB objects use the primary key as their stable identity.
+  // The allocator row id is local construction state and is not available to
+  // a remote descriptor.
+  operation.object.row_id = life_row->get_primary_key();
   operation.field_id = 0;
   operation.value_size = sizeof(uint64_t);
 

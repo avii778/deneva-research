@@ -12,6 +12,7 @@ class row_t;
 class Row_life;
 
 struct LifeProcessId {
+  LifeProcessId() : node_id(0), worker_id(0) {}
   uint32_t node_id;
   uint64_t worker_id;
 };
@@ -35,6 +36,9 @@ struct LifeProcessIdHash {
 };
 
 struct LifeTxnId {
+  LifeTxnId() : time(0), attempt(0) {}
+  LifeTxnId(uint64_t txn_time, uint64_t txn_attempt)
+      : time(txn_time), attempt(txn_attempt) {}
   uint64_t time;
   uint64_t attempt;
 };
@@ -57,21 +61,26 @@ inline bool operator<=(const LifeTxnId &lhs, const LifeTxnId &rhs) {
 }
 
 struct LifeObjectId {
+  LifeObjectId() : table_id(0), partition_id(0), primary_key(0), row_id(0) {}
+
   uint64_t table_id;
   uint64_t partition_id;
   uint64_t primary_key;
+  // A table-local physical identity. This disambiguates rows behind a
+  // non-unique index (PPS USES/SUPPLIES) without changing their lookup key.
+  uint64_t row_id;
 };
 
 inline bool operator==(const LifeObjectId &lhs, const LifeObjectId &rhs) {
   return lhs.table_id == rhs.table_id && lhs.partition_id == rhs.partition_id &&
-         lhs.primary_key == rhs.primary_key;
+         lhs.primary_key == rhs.primary_key && lhs.row_id == rhs.row_id;
 }
 
 inline bool operator!=(const LifeObjectId &lhs, const LifeObjectId &rhs) {
   return !(lhs == rhs);
 }
 
-enum class LifeOperationKind { ReadField, WriteField };
+enum class LifeOperationKind { ReadField, WriteField, AddInt64 };
 
 static const size_t LIFE_INLINE_VALUE_CAPACITY = sizeof(uint64_t);
 
@@ -202,10 +211,50 @@ inline bool operator!=(const LifeYcsbRequest &lhs, const LifeYcsbRequest &rhs) {
 }
 
 struct LifeYcsbSnapshot {
+  LifeYcsbSnapshot() : state(0), next_record_id(0) {}
   std::vector<LifeYcsbRequest> requests;
   uint32_t state;
   uint64_t next_record_id;
 };
+
+enum class LifeWorkloadKind { Ycsb, Pps };
+
+// Serialized continuation state for a PPS transaction. Values are stored as
+// integers here so life_types.h remains independent of the PPS headers.
+struct LifePpsSnapshot {
+  LifePpsSnapshot()
+      : txn_type(0), state(0), part_key(0), supplier_key(0), product_key(0),
+        scan_index(0), part_index(0), program_index(0) {}
+
+  uint32_t txn_type;
+  uint32_t state;
+  uint64_t part_key;
+  uint64_t supplier_key;
+  uint64_t product_key;
+  uint64_t scan_index;
+  uint64_t part_index;
+  // Number of history entries already reflected in state/cursors/part_keys.
+  // Row_life may return a descriptor with one additional durable history
+  // entry before the workload program has consumed its response.
+  uint64_t program_index;
+  std::vector<uint64_t> part_keys;
+};
+
+inline bool operator==(const LifePpsSnapshot &lhs,
+                       const LifePpsSnapshot &rhs) {
+  return lhs.txn_type == rhs.txn_type && lhs.state == rhs.state &&
+         lhs.part_key == rhs.part_key &&
+         lhs.supplier_key == rhs.supplier_key &&
+         lhs.product_key == rhs.product_key &&
+         lhs.scan_index == rhs.scan_index && lhs.part_index == rhs.part_index &&
+         lhs.program_index == rhs.program_index &&
+         lhs.part_keys == rhs.part_keys;
+}
+
+inline bool operator!=(const LifePpsSnapshot &lhs,
+                       const LifePpsSnapshot &rhs) {
+  return !(lhs == rhs);
+}
 
 inline bool operator==(const LifeYcsbSnapshot &lhs,
                        const LifeYcsbSnapshot &rhs) {
@@ -245,6 +294,8 @@ private:
 };
 
 struct LifeTxnDescriptor {
+  LifeTxnDescriptor() : workload(LifeWorkloadKind::Ycsb) {}
+
   struct TouchedObject {
     LifeObjectId object;
     Row_life *manager;
@@ -253,8 +304,10 @@ struct LifeTxnDescriptor {
 
   LifeProcessId pid;
   LifeTxnId tid;
+  LifeWorkloadKind workload;
   std::vector<LifeHistoryEntry> history;
   LifeYcsbSnapshot ycsb;
+  LifePpsSnapshot pps;
   std::vector<TouchedObject> touched_objects;
 };
 
@@ -298,7 +351,8 @@ typedef std::shared_ptr<const LifeTxnDescriptor> LifeTxnDescriptorPtr;
 inline bool operator==(const LifeTxnDescriptor &lhs,
                        const LifeTxnDescriptor &rhs) {
   return lhs.pid == rhs.pid && lhs.tid == rhs.tid &&
-         lhs.history == rhs.history && lhs.ycsb == rhs.ycsb;
+         lhs.workload == rhs.workload && lhs.history == rhs.history &&
+         lhs.ycsb == rhs.ycsb && lhs.pps == rhs.pps;
 }
 
 inline bool operator!=(const LifeTxnDescriptor &lhs,
@@ -331,6 +385,9 @@ enum class LifeResultCode {
 };
 
 struct LifeExecuteResult {
+  LifeExecuteResult()
+      : code(LifeResultCode::InvalidOperation), response(), transaction(),
+        observed_attempt(0) {}
   LifeResultCode code;
   LifeResponse response;
   LifeTxnDescriptor transaction;

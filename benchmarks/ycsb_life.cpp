@@ -38,8 +38,20 @@ LifeYcsbSnapshot make_life_ycsb_snapshot(const YCSBQuery &query,
   return snapshot;
 }
 
+void reconcile_life_ycsb_program(LifeTxnDescriptor &descriptor) {
+  assert(descriptor.workload == LifeWorkloadKind::Ycsb);
+  assert(descriptor.history.size() <= descriptor.ycsb.requests.size());
+  if (descriptor.ycsb.next_record_id < descriptor.history.size())
+    descriptor.ycsb.next_record_id = descriptor.history.size();
+  descriptor.ycsb.state =
+      descriptor.ycsb.next_record_id >= descriptor.ycsb.requests.size()
+          ? YCSB_FIN
+          : YCSB_0;
+}
+
 LifeTxnDescriptor YCSBTxnManager::life_descriptor() const {
   LifeTxnDescriptor descriptor = TxnManager::life_descriptor();
+  descriptor.workload = LifeWorkloadKind::Ycsb;
   descriptor.ycsb =
       make_life_ycsb_snapshot(*static_cast<const YCSBQuery *>(query),
                               static_cast<uint32_t>(state), next_record_id);

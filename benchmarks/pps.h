@@ -21,6 +21,9 @@
 #include "txn.h"
 #include "query.h"
 #include "row.h"
+#if CC_ALG == LIFE
+#include "ycsb.h"
+#endif
 
 class PPSQuery;
 class PPSQueryMessage;
@@ -107,9 +110,15 @@ struct pps_thr_args{
     UInt32 tot;
 };
 
-class PPSTxnManager : public TxnManager
+class PPSTxnManager : public
+#if CC_ALG == LIFE
+  LifeTxnManager
+#else
+  TxnManager
+#endif
 {
 public:
+	PPSTxnManager();
 	void init(uint64_t thd_id, Workload * h_wl);
   void reset();
   RC acquire_locks(); 
@@ -120,12 +129,42 @@ public:
   RC run_pps_phase5(); 
 	PPSRemTxnType state;
   void copy_remote_items(PPSQueryMessage * msg); 
+#if CC_ALG == LIFE
+  LifeTxnDescriptor life_descriptor() const;
+  void life_reset_workload();
+protected:
+  RC complete_life_home_transaction();
+  LifeExecuteResult execute_life_operation(LifeTxnDescriptor &descriptor,
+                                           LifeOperation &operation);
+  void life_reconcile_descriptor(LifeTxnDescriptor &descriptor);
+  bool life_program_done(const LifeTxnDescriptor &descriptor) const;
+  LifeOperation life_current_operation(LifeTxnDescriptor &descriptor) const;
+  void life_advance_program(LifeTxnDescriptor &descriptor,
+                            const LifeOperation &operation,
+                            const LifeResponse &response);
+  uint64_t life_program_position(const LifeTxnDescriptor &descriptor) const;
+  bool life_program_present(const LifeTxnDescriptor &descriptor) const;
+  void life_reset_program(LifeTxnDescriptor &descriptor);
+  void life_copy_program_to_workload(const LifeTxnDescriptor &descriptor);
+  void life_copy_remote_program(LifeTxnDescriptor &destination,
+                                const LifeTxnDescriptor &source);
+  uint64_t life_remote_batch_stop(const LifeTxnDescriptor &descriptor,
+                                  uint64_t dest_node_id) const;
+  row_t *lookup_life_row(const LifeObjectId &object) const;
+  LifeOperation make_life_pps_operation(uint64_t table_id,
+                                        uint64_t partition_id,
+                                        uint64_t logical_row_id,
+                                        LifeOperationKind kind,
+                                        uint32_t field_id,
+                                        int64_t argument = 0) const;
+#endif
 private:
 	PPSWorkload * _wl;
 	volatile RC _rc;
   row_t * row;
 
   uint64_t parts_processed_count;
+  uint64_t life_part_index;
 
   void next_pps_state();
   RC run_txn_state();
