@@ -118,7 +118,9 @@ class PPSTxnManager : public
 #endif
 {
 public:
+#if CC_ALG == LIFE
 	PPSTxnManager();
+#endif
 	void init(uint64_t thd_id, Workload * h_wl);
   void reset();
   RC acquire_locks(); 
@@ -164,7 +166,9 @@ private:
   row_t * row;
 
   uint64_t parts_processed_count;
+#if CC_ALG == LIFE
   uint64_t life_part_index;
+#endif
 
   void next_pps_state();
   RC run_txn_state();

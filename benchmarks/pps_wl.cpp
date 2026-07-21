@@ -119,7 +119,11 @@ void PPSWorkload::init_tab_parts() {
       continue;
 		row_t * row;
 		uint64_t row_id;
+#if CC_ALG == LIFE
     t_parts->get_new_row(row, parts_to_partition(id), row_id);
+#else
+    t_parts->get_new_row(row, 0, row_id);
+#endif
     row->set_primary_key(id);
     row->set_value(0,id); // part id
     row->set_value(PART_AMOUNT,1000); // # of parts
@@ -150,7 +154,11 @@ void PPSWorkload::init_tab_suppliers() {
       continue;
 		row_t * row;
 		uint64_t row_id;
+#if CC_ALG == LIFE
     t_suppliers->get_new_row(row, suppliers_to_partition(id), row_id);
+#else
+    t_suppliers->get_new_row(row, 0, row_id);
+#endif
     row->set_primary_key(id);
     row->set_value(0,id);
     row->set_value(FIELD1,padding);
@@ -179,7 +187,11 @@ void PPSWorkload::init_tab_products() {
       continue;
 		row_t * row;
 		uint64_t row_id;
+#if CC_ALG == LIFE
     t_products->get_new_row(row, products_to_partition(id), row_id);
+#else
+    t_products->get_new_row(row, 0, row_id);
+#endif
     row->set_primary_key(id);
     row->set_value(0,id);
     row->set_value(FIELD1,padding);
@@ -205,17 +217,31 @@ void PPSWorkload::init_tab_supplies() {
     for (UInt32 i = 0; i < g_max_parts_per; i++) {
       parts_set.insert(URand(1,g_max_part_key));
     }
+#if CC_ALG == LIFE
     uint64_t slot = 0;
-    for(auto it = parts_set.begin(); it != parts_set.end();it++, slot++) {
+#endif
+    for(auto it = parts_set.begin(); it != parts_set.end();it++
+#if CC_ALG == LIFE
+        , slot++
+#endif
+        ) {
       row_t * row;
       uint64_t row_id;
       uint64_t part_id = *it;
+#if CC_ALG == LIFE
       t_supplies->get_new_row(row, suppliers_to_partition(id), row_id);
+#else
+      t_supplies->get_new_row(row, 0, row_id);
+#endif
       // The non-unique hash index prepends every entry, so count zero reads
       // the last inserted row. Number physical rows in that same traversal
       // order; LIFE can then use (parent, count) as a stable object identity.
+#if CC_ALG == LIFE
       row->set_primary_key((static_cast<uint64_t>(id) << 32) |
                            (parts_set.size() - slot));
+#else
+      row->set_primary_key(id);
+#endif
       //row->set_value(SUPPLIER_KEY,id);
       //row->set_value(PART_KEY,part_id);
       row->set_value(0,id);
@@ -232,16 +258,30 @@ void PPSWorkload::init_tab_uses() {
     for (UInt32 i = 0; i < g_max_parts_per; i++) {
       parts_set.insert(URand(1,g_max_part_key));
     }
+#if CC_ALG == LIFE
     uint64_t slot = 0;
-    for(auto it = parts_set.begin(); it != parts_set.end();it++, slot++) {
+#endif
+    for(auto it = parts_set.begin(); it != parts_set.end();it++
+#if CC_ALG == LIFE
+        , slot++
+#endif
+        ) {
       row_t * row;
       uint64_t row_id;
       uint64_t part_id = *it;
+#if CC_ALG == LIFE
       t_uses->get_new_row(row, products_to_partition(id), row_id);
+#else
+      t_uses->get_new_row(row, 0, row_id);
+#endif
       // Keep the physical identity aligned with index_read(..., count); see
       // the SUPPLIES initialization above.
+#if CC_ALG == LIFE
       row->set_primary_key((static_cast<uint64_t>(id) << 32) |
                            (parts_set.size() - slot));
+#else
+      row->set_primary_key(id);
+#endif
       //row->set_value(PRODUCT_KEY,id);
       //row->set_value(PART_KEY,part_id);
       row->set_value(0,id);

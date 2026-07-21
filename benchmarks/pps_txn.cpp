@@ -27,21 +27,26 @@
 #include "transport.h"
 #include "msg_queue.h"
 #include "message.h"
+#if CC_ALG == LIFE
 #include <algorithm>
 #include <cstring>
 
 PPSTxnManager::PPSTxnManager()
     : _wl(NULL), _rc(RCOK), row(NULL), parts_processed_count(0),
       life_part_index(0) {}
+#endif
 
 void PPSTxnManager::init(uint64_t thd_id, Workload * h_wl) {
 #if CC_ALG == LIFE
     YCSBTxnManager::init(thd_id, h_wl);
-#else
-    TxnManager::init(thd_id, h_wl);
-#endif
     _wl = (PPSWorkload *) h_wl;
     reset();
+#else
+    TxnManager::init(thd_id, h_wl);
+    _wl = (PPSWorkload *) h_wl;
+    reset();
+	TxnManager::reset();
+#endif
 }
 
 void PPSTxnManager::reset() {
@@ -76,7 +81,9 @@ void PPSTxnManager::reset() {
     }
 
     parts_processed_count = 0;
+#if CC_ALG == LIFE
     life_part_index = 0;
+#endif
     pps_query->part_keys.clear();
 #if CC_ALG == LIFE
     YCSBTxnManager::reset();
