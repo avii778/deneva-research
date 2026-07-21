@@ -103,10 +103,6 @@ RC PPSTxnManager::run_txn() {
   rc = run_calvin_txn();
   return rc;
 #endif
-#if CC_ALG == LIFE
-  return run_life_txn();
-#endif
-
   if(IS_LOCAL(txn->txn_id) && 
       (state == PPS_GETPART0 || 
        state == PPS_GETPRODUCT0 ||
@@ -123,6 +119,10 @@ RC PPSTxnManager::run_txn() {
 #endif
     query->partitions_touched.add_unique(GET_PART_ID(0,g_node_id));
   }
+
+#if CC_ALG == LIFE
+  return run_life_txn();
+#endif
 
 
   while(rc == RCOK && !is_done()) {

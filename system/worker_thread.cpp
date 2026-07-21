@@ -200,7 +200,8 @@ void WorkerThread::check_if_done(RC rc) {
 }
 
 void WorkerThread::release_txn_man() {
-#if CC_ALG == LIFE && WORKLOAD == YCSB
+#if CC_ALG == LIFE
+  // LifeTxnManager is the shared coordinator base for every LIFE workload.
   ((LifeTxnManager *)txn_man)->clear_life_active();
 #endif
   txn_table.release_transaction_manager(get_thd_id(),txn_man->get_txn_id(),txn_man->get_batch_id());
@@ -807,7 +808,8 @@ RC WorkerThread::process_rtxn(Message * msg) {
           txn_man->txn_stats.starttime = get_sys_clock();
           txn_man->txn_stats.restart_starttime = txn_man->txn_stats.starttime;
           msg->copy_to_txn(txn_man);
-#if CC_ALG == LIFE && WORKLOAD == YCSB
+#if CC_ALG == LIFE
+          // Response handlers accept continuations only for active home owners.
           ((LifeTxnManager *)txn_man)->mark_life_active();
 #endif
           DEBUG("START %ld %f %lu\n",txn_man->get_txn_id(),simulation->seconds_from_start(get_sys_clock()),txn_man->txn_stats.starttime);
