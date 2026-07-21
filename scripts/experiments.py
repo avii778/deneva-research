@@ -95,7 +95,8 @@ def apply_algo_thread_counts(fmt, exp):
 def pps_scaling():
     wl = "PPS"
     nnodes = [1, 2, 4, 8, 16, 32, 64]
-    nalgos = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP"]
+    # nalgos = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP"]
+    nalgos = ["LIFE"]
     load = [10000]
     fmt = ["WORKLOAD", "NODE_CNT", "CC_ALG", "MAX_TXN_IN_FLIGHT"]
     exp = [[wl, n, cc, tif] for tif, n, cc in itertools.product(load, nnodes, nalgos)]
