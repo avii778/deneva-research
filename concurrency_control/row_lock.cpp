@@ -392,4 +392,3 @@ void Row_lock::return_entry(LockEntry * entry) {
     //DEBUG_M("row_lock::return_entry free %lx\n",(uint64_t)entry);
     mem_allocator.free(entry, sizeof(LockEntry));
 }
-

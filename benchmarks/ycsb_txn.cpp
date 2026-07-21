@@ -1864,13 +1864,9 @@ RC YCSBTxnManager::run_calvin_txn() {
 
       // Phase 1: Read/write set analysis
       calvin_expected_rsp_cnt = ycsb_query->get_participants(_wl);
-#if YCSB_ABORT_MODE
       if (query->participant_nodes[g_node_id] == 1) {
         calvin_expected_rsp_cnt--;
       }
-#else
-      calvin_expected_rsp_cnt = 0;
-#endif
       DEBUG("(%ld,%ld) expects %d responses;\n", txn->txn_id, txn->batch_id,
             calvin_expected_rsp_cnt);
 
@@ -1881,11 +1877,17 @@ RC YCSBTxnManager::run_calvin_txn() {
       DEBUG("(%ld,%ld) local reads\n", txn->txn_id, txn->batch_id);
       rc = run_ycsb();
       // release_read_locks(query);
-
+      this->phase = isRecon() ? CALVIN_DONE : CALVIN_VALIDATE;
+      break;
+    case CALVIN_VALIDATE:
+      // Phase 3: Recheck the reconnaissance reads while Calvin locks are held.
+      DEBUG("(%ld,%ld) validate reconnaissance\n", txn->txn_id,
+            txn->batch_id);
+      validate_ycsb_recon();
       this->phase = CALVIN_SERVE_RD;
       break;
     case CALVIN_SERVE_RD:
-      // Phase 3: Serve remote reads
+      // Phase 4: Forward local validation results to every writer.
       // If there is any abort logic, relevant reads need to be sent to all
       // active nodes...
       if (query->participant_nodes[g_node_id] == 1) {
@@ -1907,13 +1909,14 @@ RC YCSBTxnManager::run_calvin_txn() {
 
       break;
     case CALVIN_COLLECT_RD:
-      // Phase 4: Collect remote reads
+      // Phase 5: Collect remote validation results.
       this->phase = CALVIN_EXEC_WR;
       break;
     case CALVIN_EXEC_WR:
-      // Phase 5: Execute transaction / perform local writes
+      // Phase 6: Execute transaction / perform local writes.
       DEBUG("(%ld,%ld) execute writes\n", txn->txn_id, txn->batch_id);
-      rc = run_ycsb();
+      if (txn->rc == RCOK)
+        rc = run_ycsb();
       this->phase = CALVIN_DONE;
       break;
     default:
@@ -1948,8 +1951,50 @@ RC YCSBTxnManager::run_ycsb() {
     rc = run_ycsb_0(req, row);
     assert(rc == RCOK);
 
+    if (isRecon()) {
+      assert(req->acctype == RD || req->acctype == SCAN);
+      capture_ycsb_recon(req->key, row);
+    }
+
     rc = run_ycsb_1(req->acctype, row);
     assert(rc == RCOK);
   }
   return rc;
+}
+
+void YCSBTxnManager::capture_ycsb_recon(uint64_t key, row_t *row_local) {
+  YCSBQuery *ycsb_query = (YCSBQuery *)query;
+  YCSBReconRecord record;
+  record.key = key;
+  const uint64_t tuple_size = row_local->get_tuple_size();
+  record.tuple.assign(row_local->get_data(),
+                      row_local->get_data() + tuple_size);
+  ycsb_query->recon_records.push_back(record);
+}
+
+void YCSBTxnManager::validate_ycsb_recon() {
+  YCSBQuery *ycsb_query = (YCSBQuery *)query;
+
+  for (uint64_t i = 0; i < ycsb_query->requests.size(); ++i) {
+    ycsb_request *req = ycsb_query->requests[i];
+    if (req->acctype != RD && req->acctype != SCAN)
+      continue;
+
+    const uint64_t part_id = _wl->key_to_part(req->key);
+    if (GET_NODE_ID(part_id) != g_node_id)
+      continue;
+
+    const YCSBReconRecord *record =
+        ycsb_query->find_recon_record(req->key);
+    itemid_t *item = index_read(_wl->the_index, req->key, part_id);
+    row_t *current = (row_t *)item->location;
+    const uint64_t tuple_size = current->get_tuple_size();
+    if (record == NULL || record->tuple.size() != tuple_size ||
+        memcmp(record->tuple.data(), current->get_data(), tuple_size) != 0) {
+      DEBUG("(%ld,%ld) YCSB OLLP validation failed for key %ld\n",
+            txn->txn_id, txn->batch_id, req->key);
+      txn->rc = Abort;
+      return;
+    }
+  }
 }

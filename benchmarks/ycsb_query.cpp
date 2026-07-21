@@ -75,6 +75,8 @@ void YCSBQuery::print() {
 
 void YCSBQuery::init() {
   requests.init(g_req_per_query);
+  recon_records.reserve(g_req_per_query);
+  recon = false;
   BaseQuery::init();
 }
 
@@ -107,6 +109,8 @@ void YCSBQuery::reset() {
   release_requests();
 #endif
   requests.clear();
+  recon_records.clear();
+  recon = false;
 }
 
 void YCSBQuery::release() {
@@ -115,6 +119,8 @@ void YCSBQuery::release() {
 #if CC_ALG != CALVIN
   release_requests();
 #endif
+  recon_records.clear();
+  recon = false;
   requests.release();
 }
 
@@ -175,6 +181,18 @@ bool YCSBQuery::readonly() {
   return true;
 }
 
+const YCSBReconRecord *YCSBQuery::find_recon_record(uint64_t key) const {
+  const YCSBReconRecord *match = NULL;
+  for (size_t i = 0; i < recon_records.size(); ++i) {
+    if (recon_records[i].key != key)
+      continue;
+    if (match != NULL)
+      return NULL;
+    match = &recon_records[i];
+  }
+  return match;
+}
+
 // The following algorithm comes from the paper:
 // Quickly generating billion-record synthetic databases
 // However, it seems there is a small bug. 
@@ -206,6 +224,7 @@ uint64_t YCSBQueryGenerator::zipf(uint64_t n, double theta) {
 
 BaseQuery * YCSBQueryGenerator::gen_requests_hot(uint64_t home_partition_id, Workload * h_wl) {
   YCSBQuery * query = (YCSBQuery*) mem_allocator.alloc(sizeof(YCSBQuery));
+  new(query) YCSBQuery();
   query->requests.init(g_req_per_query);
 
 	uint64_t access_cnt = 0;

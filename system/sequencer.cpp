@@ -55,6 +55,21 @@ void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
   uint64_t prof_stat = get_sys_clock();
   assert(wait_list[id].server_ack_cnt > 0);
 
+  AckMessage *ack = (AckMessage *)msg;
+  if (ack->rc == Abort)
+    wait_list[id].attempt_failed = true;
+
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  YCSBClientQueryMessage *pending_ycsb =
+      (YCSBClientQueryMessage *)wait_list[id].msg;
+  if (pending_ycsb->recon) {
+    assert(wait_list[id].ycsb_recon_records != NULL);
+    wait_list[id].ycsb_recon_records->insert(
+        wait_list[id].ycsb_recon_records->end(),
+        ack->ycsb_recon_records.begin(), ack->ycsb_recon_records.end());
+  }
+#endif
+
   // Decrement the number of acks needed for this txn
   uint32_t query_acks_left = ATOM_SUB_FETCH(wait_list[id].server_ack_cnt, 1);
 
@@ -69,10 +84,6 @@ void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
       // free msg, queries
 #if WORKLOAD == YCSB
       YCSBClientQueryMessage* cl_msg = (YCSBClientQueryMessage*)wait_list[id].msg;
-      for(uint64_t i = 0; i < cl_msg->requests.size(); i++) {
-          DEBUG_M("Sequencer::process_ack() ycsb_request free\n");
-          mem_allocator.free(cl_msg->requests[i],sizeof(ycsb_request));
-      }
 #elif WORKLOAD == TPCC
       TPCCClientQueryMessage* cl_msg = (TPCCClientQueryMessage*)wait_list[id].msg;
       if(cl_msg->txn_type == TPCC_NEW_ORDER) {
@@ -113,6 +124,40 @@ void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
           process_txn(cl_msg, thd_id, wait_list[id].seq_first_startts, wait_list[id].seq_startts, wait_list[id].total_batch_time, abort_cnt);
       }
       else {
+#endif
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+      if (cl_msg->recon || wait_list[id].attempt_failed) {
+          int abort_cnt = wait_list[id].abort_cnt;
+          if (cl_msg->recon && !wait_list[id].attempt_failed) {
+              assert(wait_list[id].ycsb_recon_records != NULL);
+              cl_msg->recon_records = *wait_list[id].ycsb_recon_records;
+              cl_msg->recon = false;
+              DEBUG("Finished YCSB RECON (%ld,%ld), %ld records\n",
+                    msg->get_txn_id(), msg->get_batch_id(),
+                    cl_msg->recon_records.size());
+          } else {
+              uint64_t timespan =
+                  get_sys_clock() - wait_list[id].seq_startts;
+              if (warmup_done)
+                  INC_STATS_ARR(0, start_abort_commit_latency, timespan);
+              cl_msg->recon_records.clear();
+              cl_msg->recon = true;
+              DEBUG("YCSB OLLP validation abort (%ld,%ld)\n",
+                    msg->get_txn_id(), msg->get_batch_id());
+              INC_STATS(0, total_txn_abort_cnt, 1);
+              abort_cnt++;
+          }
+
+          delete wait_list[id].ycsb_recon_records;
+          wait_list[id].ycsb_recon_records = NULL;
+
+          cl_msg->return_node_id = wait_list[id].client_id;
+          wait_list[id].total_batch_time +=
+              en->batch_send_time - wait_list[id].seq_startts;
+          process_txn(cl_msg, thd_id, wait_list[id].seq_first_startts,
+                      wait_list[id].seq_startts,
+                      wait_list[id].total_batch_time, abort_cnt);
+      } else {
 #endif
           uint64_t curr_clock = get_sys_clock();
           uint64_t timespan = curr_clock - wait_list[id].seq_first_startts;
@@ -156,12 +201,21 @@ void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
                   , (double) wait_list[id].total_batch_time / BILLION
                   );
 
+#if WORKLOAD == YCSB
+          for(uint64_t i = 0; i < cl_msg->requests.size(); i++) {
+              DEBUG_M("Sequencer::process_ack() ycsb_request free\n");
+              mem_allocator.free(cl_msg->requests[i],sizeof(ycsb_request));
+          }
+#endif
           cl_msg->release();
 
           ClientResponseMessage * rsp_msg = (ClientResponseMessage*)Message::create_message(msg->get_txn_id(),CL_RSP);
           rsp_msg->client_startts = wait_list[id].client_startts;
           msg_queue.enqueue(thd_id,rsp_msg,wait_list[id].client_id);
 #if WORKLOAD == PPS
+      }
+#endif
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
       }
 #endif
 
@@ -227,6 +281,12 @@ void Sequencer::process_txn( Message * msg,uint64_t thd_id, uint64_t early_start
 
     en->list[id].total_batch_time = wait_time;
     en->list[id].abort_cnt = abort_cnt;
+    en->list[id].attempt_failed = false;
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+    YCSBClientQueryMessage *ycsb_msg = (YCSBClientQueryMessage *)msg;
+    en->list[id].ycsb_recon_records =
+        ycsb_msg->recon ? new std::vector<YCSBReconRecord>() : NULL;
+#endif
     en->list[id].skew_startts = 0;
     en->list[id].server_ack_cnt = server_ack_cnt;
     en->list[id].msg = msg;
@@ -255,6 +315,10 @@ void Sequencer::process_txn( Message * msg,uint64_t thd_id, uint64_t early_start
         cl_msg->recon = false;
         en->list[id].seq_startts = get_sys_clock();
     }
+#elif CC_ALG == CALVIN && WORKLOAD == YCSB
+    YCSBClientQueryMessage *cl_msg = (YCSBClientQueryMessage *)msg;
+    en->list[id].seq_startts =
+        cl_msg->recon ? get_sys_clock() : last_start;
 #else
     en->list[id].seq_startts = get_sys_clock();
 #endif
@@ -268,7 +332,15 @@ void Sequencer::process_txn( Message * msg,uint64_t thd_id, uint64_t early_start
 
     // Add new txn to fill queue
     for(auto participant = participants.begin(); participant != participants.end(); participant++) {
-      DEBUG("SEQ adding (%ld,%ld) to fill queue (recon: %d)\n",msg->get_txn_id(),msg->get_batch_id(),((PPSClientQueryMessage*)msg)->recon);
+#if CC_ALG == CALVIN && WORKLOAD == PPS
+      const bool recon = ((PPSClientQueryMessage *)msg)->recon;
+#elif CC_ALG == CALVIN && WORKLOAD == YCSB
+      const bool recon = ((YCSBClientQueryMessage *)msg)->recon;
+#else
+      const bool recon = false;
+#endif
+      DEBUG("SEQ adding (%ld,%ld) to fill queue (recon: %d)\n",
+            msg->get_txn_id(), msg->get_batch_id(), recon);
       while(!fill_queue[*participant].push(msg) && !simulation->is_done()) {}
     }
 

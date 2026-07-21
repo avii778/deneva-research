@@ -70,7 +70,12 @@ enum PPSRemTxnType {
   PPS_UPDATEPART0,
   PPS_UPDATEPART1,
   PPS_FIN,
-  PPS_RDONE};
+  PPS_RDONE,
+  PPS_STATE_COUNT};
+
+#if PPS_STATE_DEBUG_COUNTERS
+void print_pps_state_debug_counters(FILE *out);
+#endif
 
 class PPSWorkload : public Workload {
 public:

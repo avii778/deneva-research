@@ -21,6 +21,9 @@
 #include "helper.h"
 #include "logger.h"
 #include "array.h"
+#if WORKLOAD == YCSB
+#include "ycsb_ollp.h"
+#endif
 
 class ycsb_request;
 class LogRecord;
@@ -170,7 +173,7 @@ public:
   void copy_to_txn(TxnManager * txn);
   uint64_t get_size();
   void init() {}
-  void release() {}
+  void release();
 
   RC rc;
 #if CC_ALG == MAAT
@@ -180,6 +183,9 @@ public:
 
   // For Calvin PPS: part keys from secondary lookup for sequencer response
   Array<uint64_t> part_keys;
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  std::vector<YCSBReconRecord> ycsb_recon_records;
+#endif
 };
 
 class PrepareMessage : public Message {
@@ -410,6 +416,10 @@ public:
   void release(); 
 
   Array<ycsb_request*> requests;
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  std::vector<YCSBReconRecord> recon_records;
+  bool recon;
+#endif
 
 };
 

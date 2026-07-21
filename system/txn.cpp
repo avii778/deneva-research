@@ -329,6 +329,7 @@ void TxnManager::init(uint64_t thd_id, Workload *h_wl) {
   // reset();
   sem_init(&rsp_mutex, 0, 1);
   return_id = UINT64_MAX;
+  recon = false;
 
   this->h_wl = h_wl;
 #if CC_ALG == MAAT
@@ -460,6 +461,7 @@ void TxnManager::reset() {
   rsp_cnt = 0;
   aborted = false;
   return_id = UINT64_MAX;
+  recon = false;
   client_id = UINT64_MAX;
   client_startts = 0;
   twopl_wait_start = 0;
@@ -1041,9 +1043,6 @@ RC TxnManager::validate() {
 
 RC TxnManager::send_remote_reads() {
   assert(CC_ALG == CALVIN);
-#if !YCSB_ABORT_MODE && WORKLOAD == YCSB
-  return RCOK;
-#endif
   assert(query->active_nodes.size() == g_node_cnt);
   for (uint64_t i = 0; i < query->active_nodes.size(); i++) {
     if (i == g_node_id)

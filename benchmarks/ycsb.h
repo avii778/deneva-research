@@ -197,6 +197,8 @@ protected:
   RC run_ycsb_0(ycsb_request *req, row_t *&row_local);
   RC run_ycsb_1(access_t acctype, row_t *row_local);
   RC run_ycsb();
+  void capture_ycsb_recon(uint64_t key, row_t *row_local);
+  void validate_ycsb_recon();
   bool is_done();
   bool is_local_request(uint64_t idx);
   RC send_remote_request();

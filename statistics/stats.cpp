@@ -21,6 +21,9 @@
 #include "client_txn.h"
 #include "work_queue.h"
 #include "stats_array.h"
+#if WORKLOAD == PPS
+#include "pps.h"
+#endif
 #include <time.h>
 #include <sys/times.h>
 
@@ -1597,6 +1600,9 @@ void Stats::print(bool prog) {
           life_dbg_prepare_rsp_duplicate,
           life_dbg_msg_count,
           life_dbg_msg_bytes);
+#endif
+#if WORKLOAD == PPS && PPS_STATE_DEBUG_COUNTERS
+  print_pps_state_debug_counters(outf);
 #endif
   mem_util(outf);
   cpu_util(outf);

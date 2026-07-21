@@ -40,6 +40,50 @@ extern volatile uint64_t life_dbg_msg_bytes;
 
 namespace {
 
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+uint64_t ycsb_recon_records_size(
+    const std::vector<YCSBReconRecord> &records) {
+  uint64_t size = sizeof(size_t);
+  for (size_t i = 0; i < records.size(); ++i)
+    size += sizeof(uint64_t) + sizeof(size_t) + records[i].tuple.size();
+  return size;
+}
+
+void ycsb_write_recon_records(
+    char *buf, uint64_t &ptr,
+    const std::vector<YCSBReconRecord> &records) {
+  const size_t count = records.size();
+  COPY_BUF(buf, count, ptr);
+  for (size_t i = 0; i < count; ++i) {
+    COPY_BUF(buf, records[i].key, ptr);
+    const size_t tuple_size = records[i].tuple.size();
+    COPY_BUF(buf, tuple_size, ptr);
+    if (tuple_size > 0) {
+      memcpy(&buf[ptr], records[i].tuple.data(), tuple_size);
+      ptr += tuple_size;
+    }
+  }
+}
+
+void ycsb_read_recon_records(
+    char *buf, uint64_t &ptr, std::vector<YCSBReconRecord> &records) {
+  size_t count;
+  COPY_VAL(count, buf, ptr);
+  records.clear();
+  records.resize(count);
+  for (size_t i = 0; i < count; ++i) {
+    COPY_VAL(records[i].key, buf, ptr);
+    size_t tuple_size;
+    COPY_VAL(tuple_size, buf, ptr);
+    records[i].tuple.resize(tuple_size);
+    if (tuple_size > 0) {
+      memcpy(records[i].tuple.data(), &buf[ptr], tuple_size);
+      ptr += tuple_size;
+    }
+  }
+}
+#endif
+
 uint64_t life_bytes_size(const LifeBytes &bytes) {
   return sizeof(uint8_t) + bytes.size();
 }
@@ -795,12 +839,19 @@ void YCSBClientQueryMessage::release() {
   }
 */
   requests.release();
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  recon_records.clear();
+#endif
 }
 
 uint64_t YCSBClientQueryMessage::get_size() {
   uint64_t size = ClientQueryMessage::get_size();
   size += sizeof(size_t);
   size += sizeof(ycsb_request) * requests.size();
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  size += sizeof(bool);
+  size += ycsb_recon_records_size(recon_records);
+#endif
   return size;
 }
 
@@ -813,6 +864,10 @@ void YCSBClientQueryMessage::copy_from_query(BaseQuery * query) {
   }
 */
   requests.copy(((YCSBQuery*)(query))->requests);
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  recon = true;
+  recon_records.clear();
+#endif
 }
 
 
@@ -825,6 +880,11 @@ void YCSBClientQueryMessage::copy_from_txn(TxnManager * txn) {
   }
 */
   requests.copy(((YCSBQuery*)(txn->query))->requests);
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  YCSBQuery *ycsb_query = (YCSBQuery *)txn->query;
+  recon = txn->isRecon();
+  recon_records = ycsb_query->recon_records;
+#endif
 }
 
 void YCSBClientQueryMessage::copy_to_txn(TxnManager * txn) {
@@ -832,6 +892,12 @@ void YCSBClientQueryMessage::copy_to_txn(TxnManager * txn) {
   ClientQueryMessage::copy_to_txn(txn);
   // Copies pointers to txn
   ((YCSBQuery*)(txn->query))->requests.append(requests);
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  YCSBQuery *ycsb_query = (YCSBQuery *)txn->query;
+  ycsb_query->recon = recon;
+  ycsb_query->recon_records = recon_records;
+  txn->recon = recon;
+#endif
 /*
   for(uint64_t i = 0; i < requests.size(); i++) {
       YCSBQuery::copy_request_to_qry(((YCSBQuery*)(txn->query)),this,i);
@@ -855,6 +921,10 @@ void YCSBClientQueryMessage::copy_from_buf(char * buf) {
     assert(req->key < g_synth_table_size);
     requests.add(req);
   }
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  COPY_VAL(recon, buf, ptr);
+  ycsb_read_recon_records(buf, ptr, recon_records);
+#endif
  assert(ptr == get_size());
 }
 
@@ -871,6 +941,10 @@ void YCSBClientQueryMessage::copy_to_buf(char * buf) {
     COPY_BUF(buf,*req,ptr);
     //DEBUG("3YCSBClientQuery %ld\n",ptr);
   }
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  COPY_BUF(buf, recon, ptr);
+  ycsb_write_recon_records(buf, ptr, recon_records);
+#endif
  assert(ptr == get_size());
 }
 /************************/
@@ -1763,7 +1837,16 @@ uint64_t AckMessage::get_size() {
   size += sizeof(size_t);
   size += sizeof(uint64_t) * part_keys.size();
 #endif
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  size += ycsb_recon_records_size(ycsb_recon_records);
+#endif
   return size;
+}
+
+void AckMessage::release() {
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  ycsb_recon_records.clear();
+#endif
 }
 
 void AckMessage::copy_from_txn(TxnManager * txn) {
@@ -1778,6 +1861,14 @@ void AckMessage::copy_from_txn(TxnManager * txn) {
   PPSQuery* pps_query = (PPSQuery*)(txn->query);
   part_keys.copy(pps_query->part_keys);
 #endif
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  if (txn->isRecon()) {
+    YCSBQuery *ycsb_query = (YCSBQuery *)txn->query;
+    ycsb_recon_records = ycsb_query->recon_records;
+  } else {
+    ycsb_recon_records.clear();
+  }
+#endif
 }
 
 void AckMessage::copy_to_txn(TxnManager * txn) {
@@ -1787,6 +1878,11 @@ void AckMessage::copy_to_txn(TxnManager * txn) {
 
   PPSQuery* pps_query = (PPSQuery*)(txn->query);
   pps_query->part_keys.append(part_keys);
+#endif
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  ((YCSBQuery *)txn->query)->recon_records.insert(
+      ((YCSBQuery *)txn->query)->recon_records.end(),
+      ycsb_recon_records.begin(), ycsb_recon_records.end());
 #endif
 }
 
@@ -1809,6 +1905,9 @@ void AckMessage::copy_from_buf(char * buf) {
     part_keys.add(item);
   }
 #endif
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  ycsb_read_recon_records(buf, ptr, ycsb_recon_records);
+#endif
  assert(ptr == get_size());
 }
 
@@ -1828,6 +1927,9 @@ void AckMessage::copy_to_buf(char * buf) {
     uint64_t item = part_keys[i];
     COPY_BUF(buf,item,ptr);
   }
+#endif
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  ycsb_write_recon_records(buf, ptr, ycsb_recon_records);
 #endif
  assert(ptr == get_size());
 }

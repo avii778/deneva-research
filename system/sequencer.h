@@ -19,6 +19,9 @@
 
 #include "global.h"
 #include "query.h"
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#include "ycsb_ollp.h"
+#endif
 #include <boost/lockfree/queue.hpp>
 
 class Workload;
@@ -35,6 +38,10 @@ typedef struct qlite_entry {
 	uint64_t total_batch_time;
 	uint32_t server_ack_cnt;
 	uint32_t abort_cnt;
+  bool attempt_failed;
+#if WORKLOAD == YCSB && CC_ALG == CALVIN
+  std::vector<YCSBReconRecord> *ycsb_recon_records;
+#endif
   Message * msg;
 } qlite;
 

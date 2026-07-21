@@ -21,6 +21,7 @@
 #include "helper.h"
 #include "query.h"
 #include "array.h"
+#include "ycsb_ollp.h"
 #include <algorithm>
 #include <vector>
 
@@ -73,8 +74,7 @@ private:
 
 class YCSBQuery : public BaseQuery {
 public:
-  YCSBQuery() {
-  }
+  YCSBQuery() : recon(false) {}
   ~YCSBQuery() {
   }
 
@@ -90,6 +90,7 @@ public:
   static void copy_request_to_msg(YCSBQuery * ycsb_query, YCSBQueryMessage * msg, uint64_t id); 
   uint64_t participants(bool *& pps,Workload * wl); 
   bool readonly();
+  const YCSBReconRecord *find_recon_record(uint64_t key) const;
   void stable_group_requests_by_destination(uint64_t home_node_id) {
     std::vector<ycsb_request *> grouped_requests;
     grouped_requests.reserve(requests.size());
@@ -113,6 +114,8 @@ public:
 
   //std::vector<ycsb_request> requests;
   Array<ycsb_request*> requests;
+  std::vector<YCSBReconRecord> recon_records;
+  bool recon;
   /*
   uint64_t rid;
   uint64_t access_cnt;

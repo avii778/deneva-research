@@ -27,6 +27,42 @@
 #include "transport.h"
 #include "msg_queue.h"
 #include "message.h"
+
+#if PPS_STATE_DEBUG_COUNTERS
+namespace {
+
+volatile uint64_t pps_state_debug_counters[PPS_STATE_COUNT] = {};
+
+const char *const pps_state_debug_names[PPS_STATE_COUNT] = {
+    "GETPART_S", "GETPART0", "GETPART1",
+    "GETPRODUCT_S", "GETPRODUCT0", "GETPRODUCT1",
+    "GETSUPPLIER_S", "GETSUPPLIER0", "GETSUPPLIER1",
+    "GETPARTBYPRODUCT_S", "GETPARTBYPRODUCT0", "GETPARTBYPRODUCT1",
+    "GETPARTBYPRODUCT2", "GETPARTBYPRODUCT3", "GETPARTBYPRODUCT4",
+    "GETPARTBYPRODUCT5", "GETPARTBYSUPPLIER_S",
+    "GETPARTBYSUPPLIER0", "GETPARTBYSUPPLIER1",
+    "GETPARTBYSUPPLIER2", "GETPARTBYSUPPLIER3",
+    "GETPARTBYSUPPLIER4", "GETPARTBYSUPPLIER5", "ORDERPRODUCT_S",
+    "ORDERPRODUCT0", "ORDERPRODUCT1", "ORDERPRODUCT2", "ORDERPRODUCT3",
+    "ORDERPRODUCT4", "ORDERPRODUCT5", "UPDATEPRODUCTPART_S",
+    "UPDATEPRODUCTPART0", "UPDATEPRODUCTPART1", "UPDATEPART_S",
+    "UPDATEPART0", "UPDATEPART1", "FIN", "RDONE"};
+
+static_assert(sizeof(pps_state_debug_names) /
+                      sizeof(pps_state_debug_names[0]) ==
+                  PPS_STATE_COUNT,
+              "PPS state counter names must match PPSRemTxnType");
+
+} // namespace
+
+void print_pps_state_debug_counters(FILE *out) {
+  for (uint64_t state_id = 0; state_id < PPS_STATE_COUNT; ++state_id) {
+    fprintf(out, ",pps_state_%s=%lu", pps_state_debug_names[state_id],
+            pps_state_debug_counters[state_id]);
+  }
+}
+#endif
+
 #if CC_ALG == LIFE
 #include <algorithm>
 #include <cstring>
@@ -444,14 +480,14 @@ void PPSTxnManager::next_pps_state() {
       state = PPS_ORDERPRODUCT2;
       break;
     case PPS_ORDERPRODUCT2:
-        if(!IS_LOCAL(txn->txn_id) && row != NULL) {
-            ++parts_processed_count;
-            state = PPS_ORDERPRODUCT3;
-        }
-        else {
-            state = PPS_FIN;
-        }
-        break;
+      if (row == NULL) {
+        state = PPS_FIN;
+      }
+      else {
+        ++parts_processed_count;
+        state = PPS_ORDERPRODUCT3;
+      }
+      break;
     case PPS_ORDERPRODUCT3:
       state = PPS_ORDERPRODUCT4;
       break;
@@ -495,6 +531,14 @@ RC PPSTxnManager::send_remote_request() {
   assert(IS_LOCAL(get_txn_id()));
   PPSQuery* pps_query = (PPSQuery*) query;
   PPSRemTxnType next_state = PPS_FIN;
+
+  // A remote ORDERPRODUCT fragment owns only the part update in states 4/5.
+  // Once it replies, the home transaction must resume the USES scan instead
+  // of treating that fragment's completion as completion of the whole order.
+  if (state == PPS_ORDERPRODUCT4) {
+    next_state = PPS_ORDERPRODUCT2;
+  }
+
 	uint64_t part_key = pps_query->part_key;
   uint64_t dest_node_id = UINT64_MAX;
   dest_node_id = GET_NODE_ID(parts_to_partition(part_key));
@@ -515,6 +559,10 @@ RC PPSTxnManager::run_txn_state() {
     bool part_loc = GET_NODE_ID(parts_to_partition(part_key)) == g_node_id;
     bool product_loc = GET_NODE_ID(products_to_partition(product_key)) == g_node_id;
     bool supplier_loc = GET_NODE_ID(suppliers_to_partition(supplier_key)) == g_node_id;
+#if PPS_STATE_DEBUG_COUNTERS
+    assert(state >= 0 && state < PPS_STATE_COUNT);
+    __sync_fetch_and_add(&pps_state_debug_counters[state], 1);
+#endif
   switch(state) {
     case PPS_GETPART0:
       if (part_loc)
