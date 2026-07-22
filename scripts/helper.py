@@ -747,7 +747,7 @@ def get_prog(sfile):
     summary = {}
     with open(sfile,'r') as f:
         for line in f:
-            if re.search("prog",line):
+            if line.startswith("[prog] "):
                 line = line[7:] #remove '[prog] ' from start of line 
                 results = re.split(',',line)
                 process_results(summary,results)
@@ -760,7 +760,7 @@ def get_summary(sfile,summary={}):
         found = False
         last_line = ""
         for line in f:
-            if re.search("prog",line):
+            if line.startswith("[prog] "):
                 line = line.rstrip('\n')
                 line = line[7:] #remove '[prog] ' from start of line 
                 results = re.split(',',line)
@@ -774,7 +774,7 @@ def get_summary(sfile,summary={}):
                         summary["post_warmup_txn_cnt"].append(prog_tmp["txn_cnt"][0])
                     print("Warmup start: {}".format(summary["post_warmup_txn_cnt"]))
                 last_line = line
-            if re.search("summary",line):
+            if line.startswith("[summary] "):
                 found = True
                 line = line.rstrip('\n')
                 line = line[10:] #remove '[summary] ' from start of line 
@@ -795,8 +795,8 @@ def get_summary(sfile,summary={}):
                         line = line.rstrip('\n')
                         process_lats(summary,line,l)
         if not found:
-            if re.search("prog",last_line):
-                results = re.split(',',line)
+            if last_line:
+                results = re.split(',',last_line)
                 process_results(summary,results)
 #    pp = pprint.PrettyPrinter()
 #    pp.pprint(summary['txn_cnt'])

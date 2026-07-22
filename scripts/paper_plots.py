@@ -4,45 +4,58 @@ import pprint
 def plot_all():
     return 0
 
-def ycsb_scaling_current_plot(summary,summary_cl):
-    """Plot the current ycsb_scaling sweep as server-count scaling curves.
-
-    The current result set varies both NODE_CNT and ZIPF_THETA.  Keep
-    algorithms as the line series and emit one scaling plot per skew value.
-    """
+def _ycsb_scaling_dimension_plot(summary,summary_cl,x_name,fixed_name,
+                                 xlab,name_suffix,logscalex=False):
+    """Plot one YCSB scaling dimension while holding the other constant."""
     from experiments import ycsb_scaling, apply_algo_thread_counts
     from helper import plot_prep
     from plot_helper import tput, latency, abort_rate, time_breakdown_line
 
     nfmt,nexp = apply_algo_thread_counts(*ycsb_scaling())
-    x_name = "NODE_CNT"
     v_name = "CC_ALG"
-    skew_vals = sorted(set(row[nfmt.index("ZIPF_THETA")] for row in nexp))
+    fixed_vals = sorted(set(row[nfmt.index(fixed_name)] for row in nexp))
 
-    for skew in skew_vals:
+    for fixed_val in fixed_vals:
         x_vals,v_vals,fmt,exp,lst = plot_prep(
-            nexp,nfmt,x_name,v_name,constants={"ZIPF_THETA":skew}
+            nexp,nfmt,x_name,v_name,constants={fixed_name:fixed_val}
         )
-        skew_label = str(skew).replace(".","p")
-        title = "YCSB scaling, skew={}".format(skew)
+        fixed_label = str(fixed_val).replace(".","p")
+        title = "YCSB scaling, {}={}".format(fixed_name,fixed_val)
         common = {
             "cfg_fmt": fmt,
             "cfg": list(exp),
             "xname": x_name,
             "vname": v_name,
             "title": title,
-            "xlab": "Server Count",
+            "xlab": xlab,
             "new_cfgs": lst,
-            "logscalex": True,
+            "logscalex": logscalex,
         }
         tput(x_vals,v_vals,summary,summary_cl,
-             name="tput_ycsb_scaling_skew_{}".format(skew_label),**common)
+             name="tput_ycsb_scaling_{}_{}".format(name_suffix,fixed_label),**common)
         latency(x_vals,v_vals,summary,summary_cl,
-                name="latency_ycsb_scaling_skew_{}".format(skew_label),**common)
+                name="latency_ycsb_scaling_{}_{}".format(name_suffix,fixed_label),**common)
         abort_rate(x_vals,v_vals,summary,summary_cl,
-                   name="aborts_ycsb_scaling_skew_{}".format(skew_label),**common)
+                   name="aborts_ycsb_scaling_{}_{}".format(name_suffix,fixed_label),**common)
         time_breakdown_line(x_vals,v_vals,summary,
-                            name="time_break_line_ycsb_scaling_skew_{}".format(skew_label),**common)
+                            name="time_break_line_ycsb_scaling_{}_{}".format(name_suffix,fixed_label),**common)
+
+def ycsb_scaling_skew_plot(summary,summary_cl):
+    """Plot Zipf skew on the x-axis, with one plot per server count."""
+    _ycsb_scaling_dimension_plot(
+        summary,summary_cl,"ZIPF_THETA","NODE_CNT","Zipf Theta","skew_nodes"
+    )
+
+def ycsb_scaling_nodes_plot(summary,summary_cl):
+    """Plot server count on the x-axis, with one plot per skew value."""
+    _ycsb_scaling_dimension_plot(
+        summary,summary_cl,"NODE_CNT","ZIPF_THETA","Server Count","nodes_skew",
+        logscalex=True
+    )
+
+def ycsb_scaling_current_plot(summary,summary_cl):
+    """Default to the skew-axis plot used by the current ycsb_scaling sweep."""
+    ycsb_scaling_skew_plot(summary,summary_cl)
 
 def ppr_ycsb_scaling_plot(summary,summary_cl):
     from experiments import ycsb_scaling

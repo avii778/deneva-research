@@ -96,7 +96,7 @@ def pps_scaling():
     wl = "PPS"
     nnodes = [1, 2, 4, 8, 16, 32, 64]
     # nalgos = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP"]
-    nalgos = ["LIFE"]
+    nalgos = YCSB_LIFE_ALGOS
     load = [10000]
     fmt = ["WORKLOAD", "NODE_CNT", "CC_ALG", "MAX_TXN_IN_FLIGHT"]
     exp = [[wl, n, cc, tif] for tif, n, cc in itertools.product(load, nnodes, nalgos)]
@@ -105,14 +105,14 @@ def pps_scaling():
 
 def ycsb_scaling():
     wl = "YCSB"
-    nnodes = NORMAL
+    nnodes = TESTN
     algos = YCSB_LIFE_ALGOS
     base_table_size = 2097152 * 8
-    txn_write_perc = [1.0]
+    txn_write_perc = [0.9]
     tup_write_perc = [0.5]
-    load = [10000]
     tcnt = [4]
-    skew = [0.3, 0.4]
+    load = [10000]
+    skew = [0.3, 0.4, 0.5, 0.6, 0.7]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",
@@ -811,10 +811,14 @@ def with_algo_thread_counts(generator):
 experiment_map = {
     "pps_scaling": with_algo_thread_counts(pps_scaling),
     "ycsb_scaling": with_algo_thread_counts(ycsb_scaling),
+    "ycsb_scaling_skew": with_algo_thread_counts(ycsb_scaling),
+    "ycsb_scaling_nodes": with_algo_thread_counts(ycsb_scaling),
     "ycsb_single_node": with_algo_thread_counts(ycsb_single_node),
     "life_wait_sweep": with_algo_thread_counts(life_wait_sweep),
     "ycsb_single_node_plot": ycsb_single_node_plot,
     "ycsb_scaling_plot": ycsb_scaling_current_plot,
+    "ycsb_scaling_skew_plot": ycsb_scaling_skew_plot,
+    "ycsb_scaling_nodes_plot": ycsb_scaling_nodes_plot,
     "ppr_ycsb_single_node": with_algo_thread_counts(ycsb_single_node),
     "ppr_ycsb_single_node_plot": ycsb_single_node_plot,
     "ycsb_single_node_writes": with_algo_thread_counts(ycsb_single_node_writes),

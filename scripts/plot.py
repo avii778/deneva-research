@@ -9,12 +9,24 @@ import pickle
 import pprint
 
 PATH=os.getcwd()
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def default_result_dir():
+    candidates = [
+        os.path.join(PATH, "results"),
+        os.path.join(SCRIPT_DIR, "..", "results"),
+        os.path.join(PATH, "..", "results"),
+    ]
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return os.path.abspath(candidate) + os.sep
+    return os.path.abspath(os.path.join(SCRIPT_DIR, "..", "results")) + os.sep
 
 ###########################################
 # Get experiments from command line
 ###########################################
 
-result_dir = PATH + "/../results/"
+result_dir = default_result_dir()
 
 blah = False
 drop = False
@@ -56,7 +68,7 @@ for arg in sys.argv[1:]:
 
 test_dir = ""
 if res_dir:
-    result_dir = PATH + "/../results/"
+    result_dir = default_result_dir()
 
 
 
@@ -124,7 +136,7 @@ for exp in exps:
             if _timedate == []:
                 ofile = "{}/0_{}*".format(result_dir,output_f)
                 res_list = sorted(glob.glob(ofile),key=os.path.getmtime,reverse=True)
-                if res_list == 0:
+                if len(res_list) == 0:
                     continue
                 print(output_f)
                 for x in range(exp_cnt):

@@ -1933,7 +1933,8 @@ RC YCSBTxnManager::run_ycsb() {
     ycsb_request *req = ycsb_query->requests[i];
     if (this->phase == CALVIN_LOC_RD && req->acctype == WR)
       continue;
-    if (this->phase == CALVIN_EXEC_WR && req->acctype == RD)
+    if (this->phase == CALVIN_EXEC_WR &&
+        (req->acctype == RD || req->acctype == SCAN))
       continue;
 
     uint64_t part_id = _wl->key_to_part(req->key);
