@@ -1781,7 +1781,7 @@ RC YCSBTxnManager::run_txn_state() {
   switch (state) {
   case YCSB_0:
     if (loc) {
-      rc = run_ycsb_0(req, row);
+      rc = run_ycsb_0(req, row, req->acctype);
     } else {
       rc = send_remote_request();
     }
@@ -1803,10 +1803,10 @@ RC YCSBTxnManager::run_txn_state() {
   return rc;
 }
 
-RC YCSBTxnManager::run_ycsb_0(ycsb_request *req, row_t *&row_local) {
+RC YCSBTxnManager::run_ycsb_0(ycsb_request *req, row_t *&row_local,
+                              access_t type) {
   RC rc = RCOK;
   int part_id = _wl->key_to_part(req->key);
-  access_t type = req->acctype;
   itemid_t *m_item;
 
   m_item = index_read(_wl->the_index, req->key, part_id);
@@ -1931,7 +1931,7 @@ RC YCSBTxnManager::run_ycsb() {
 
   for (uint64_t i = 0; i < ycsb_query->requests.size(); i++) {
     ycsb_request *req = ycsb_query->requests[i];
-    if (this->phase == CALVIN_LOC_RD && req->acctype == WR)
+    if (this->phase == CALVIN_LOC_RD && req->acctype == WR && !isRecon())
       continue;
     if (this->phase == CALVIN_EXEC_WR &&
         (req->acctype == RD || req->acctype == SCAN))
@@ -1943,15 +1943,17 @@ RC YCSBTxnManager::run_ycsb() {
     if (!loc)
       continue;
 
-    rc = run_ycsb_0(req, row);
+    // Reconnaissance observes every touched row, including write-only rows,
+    // but must never acquire a write access or mutate the tuple.
+    const access_t access_type = isRecon() ? RD : req->acctype;
+    rc = run_ycsb_0(req, row, access_type);
     assert(rc == RCOK);
 
     if (isRecon()) {
-      assert(req->acctype == RD || req->acctype == SCAN);
       capture_ycsb_recon(req->key, row);
     }
 
-    rc = run_ycsb_1(req->acctype, row);
+    rc = run_ycsb_1(access_type, row);
     assert(rc == RCOK);
   }
   return rc;
@@ -1972,8 +1974,6 @@ void YCSBTxnManager::validate_ycsb_recon() {
 
   for (uint64_t i = 0; i < ycsb_query->requests.size(); ++i) {
     ycsb_request *req = ycsb_query->requests[i];
-    if (req->acctype != RD && req->acctype != SCAN)
-      continue;
 
     const uint64_t part_id = _wl->key_to_part(req->key);
     if (GET_NODE_ID(part_id) != g_node_id)

@@ -209,8 +209,13 @@ void WorkerThread::release_txn_man() {
 }
 
 void WorkerThread::calvin_wrapup() {
-  txn_man->release_locks(RCOK);
-  txn_man->commit_stats();
+  const RC outcome = txn_man->get_rc();
+  txn_man->release_locks(outcome);
+  // Reconnaissance and failed validation attempts are protocol attempts, not
+  // committed transactions. The sequencer records the logical commit after
+  // it has collected every ACK.
+  if (!txn_man->isRecon() && outcome == RCOK)
+    txn_man->commit_stats();
   DEBUG("(%ld,%ld) calvin ack to %ld\n",txn_man->get_txn_id(),txn_man->get_batch_id(),txn_man->return_id);
   if(txn_man->return_id == g_node_id) {
     work_queue.sequencer_enqueue(_thd_id,Message::create_message(txn_man,CALVIN_ACK));

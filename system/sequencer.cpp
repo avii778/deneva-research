@@ -173,6 +173,22 @@ void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
               INC_STATS(0,unique_txn_abort_cnt,1);
           }
 
+          // A Calvin transaction is a logical commit only after the
+          // sequencer has collected every participant ACK for the final,
+          // non-reconnaissance attempt. Participant executions (including
+          // reconnaissance and failed validation attempts) are not commits.
+          INC_STATS(thd_id, total_txn_commit_cnt, 1);
+          INC_STATS(thd_id, local_txn_commit_cnt, 1);
+          INC_STATS(thd_id, txn_cnt, 1);
+          INC_STATS(thd_id, txn_run_time, timespan);
+          if (wait_list[id].participant_cnt > 1) {
+            INC_STATS(thd_id, multi_part_txn_cnt, 1);
+            INC_STATS(thd_id, multi_part_txn_run_time, timespan);
+          } else {
+            INC_STATS(thd_id, single_part_txn_cnt, 1);
+            INC_STATS(thd_id, single_part_txn_run_time, timespan);
+          }
+
     INC_STATS(0,lat_l_loc_msg_queue_time,wait_list[id].total_batch_time);
     INC_STATS(0,lat_l_loc_process_time,skew_timespan);
 
@@ -280,6 +296,7 @@ void Sequencer::process_txn( Message * msg,uint64_t thd_id, uint64_t early_start
     //en->list[id].seq_startts = get_sys_clock();
 
     en->list[id].total_batch_time = wait_time;
+    en->list[id].participant_cnt = participants.size();
     en->list[id].abort_cnt = abort_cnt;
     en->list[id].attempt_failed = false;
 #if WORKLOAD == YCSB && CC_ALG == CALVIN

@@ -666,6 +666,13 @@ void TxnManager::commit_stats() {
   uint64_t commit_time = get_sys_clock();
   uint64_t timespan_short = commit_time - txn_stats.restart_starttime;
   uint64_t timespan_long = commit_time - txn_stats.starttime;
+#if CC_ALG == CALVIN
+  // The sequencer owns Calvin's logical commit counters. This method only
+  // records execution timing for a successful participant attempt.
+  txn_stats.commit_stats(get_thd_id(), get_txn_id(), get_batch_id(),
+                         timespan_long, timespan_short);
+  return;
+#endif
   INC_STATS(get_thd_id(), total_txn_commit_cnt, 1);
 
   if (!IS_LOCAL(get_txn_id()) && CC_ALG != CALVIN) {
@@ -690,9 +697,6 @@ void TxnManager::commit_stats() {
   }*/
   txn_stats.commit_stats(get_thd_id(), get_txn_id(), get_batch_id(),
                          timespan_long, timespan_short);
-#if CC_ALG == CALVIN
-  return;
-#endif
 
   INC_STATS_ARR(get_thd_id(), start_abort_commit_latency, timespan_short);
   INC_STATS_ARR(get_thd_id(), last_start_commit_latency, timespan_short);

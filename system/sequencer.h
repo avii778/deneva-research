@@ -37,6 +37,7 @@ typedef struct qlite_entry {
 	uint64_t skew_startts;
 	uint64_t total_batch_time;
 	uint32_t server_ack_cnt;
+	uint32_t participant_cnt;
 	uint32_t abort_cnt;
   bool attempt_failed;
 #if WORKLOAD == YCSB && CC_ALG == CALVIN

@@ -194,7 +194,7 @@ protected:
                                  RC decision);
 #endif
   RC run_txn_state();
-  RC run_ycsb_0(ycsb_request *req, row_t *&row_local);
+  RC run_ycsb_0(ycsb_request *req, row_t *&row_local, access_t type);
   RC run_ycsb_1(access_t acctype, row_t *row_local);
   RC run_ycsb();
   void capture_ycsb_recon(uint64_t key, row_t *row_local);
