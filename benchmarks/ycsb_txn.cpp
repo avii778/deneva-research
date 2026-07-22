@@ -50,14 +50,6 @@ void add_unique_life_node(std::vector<uint64_t> &nodes, uint64_t node_id) {
 }
 
 LifeTxnDescriptor
-make_life_finalization_message_descriptor(const LifeTxnDescriptor &descriptor) {
-  LifeTxnDescriptor message_descriptor = descriptor;
-  message_descriptor.ycsb.requests.clear();
-  message_descriptor.pps.part_keys.clear();
-  return message_descriptor;
-}
-
-LifeTxnDescriptor
 make_life_finish_message_descriptor(const LifeTxnDescriptor &descriptor,
                                     uint64_t node_id) {
   LifeTxnDescriptor message_descriptor;
@@ -1106,14 +1098,16 @@ void YCSBTxnManager::send_life_finalize_response(
 
 void YCSBTxnManager::send_life_prepare_messages(
     const LifeTxnDescriptor &descriptor, const std::vector<uint64_t> &nodes) {
-  const LifeTxnDescriptor message_descriptor =
-      make_life_finalization_message_descriptor(descriptor);
   for (std::vector<uint64_t>::const_iterator it = nodes.begin();
        it != nodes.end(); ++it) {
     LifePrepareMessage *msg =
         (LifePrepareMessage *)Message::create_message(RLIFE_PREPARE);
     msg->txn_id = get_txn_id();
-    msg->descriptor = message_descriptor;
+    // Prepare installs this descriptor in each row's process record. A later
+    // contender can receive it as Help/Finalize and must be able to resume or
+    // reset the workload, so the YCSB/PPS program is part of the durable
+    // descriptor rather than an expendable prepare-only payload.
+    msg->descriptor = descriptor;
     LIFE_DBG_INC(life_dbg_prepare_sent);
     msg_queue.enqueue(get_thd_id(), msg, *it);
   }
