@@ -1670,7 +1670,7 @@ YCSBTxnManager::make_life_operation(const LifeYcsbRequest &request) {
 
   assert(request.kind == LifeYcsbRequestKind::Write);
   operation.kind = LifeOperationKind::WriteField;
-  const uint64_t value = 0;
+  const uint64_t value = request.value;
   const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&value);
   operation.argument.assign(bytes, bytes + sizeof(value));
   return operation;
@@ -1704,7 +1704,7 @@ YCSBTxnManager::make_life_operation(row_t *life_row,
 
   assert(request.kind == LifeYcsbRequestKind::Write);
   operation.kind = LifeOperationKind::WriteField;
-  const uint64_t value = 0;
+  const uint64_t value = request.value;
   const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&value);
   operation.argument.assign(bytes, bytes + sizeof(value));
   return operation;
@@ -1788,7 +1788,7 @@ RC YCSBTxnManager::run_txn_state() {
 
     break;
   case YCSB_1:
-    rc = run_ycsb_1(req->acctype, row);
+    rc = run_ycsb_1(req->acctype, static_cast<uint8_t>(req->value), row);
     break;
   case YCSB_FIN:
     state = YCSB_FIN;
@@ -1818,7 +1818,8 @@ RC YCSBTxnManager::run_ycsb_0(ycsb_request *req, row_t *&row_local,
   return rc;
 }
 
-RC YCSBTxnManager::run_ycsb_1(access_t acctype, row_t *row_local) {
+RC YCSBTxnManager::run_ycsb_1(access_t acctype, uint8_t value,
+                              row_t *row_local) {
   if (acctype == RD || acctype == SCAN) {
     int fid = 0;
     char *data = row_local->get_data();
@@ -1833,7 +1834,10 @@ RC YCSBTxnManager::run_ycsb_1(access_t acctype, row_t *row_local) {
     assert(acctype == WR);
     int fid = 0;
     char *data = row_local->get_data();
-    *(uint64_t *)(&data[fid * 100]) = 0;
+    // YCSB generates one byte of update data per request. Store it in the
+    // benchmark's existing eight-byte field representation so every CC path
+    // applies the requested value and Calvin can observe intervening writes.
+    *(uint64_t *)(&data[fid * 100]) = value;
 #if YCSB_ABORT_MODE
     if (data[0] == 'a')
       return RCOK;
@@ -1953,7 +1957,7 @@ RC YCSBTxnManager::run_ycsb() {
       capture_ycsb_recon(req->key, row);
     }
 
-    rc = run_ycsb_1(access_type, row);
+    rc = run_ycsb_1(access_type, static_cast<uint8_t>(req->value), row);
     assert(rc == RCOK);
   }
   return rc;
