@@ -26,13 +26,13 @@ except ImportError:
 PY2 = sys.version_info[0] == 2
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 CONFIG = os.path.join(ROOT, "config.h")
-RESULTS = os.path.join(ROOT, "results", "life_wait_tuning")
+RESULTS = os.path.join(ROOT, "results", "life_wait_tuning_4node")
 DEFAULT_WAITS_US = (0, 1, 2, 5, 10, 20, 50, 100)
 MAX_WAIT_US = 2 * 1000 * 1000
 YCSB_SCALING_BASE_TABLE_SIZE = 2097152 * 8
-DEFAULT_NODE_CNT = 2
+DEFAULT_NODE_CNT = 4
 DEFAULT_CLIENT_NODE_CNT = DEFAULT_NODE_CNT
-DEFAULT_THREAD_CNT = 4
+DEFAULT_THREAD_CNT = 6
 DEFAULT_MAX_TXN_IN_FLIGHT = 10000
 DEFAULT_ZIPF_THETA = 0.4
 DEFAULT_TXN_WRITE_PERC = 0.5
@@ -359,9 +359,9 @@ def arguments():
                         default=list(DEFAULT_WAITS_US),
                         help="comma-separated microsecond delays (default: %(default)s)")
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--duration", type=int, default=30,
+    parser.add_argument("--duration", type=int, default=60,
                         help="measured seconds per trial")
-    parser.add_argument("--warmup", type=int, default=5,
+    parser.add_argument("--warmup", type=int, default=70,
                         help="warmup seconds per trial")
     parser.add_argument("--jobs", type=int, default=max(1, cpu_count()))
     parser.add_argument("--startup-timeout", type=int, default=600,

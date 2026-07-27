@@ -65,7 +65,7 @@ YCSB_ALGOS = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP", "LIF
 YCSB_SINGLE_NODE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 YCSB_LIFE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 TESTING = ["LIFE"]
-TESTN = [2]
+TESTN = [16]
 NORMAL = [2, 4, 8, 16]
 
 WORKER_THREAD_CNTS = {
@@ -105,14 +105,18 @@ def pps_scaling():
 
 def ycsb_scaling():
     wl = "YCSB"
+    # nnodes = NORMAL
     nnodes = TESTN
-    algos = YCSB_LIFE_ALGOS
+    # algos = YCSB_LIFE_ALGOS
+    algos = TESTING
     base_table_size = 2097152 * 8
     txn_write_perc = [0.9]
     tup_write_perc = [0.5]
     tcnt = [4]
     load = [10000]
-    skew = [0.3, 0.4, 0.5, 0.6, 0.7]
+    skew = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+    part_per_txn = [2]
+    strict_ppt = [1]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",
@@ -123,11 +127,13 @@ def ycsb_scaling():
         "MAX_TXN_IN_FLIGHT",
         "ZIPF_THETA",
         "THREAD_CNT",
+        "PART_PER_TXN",
+        "STRICT_PPT",
     ]
     exp = [
-        [wl, n, algo, base_table_size * n, tup_wr_perc, txn_wr_perc, ld, sk, thr]
-        for thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo in itertools.product(
-            tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, algos
+        [wl, n, algo, base_table_size, tup_wr_perc, txn_wr_perc, ld, sk, thr, ppt, sppt]
+        for sppt, ppt, thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo in itertools.product(
+            strict_ppt, part_per_txn, tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, algos
         )
     ]
 
@@ -142,7 +148,7 @@ def life_test():
     tup_write_perc = [0.5]
     load = [10000]
     tcnt = [4]
-    skew = [0.3]
+    skew = [0.0]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",
@@ -155,7 +161,7 @@ def life_test():
         "THREAD_CNT",
     ]
     exp = [
-        [wl, n, algo, base_table_size * n, tup_wr_perc, txn_wr_perc, ld, sk, thr]
+        [wl, n, algo, base_table_size, tup_wr_perc, txn_wr_perc, ld, sk, thr]
         for thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo in itertools.product(
             tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, algos
         )
@@ -203,7 +209,7 @@ def ycsb_single_node():
 
 def life_wait_sweep():
     wl = "YCSB"
-    nnodes = [2]
+    nnodes = [4]
     algos = ["LIFE"]
     waits = [0, 1, 10, 100, 1000, 10000, 100000, 500000, 1000000, 2000000]
     base_table_size = 2097152 * 8
