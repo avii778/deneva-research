@@ -1979,6 +1979,11 @@ void YCSBTxnManager::validate_ycsb_recon() {
   for (uint64_t i = 0; i < ycsb_query->requests.size(); ++i) {
     ycsb_request *req = ycsb_query->requests[i];
 
+    // Write-set rows may be sampled during reconnaissance, but an intervening
+    // change to a value the transaction only overwrites must not cause abort.
+    if (req->acctype == WR)
+      continue;
+
     const uint64_t part_id = _wl->key_to_part(req->key);
     if (GET_NODE_ID(part_id) != g_node_id)
       continue;

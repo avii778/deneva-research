@@ -137,11 +137,13 @@ uint64_t YCSBQuery::get_participants(Workload * wl) {
   assert(active_nodes.size()==g_node_cnt);
   for(uint64_t i = 0; i < requests.size(); i++) {
     uint64_t req_nid = GET_NODE_ID(((YCSBWorkload*)wl)->key_to_part(requests[i]->key));
-    // Calvin reconnaissance and validation cover the complete read/write
-    // set, so write-only nodes are validation participants too.
-    if(participant_nodes[req_nid] == 0)
-      ++participant_cnt;
-    participant_nodes.set(req_nid,1);
+    // Reconnaissance samples the complete read/write set, but only values
+    // consumed by the transaction can invalidate its OLLP prediction.
+    if(requests[i]->acctype == RD || requests[i]->acctype == SCAN) {
+      if(participant_nodes[req_nid] == 0)
+        ++participant_cnt;
+      participant_nodes.set(req_nid,1);
+    }
     if(requests[i]->acctype == WR)
       active_nodes.set(req_nid,1);
   }
