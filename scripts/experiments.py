@@ -105,10 +105,10 @@ def pps_scaling():
 
 def ycsb_scaling():
     wl = "YCSB"
-    # nnodes = NORMAL
-    nnodes = TESTN
-    # algos = YCSB_LIFE_ALGOS
-    algos = TESTING
+    nnodes = NORMAL
+    # nnodes = TESTN
+    algos = YCSB_LIFE_ALGOS
+    # algos = TESTING
     base_table_size = 2097152 * 8
     txn_write_perc = [0.9]
     tup_write_perc = [0.5]
@@ -131,7 +131,7 @@ def ycsb_scaling():
         "STRICT_PPT",
     ]
     exp = [
-        [wl, n, algo, base_table_size, tup_wr_perc, txn_wr_perc, ld, sk, thr, ppt, sppt]
+        [wl, n, algo, base_table_size * n, tup_wr_perc, txn_wr_perc, ld, sk, thr, ppt, sppt]
         for sppt, ppt, thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo in itertools.product(
             strict_ppt, part_per_txn, tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, algos
         )
