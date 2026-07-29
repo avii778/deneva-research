@@ -18,6 +18,7 @@
 #include "manager.h"
 #include "thread.h"
 #include "worker_thread.h"
+#include "wait_die_debug.h"
 #include "txn.h"
 #include "wl.h"
 #include "query.h"
@@ -94,6 +95,9 @@ void WorkerThread::setup() {
 }
 
 void WorkerThread::process(Message * msg) {
+#if CC_ALG == WAIT_DIE
+  wait_die_debug_increment(&wait_die_debug.messages_processed[msg->rtype]);
+#endif
   RC rc __attribute__ ((unused));
 
   DEBUG("%ld Processing %ld %d\n",get_thd_id(),msg->get_txn_id(),msg->get_rtype());
@@ -257,7 +261,11 @@ void WorkerThread::abort() {
   // TODO: TPCC Rollback here
 
   ++txn_man->abort_cnt;
-  txn_man->reset();
+  const uint64_t retry_client_id = txn_man->client_id;
+  const uint64_t retry_client_startts = txn_man->client_startts;
+  txn_man->reset_for_retry();
+  assert(txn_man->client_id == retry_client_id);
+  assert(txn_man->client_startts == retry_client_startts);
 
   uint64_t penalty = abort_queue.enqueue(get_thd_id(), txn_man->get_txn_id(),txn_man->get_abort_cnt());
 
@@ -304,7 +312,9 @@ RC WorkerThread::run() {
       txn_man = get_transaction_manager(msg);
 #if CC_ALG == LIFE
       if (txn_man == NULL) {
+        INC_STATS(get_thd_id(),life_claim_conflict_cnt,1);
         work_queue.enqueue(get_thd_id(),msg,true);
+        INC_STATS(get_thd_id(),life_claim_reenqueue_cnt,1);
         continue;
       }
 #endif
@@ -514,6 +524,9 @@ RC WorkerThread::process_rqry_cont(Message * msg) {
   DEBUG("RQRY_CONT %ld\n",msg->get_txn_id());
   assert(!IS_LOCAL(msg->get_txn_id()));
   RC rc = RCOK;
+#if CC_ALG == WAIT_DIE
+  wait_die_debug_increment(&wait_die_debug.rqry_cont_processed);
+#endif
 
   txn_man->run_txn_post_wait();
   rc = txn_man->run_txn();

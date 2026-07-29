@@ -105,6 +105,10 @@ public:
   double work_queue_enqueue_time;
   double work_queue_dequeue_time;
   uint64_t work_queue_conflict_cnt;
+  uint64_t life_claim_conflict_cnt;
+  uint64_t life_claim_reenqueue_cnt;
+  uint64_t * life_cont_dequeue_cnt_by_type;
+  double * life_cont_dequeue_wait_time_by_type;
 
   // Abort queue
   uint64_t abort_queue_enqueue_cnt;

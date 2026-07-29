@@ -64,8 +64,8 @@ fmt_title = [
 YCSB_ALGOS = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP", "LIFE"]
 YCSB_SINGLE_NODE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 YCSB_LIFE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
-TESTING = ["LIFE"]
-TESTN = [16]
+TESTING = ["WAIT_DIE"]
+TESTN = [2, 4, 8]
 NORMAL = [2, 4, 8, 16]
 
 WORKER_THREAD_CNTS = {
@@ -87,6 +87,8 @@ def apply_algo_thread_counts(fmt, exp):
     for row in exp:
         row[thread_idx] = thread_count_for_algo(row[algo_idx])
     return fmt, exp
+
+
 ##############################
 # PLOTS
 ##############################
@@ -109,12 +111,12 @@ def ycsb_scaling():
     # nnodes = TESTN
     algos = YCSB_LIFE_ALGOS
     # algos = TESTING
-    base_table_size = 2097152 * 8
+    base_table_size = 1000000
     txn_write_perc = [0.9]
     tup_write_perc = [0.5]
     tcnt = [4]
     load = [10000]
-    skew = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+    skew = [0.0]
     part_per_txn = [2]
     strict_ppt = [1]
     fmt = [
@@ -131,15 +133,36 @@ def ycsb_scaling():
         "STRICT_PPT",
     ]
     exp = [
-        [wl, n, algo, base_table_size * n, tup_wr_perc, txn_wr_perc, ld, sk, thr, ppt, sppt]
+        [
+            wl,
+            n,
+            algo,
+            base_table_size * n,
+            tup_wr_perc,
+            txn_wr_perc,
+            ld,
+            sk,
+            thr,
+            ppt,
+            sppt,
+        ]
         for sppt, ppt, thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo in itertools.product(
-            strict_ppt, part_per_txn, tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, algos
+            strict_ppt,
+            part_per_txn,
+            tcnt,
+            txn_write_perc,
+            tup_write_perc,
+            skew,
+            load,
+            nnodes,
+            algos,
         )
     ]
 
     return fmt, exp
 
-def life_test(): 
+
+def life_test():
     wl = "YCSB"
     nnodes = TESTN
     algos = TESTING
@@ -802,13 +825,71 @@ def network_sweep():
     return fmt, exp
 
 
-
-
 def with_algo_thread_counts(generator):
     def wrapped():
         return apply_algo_thread_counts(*generator())
 
     return wrapped
+
+
+def wait_die_transport_diag(transport, node_count=2):
+    """Short WAIT_DIE transport diagnostic at the requested node count."""
+    fmt = [
+        "WORKLOAD",
+        "NODE_CNT",
+        "CC_ALG",
+        "SYNTH_TABLE_SIZE",
+        "TUP_WRITE_PERC",
+        "TXN_WRITE_PERC",
+        "MAX_TXN_IN_FLIGHT",
+        "ZIPF_THETA",
+        "THREAD_CNT",
+        "PART_PER_TXN",
+        "STRICT_PPT",
+        "TPORT_TYPE",
+        "ENVIRONMENT_EC2",
+        "WARMUP_TIMER",
+        "DONE_TIMER",
+    ]
+    return fmt, [
+        [
+            "YCSB",
+            node_count,
+            "WAIT_DIE",
+            1000000 * node_count,
+            0.5,
+            0.9,
+            10000,
+            0.0,
+            thread_count_for_algo("WAIT_DIE"),
+            2,
+            1,
+            transport,
+            "false",
+            "15*BILLION // diagnostic warmup",
+            "20*BILLION // diagnostic measurement",
+        ]
+    ]
+
+
+def wait_die_ipc_diag():
+    return wait_die_transport_diag("IPC")
+
+
+def wait_die_tcp_diag():
+    return wait_die_transport_diag("TCP")
+
+
+def wait_die_tcp_diag_16():
+    return wait_die_transport_diag("TCP", 16)
+
+
+def wait_die_tcp_diag_16_long():
+    fmt, exp = wait_die_transport_diag("TCP", 16)
+    exp[0][fmt.index("WARMUP_TIMER")] = "60*BILLION // full warmup"
+    exp[0][fmt.index("DONE_TIMER")] = "60*BILLION // full measurement"
+    return fmt, exp
+
 
 ##############################
 # END PLOTS
@@ -867,7 +948,11 @@ experiment_map = {
     "network_sweep": with_algo_thread_counts(network_sweep),
     "ppr_network": with_algo_thread_counts(network_sweep),
     "ppr_network_plot": ppr_network_plot,
-    "life_test" : with_algo_thread_counts(life_test),
+    "life_test": with_algo_thread_counts(life_test),
+    "wait_die_ipc_diag": wait_die_ipc_diag,
+    "wait_die_tcp_diag": wait_die_tcp_diag,
+    "wait_die_tcp_diag_16": wait_die_tcp_diag_16,
+    "wait_die_tcp_diag_16_long": wait_die_tcp_diag_16_long,
 }
 
 

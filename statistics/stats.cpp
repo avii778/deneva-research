@@ -45,6 +45,12 @@ void Stats_thd::init(uint64_t thd_id) {
   worker_process_cnt_by_type= (uint64_t *) mem_allocator.align_alloc(sizeof(uint64_t) * NO_MSG);
   DEBUG_M("Stats_thd::init worker_process_time_by_type alloc\n");
   worker_process_time_by_type= (double *) mem_allocator.align_alloc(sizeof(double) * NO_MSG);
+  DEBUG_M("Stats_thd::init life_cont_dequeue_cnt_by_type alloc\n");
+  life_cont_dequeue_cnt_by_type =
+      (uint64_t *) mem_allocator.align_alloc(sizeof(uint64_t) * NO_MSG);
+  DEBUG_M("Stats_thd::init life_cont_dequeue_wait_time_by_type alloc\n");
+  life_cont_dequeue_wait_time_by_type =
+      (double *) mem_allocator.align_alloc(sizeof(double) * NO_MSG);
   DEBUG_M("Stats_thd::init mtx alloc\n");
   mtx= (double *) mem_allocator.align_alloc(sizeof(double) * 40);
 
@@ -128,6 +134,8 @@ void Stats_thd::clear() {
   work_queue_enqueue_time=0;
   work_queue_dequeue_time=0;
   work_queue_conflict_cnt=0;
+  life_claim_conflict_cnt=0;
+  life_claim_reenqueue_cnt=0;
 
   // Worker thread
   worker_idle_time=0;
@@ -139,6 +147,8 @@ void Stats_thd::clear() {
   for(uint64_t i = 0; i < NO_MSG; i ++) {
     worker_process_cnt_by_type[i]=0;
     worker_process_time_by_type[i]=0;
+    life_cont_dequeue_cnt_by_type[i]=0;
+    life_cont_dequeue_wait_time_by_type[i]=0;
   }
 
   // IO
@@ -638,6 +648,8 @@ void Stats_thd::print(FILE * outf, bool prog) {
   ",work_queue_enqueue_time=%f"
   ",work_queue_dequeue_time=%f"
   ",work_queue_conflict_cnt=%ld"
+  ",life_claim_conflict_cnt=%ld"
+  ",life_claim_reenqueue_cnt=%ld"
   ,work_queue_wait_time / BILLION
   ,work_queue_cnt
   ,work_queue_enq_cnt
@@ -653,6 +665,8 @@ void Stats_thd::print(FILE * outf, bool prog) {
   ,work_queue_enqueue_time / BILLION
   ,work_queue_dequeue_time / BILLION
   ,work_queue_conflict_cnt
+  ,life_claim_conflict_cnt
+  ,life_claim_reenqueue_cnt
   );
 
 
@@ -685,6 +699,24 @@ void Stats_thd::print(FILE * outf, bool prog) {
       ,i
       ,worker_process_time_by_type[i] / BILLION
     );
+#if CC_ALG == LIFE
+    const double life_cont_wait_avg =
+        life_cont_dequeue_cnt_by_type[i] == 0
+            ? 0
+            : life_cont_dequeue_wait_time_by_type[i] /
+                  life_cont_dequeue_cnt_by_type[i];
+    fprintf(outf,
+      ",life_cont_dequeue_cnt_type%ld=%ld"
+      ",life_cont_dequeue_wait_type%ld=%f"
+      ",life_cont_dequeue_wait_avg_type%ld=%f"
+      ,i
+      ,life_cont_dequeue_cnt_by_type[i]
+      ,i
+      ,life_cont_dequeue_wait_time_by_type[i] / BILLION
+      ,i
+      ,life_cont_wait_avg / BILLION
+    );
+#endif
   }
 
   // IO
@@ -1275,6 +1307,8 @@ void Stats_thd::combine(Stats_thd * stats) {
   work_queue_enqueue_time+=stats->work_queue_enqueue_time;
   work_queue_dequeue_time+=stats->work_queue_dequeue_time;
   work_queue_conflict_cnt+=stats->work_queue_conflict_cnt;
+  life_claim_conflict_cnt+=stats->life_claim_conflict_cnt;
+  life_claim_reenqueue_cnt+=stats->life_claim_reenqueue_cnt;
 
   // Worker thread
   worker_idle_time+=stats->worker_idle_time;
@@ -1286,6 +1320,10 @@ void Stats_thd::combine(Stats_thd * stats) {
   for(uint64_t i = 0; i < NO_MSG; i ++) {
     worker_process_cnt_by_type[i]+=stats->worker_process_cnt_by_type[i];
     worker_process_time_by_type[i]+=stats->worker_process_time_by_type[i];
+    life_cont_dequeue_cnt_by_type[i]+=
+        stats->life_cont_dequeue_cnt_by_type[i];
+    life_cont_dequeue_wait_time_by_type[i]+=
+        stats->life_cont_dequeue_wait_time_by_type[i];
   }
 
   // IO
@@ -1576,6 +1614,26 @@ void Stats::print(bool prog) {
   else
 	  fprintf(outf, "[summary] ");
   totals->print(outf,prog);
+#if CC_ALG == LIFE
+  // The aggregate counters above remain suitable for baseline comparisons.
+  // These fields expose which native worker dequeued each continuation type,
+  // including failed claims that never reach worker_process_cnt_by_type.
+  for (uint64_t tid = 0; tid < thd_cnt; ++tid) {
+    for (uint64_t type = 0; type < NO_MSG; ++type) {
+      const uint64_t count =
+          _stats[tid]->life_cont_dequeue_cnt_by_type[type];
+      const double wait =
+          _stats[tid]->life_cont_dequeue_wait_time_by_type[type];
+      const double average = count == 0 ? 0 : wait / count;
+      fprintf(outf,
+              ",life_cont_dequeue_worker%ld_type%ld=%ld"
+              ",life_cont_dequeue_wait_worker%ld_type%ld=%f"
+              ",life_cont_dequeue_wait_avg_worker%ld_type%ld=%f",
+              tid, type, count, tid, type, wait / BILLION, tid, type,
+              average / BILLION);
+    }
+  }
+#endif
 #if CC_ALG == LIFE && LIFE_DEBUG_COUNTERS
   fprintf(outf,
           ",life_exec_rsp_success=%lu"

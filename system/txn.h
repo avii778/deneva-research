@@ -41,6 +41,15 @@ class TPCCQuery;
 
 enum TxnState { START, INIT, EXEC, PREP, FIN, DONE };
 
+template <typename Manager>
+inline void reset_preserving_client_context(Manager *manager) {
+  const uint64_t retry_client_id = manager->client_id;
+  const uint64_t retry_client_startts = manager->client_startts;
+  manager->reset();
+  manager->client_id = retry_client_id;
+  manager->client_startts = retry_client_startts;
+}
+
 class Access {
 public:
   access_t type;
@@ -141,6 +150,11 @@ public:
   virtual ~TxnManager() {}
   virtual void init(uint64_t thd_id, Workload *h_wl);
   virtual void reset();
+  void reset_for_retry() {
+    // reset() deliberately invalidates the client route for remote/lifecycle
+    // reuse. A retry remains part of the same logical client request.
+    reset_preserving_client_context(this);
+  }
   void clear();
   void reset_query();
   void release();

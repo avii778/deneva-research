@@ -88,7 +88,10 @@ SHORTNAMES = {
     "NETWORK_DELAY_TEST":"NDT",
     "NETWORK_DELAY":"NDLY",
     "REPLICA_CNT":"RN",
-#    "SYNTH_TABLE_SIZE":"TBL",
+    # Keep this in sync with experiments.SHORTNAMES. Experiment runners use
+    # "TBL" in result filenames, so the plotter must use the same spelling
+    # when discovering those files.
+    "SYNTH_TABLE_SIZE":"TBL",
     "ISOLATION_LEVEL":"LVL",
 }
 

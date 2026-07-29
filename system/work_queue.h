@@ -90,15 +90,11 @@ public:
   //uint64_t get_new_wq_cnt() {return new_query_queue.size();}
 
 private:
+  boost::lockfree::queue<work_queue_entry* > * work_queue;
 #if CC_ALG == LIFE
-  // LIFE transaction ids encode their owning worker. Serializing all messages
-  // for a transaction on that worker avoids transaction-manager retry churn.
-  boost::lockfree::queue<work_queue_entry* > ** work_queue;
-  // Continuation traffic can keep every owner queue permanently non-empty.
+  // Continuation traffic can keep the shared queue permanently non-empty.
   // Bound how long each worker may postpone admitting a fresh transaction.
   uint32_t * life_old_dequeue_streak;
-#else
-  boost::lockfree::queue<work_queue_entry* > * work_queue;
 #endif
   boost::lockfree::queue<work_queue_entry* > * new_txn_queue;
   boost::lockfree::queue<work_queue_entry* > * seq_queue;

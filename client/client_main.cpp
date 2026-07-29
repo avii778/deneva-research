@@ -22,6 +22,7 @@
 #include "io_thread.h"
 #include "client_thread.h"
 #include "client_query.h"
+#include "wait_die_debug.h"
 #include "transport.h"
 #include "client_txn.h"
 #include "msg_queue.h"
@@ -182,8 +183,12 @@ int main(int argc, char* argv[])
     output_thds[i].init(id,g_node_id,m_wl);
 		pthread_create(&p_thds[id++], NULL, run_thread, (void *)&output_thds[i]);
   }
-	for (uint64_t i = 0; i < all_thd_cnt; i++) 
-		pthread_join(p_thds[i], NULL);
+  for (uint64_t i = 0; i < all_thd_cnt; i++)
+    pthread_join(p_thds[i], NULL);
+
+#if CC_ALG == WAIT_DIE
+  print_wait_die_debug_counters(0);
+#endif
 
 	endtime = get_server_clock();
 	

@@ -22,13 +22,7 @@
 #include <boost/lockfree/queue.hpp>
 
 #if CC_ALG == LIFE
-namespace {
-// The measured LIFE event mix is roughly seven to nine continuation events per
-// admitted home transaction. One admission opportunity after seven old events
-// keeps the transaction pipeline populated without starving durable-manager
-// continuations. A failed admission attempt immediately falls back to old work.
-const uint32_t kLifeMaxOldDequeueStreak = 7;
-}
+#include "life_queue_policy.h"
 #endif
 
 void QWorkQueue::init() {
@@ -37,13 +31,11 @@ void QWorkQueue::init() {
   sched_ptr = 0;
   seq_queue = new boost::lockfree::queue<work_queue_entry* > (0);
 #if CC_ALG == LIFE
-  work_queue = new boost::lockfree::queue<work_queue_entry* > * [g_thread_cnt];
   life_old_dequeue_streak = new uint32_t[g_thread_cnt]();
-  for (uint64_t i = 0; i < g_thread_cnt; i++)
-    work_queue[i] = new boost::lockfree::queue<work_queue_entry* > (0);
-#else
-  work_queue = new boost::lockfree::queue<work_queue_entry* > (0);
 #endif
+  // LIFE continuations deliberately share this queue. The transaction-table
+  // ready claim, rather than queue affinity, serializes each durable manager.
+  work_queue = new boost::lockfree::queue<work_queue_entry* > (0);
   new_txn_queue = new boost::lockfree::queue<work_queue_entry* >(0);
   sched_queue = new boost::lockfree::queue<work_queue_entry* > * [g_node_cnt];
   for ( uint64_t i = 0; i < g_node_cnt; i++) {
@@ -187,12 +179,8 @@ void QWorkQueue::enqueue(uint64_t thd_id, Message * msg,bool busy) {
   } else {
 #if CC_ALG == LIFE
     assert(msg->txn_id != UINT64_MAX);
-    const uint64_t owner =
-        (msg->txn_id / g_node_cnt) % g_thread_cnt;
-    while(!work_queue[owner]->push(entry) && !simulation->is_done()) {}
-#else
-    while(!work_queue->push(entry) && !simulation->is_done()) {}
 #endif
+    while(!work_queue->push(entry) && !simulation->is_done()) {}
   }
   INC_STATS(thd_id,mtx[13],get_sys_clock() - mtx_wait_starttime);
 
@@ -211,19 +199,18 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
   uint64_t mtx_wait_starttime = get_sys_clock();
 #if CC_ALG == LIFE
   assert(thd_id < g_thread_cnt);
-  // Durable LIFE managers require owner-worker affinity, but affinity does not
-  // require draining continuation work forever. Periodically offer the worker
-  // a new transaction, then fall back immediately if the admission queue is
-  // empty. Only this worker mutates its streak counter.
+  // Periodically offer this worker a new transaction, then fall back
+  // immediately to the shared continuation queue if admission is empty. Only
+  // this worker mutates its streak counter.
   bool valid = false;
 #if !SERVER_GENERATE_QUERIES
   const bool prefer_new =
-      life_old_dequeue_streak[thd_id] >= kLifeMaxOldDequeueStreak;
+      life_should_try_admission(life_old_dequeue_streak[thd_id]);
   if (prefer_new)
     valid = new_txn_queue->pop(entry);
 #endif
   if (!valid)
-    valid = work_queue[thd_id]->pop(entry);
+    valid = work_queue->pop(entry);
 #else
   bool valid = work_queue->pop(entry);
 #endif
@@ -246,12 +233,8 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
     msg = entry->msg;
     assert(msg);
 #if CC_ALG == LIFE
-    if (msg->rtype == CL_QRY) {
-      life_old_dequeue_streak[thd_id] = 0;
-    } else if (life_old_dequeue_streak[thd_id] <
-               kLifeMaxOldDequeueStreak) {
-      ++life_old_dequeue_streak[thd_id];
-    }
+    life_record_dequeue(life_old_dequeue_streak[thd_id],
+                        msg->rtype == CL_QRY);
 #endif
     //printf("%ld WQdequeue %ld\n",thd_id,entry->txn_id);
     uint64_t queue_time = get_sys_clock() - entry->starttime;
@@ -263,9 +246,14 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
     } else {
       INC_STATS(thd_id,work_queue_old_wait_time,queue_time);
       INC_STATS(thd_id,work_queue_old_cnt,1);
+#if CC_ALG == LIFE
+      INC_STATS(thd_id,life_cont_dequeue_wait_time_by_type[msg->rtype],
+                queue_time);
+      INC_STATS(thd_id,life_cont_dequeue_cnt_by_type[msg->rtype],1);
+#endif
     }
 #if CC_ALG == LIFE
-    // A fallback ownership conflict can re-enqueue the same logical message.
+    // A failed manager claim can re-enqueue the same logical message.
     // Keep all queue segments instead of replacing the previous segment.
     msg->wq_time += queue_time;
 #else

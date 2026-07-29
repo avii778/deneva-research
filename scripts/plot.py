@@ -22,6 +22,21 @@ def default_result_dir():
             return os.path.abspath(candidate) + os.sep
     return os.path.abspath(os.path.join(SCRIPT_DIR, "..", "results")) + os.sep
 
+def require_db_pass(result_file, node):
+    passed = False
+    with open(result_file, "r") as f:
+        for line in f:
+            # Database nodes currently print "PASS! SimTime = ..."; client
+            # nodes use the distinct "CLIENT PASS!" marker.
+            if line.startswith("PASS!"):
+                passed = True
+                break
+    if not passed:
+        raise RuntimeError(
+            "DB node {} did not print PASS!: {}".format(node, result_file)
+        )
+    print("DB node {}: PASS! ({})".format(node, os.path.basename(result_file)))
+
 ###########################################
 # Get experiments from command line
 ###########################################
@@ -153,18 +168,30 @@ for exp in exps:
                 print(p_sfile)
                 r = {}
                 r2 = {}
+                node_results = {}
+                for n in range(ntotal):
+                    ofile = "{}{}_{}*{}.out".format(result_dir,n,output_f,time)
+                    res_list = sorted(glob.glob(ofile),key=os.path.getmtime,reverse=True)
+                    if res_list:
+                        assert time == re.search("(\d{8}-\d{6})",res_list[0]).group(0)
+                        node_results[n] = res_list[0]
+                    elif n < nnodes:
+                        raise RuntimeError(
+                            "Missing result for DB node {} at {} ({})".format(
+                                n, time, output_f
+                            )
+                        )
+                for n in range(nnodes):
+                    require_db_pass(node_results[n], n)
                 if clear or not os.path.isfile(p_sfile) or not os.path.isfile(p_cfile):
                     for n in range(ntotal):
-                        ofile = "{}{}_{}*{}.out".format(result_dir,n,output_f,time)
-                        res_list = sorted(glob.glob(ofile),key=os.path.getmtime,reverse=True)
-                        if res_list:
-                            assert time == re.search("(\d{8}-\d{6})",res_list[0]).group(0)
-                            print(res_list[0])
+                        if n in node_results:
+                            print(node_results[n])
                             if n < nnodes:
-                                r = get_summary(res_list[0],r)
+                                r = get_summary(node_results[n],r)
                             elif n >= nnodes and n < nnodes + nclients:
                                 print(cc,n)
-                                r2 = get_summary(res_list[0],r2)
+                                r2 = get_summary(node_results[n],r2)
                     get_lstats(r)
                     get_lstats(r2)
                     with open(p_sfile,'w') as f:

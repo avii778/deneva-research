@@ -63,6 +63,7 @@ public:
   void release_transaction_manager(uint64_t thd_id, uint64_t txn_id, uint64_t batch_id);
   void update_min_ts(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id,uint64_t ts);
   uint64_t get_min_ts(uint64_t thd_id); 
+  uint64_t active_count();
 
 private:
   bool is_matching_txn_node(txn_node_t t_node, uint64_t txn_id, uint64_t batch_id);

@@ -15,6 +15,7 @@
 */
 
 #include "global.h"
+#include "wait_die_debug.h"
 #include "ycsb.h"
 #include "tpcc.h"
 #include "pps.h"
@@ -316,6 +317,9 @@ int main(int argc, char* argv[])
 		pthread_join(p_thds[i], NULL);
 
 	endtime = get_server_clock();
+#if CC_ALG == WAIT_DIE
+  print_wait_die_debug_counters(txn_table.active_count());
+#endif
 	
   fflush(stdout);
   printf("PASS! SimTime = %f\n", (float)(endtime - starttime) / BILLION);

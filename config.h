@@ -151,7 +151,7 @@
 #define LOG_COMMAND false
 #define LOG_REDO false
 #define LOG_LIFE false
-#define LIFE_DEBUG_COUNTERS true
+#define LIFE_DEBUG_COUNTERS false
 #define PPS_STATE_DEBUG_COUNTERS true
 #define LIFE_LOG_FILE "life_timing.log"
 #define LOGGING false

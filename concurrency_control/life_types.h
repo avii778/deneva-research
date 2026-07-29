@@ -14,6 +14,8 @@ class Row_life;
 struct LifeProcessId {
   LifeProcessId() : node_id(0), worker_id(0) {}
   uint32_t node_id;
+  // Stable process/transaction identity component assigned at admission.
+  // It is not the worker currently executing a migrated continuation.
   uint64_t worker_id;
 };
 

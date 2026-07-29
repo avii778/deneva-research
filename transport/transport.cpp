@@ -21,6 +21,7 @@
 #include "tpcc_query.h"
 #include "query.h"
 #include "message.h"
+#include "wait_die_debug.h"
 
 
 #define MAX_IFADDR_LEN 20 // max # of characters in name of address
@@ -132,11 +133,7 @@ Socket * Transport::bind(uint64_t port_id) {
 #if TPORT_TYPE == IPC
   sprintf(socket_name,"ipc://node_%ld.ipc",port_id);
 #else
-#if ENVIRONMENT_EC2
-  sprintf(socket_name,"tcp://eth0:%ld",port_id);
-#else
   sprintf(socket_name,"tcp://%s:%ld",ifaddr[g_node_id],port_id);
-#endif
 #endif
   printf("Sock Binding to %s %d\n",socket_name,g_node_id);
   int rc = socket->sock.bind(socket_name);
@@ -153,11 +150,7 @@ Socket * Transport::connect(uint64_t dest_id,uint64_t port_id) {
 #if TPORT_TYPE == IPC
   sprintf(socket_name,"ipc://node_%ld.ipc",port_id);
 #else
-#if ENVIRONMENT_EC2
-  sprintf(socket_name,"tcp://eth0;%s:%ld",ifaddr[dest_id],port_id);
-#else
   sprintf(socket_name,"tcp://%s;%s:%ld",ifaddr[g_node_id],ifaddr[dest_id],port_id);
-#endif
 #endif
   printf("Sock Connecting to %s %d -> %ld\n",socket_name,g_node_id,dest_id);
   int rc = socket->sock.connect(socket_name);
@@ -233,6 +226,10 @@ void Transport::send_msg(uint64_t send_thread_id, uint64_t dest_node_id, void * 
   int rc = -1;
   while(rc < 0 && (!simulation->is_setup_done() || (simulation->is_setup_done() && !simulation->is_done()))) {
     rc= socket->sock.send(&buf,NN_MSG,NN_DONTWAIT);
+#if CC_ALG == WAIT_DIE
+    if (rc < 0)
+      wait_die_debug_increment(&wait_die_debug.tcp_send_eagain);
+#endif
   }
   //nn_freemsg(sbuf);
   DEBUG("%ld Batch of %d bytes sent to node %ld\n",send_thread_id,size,dest_node_id);

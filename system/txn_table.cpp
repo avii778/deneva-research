@@ -27,6 +27,7 @@
 #include "pool.h"
 #include "work_queue.h"
 #include "message.h"
+#include "wait_die_debug.h"
 
 #if CC_ALG == LIFE && LIFE_DEBUG_COUNTERS
 extern volatile uint64_t life_dbg_execute_sent;
@@ -198,6 +199,9 @@ TxnManager * TxnTable::get_transaction_manager(uint64_t thd_id, uint64_t txn_id,
 }
 
 void TxnTable::restart_txn(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id){
+#if CC_ALG == WAIT_DIE
+  wait_die_debug_increment(&wait_die_debug.restart_requested);
+#endif
   uint64_t pool_id = txn_id % pool_size;
   // set modify bit for this pool: txn_id % pool_size
   while(!ATOM_CAS(pool[pool_id]->modify,false,true)) { };
@@ -213,6 +217,9 @@ void TxnTable::restart_txn(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id){
         work_queue.enqueue(thd_id,Message::create_message(t_node->txn_man,RTXN_CONT),false);
       else
         work_queue.enqueue(thd_id,Message::create_message(t_node->txn_man,RQRY_CONT),false);
+#if CC_ALG == WAIT_DIE
+      wait_die_debug_increment(&wait_die_debug.restart_enqueued);
+#endif
 #endif
       break;
     }
@@ -222,6 +229,17 @@ void TxnTable::restart_txn(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id){
   // unset modify bit for this pool: txn_id % pool_size
   ATOM_CAS(pool[pool_id]->modify,true,false);
 
+#if CC_ALG == WAIT_DIE
+  if (t_node == NULL)
+    wait_die_debug_increment(&wait_die_debug.restart_missing);
+#endif
+}
+
+uint64_t TxnTable::active_count() {
+  uint64_t count = 0;
+  for (uint64_t i = 0; i < pool_size; ++i)
+    count += pool[i]->cnt;
+  return count;
 }
 
 void TxnTable::release_transaction_manager(uint64_t thd_id, uint64_t txn_id, uint64_t batch_id){

@@ -17,6 +17,7 @@
 #include "row.h"
 #include "txn.h"
 #include "row_lock.h"
+#include "wait_die_debug.h"
 #include "mem_alloc.h"
 #include "manager.h"
 #include "helper.h"
@@ -109,6 +110,9 @@ RC Row_lock::lock_get(lock_t type, TxnManager * txn, uint64_t* &txnids, int &txn
                   //printf("abort %ld %ld -- %ld -- %f\n",txn->get_txn_id(),en->txn->get_txn_id(),_row->get_primary_key(),(float)(txn->get_timestamp() - en->txn->get_timestamp()) / BILLION);
                   INC_STATS(txn->get_thd_id(),twopl_diff_time,(txn->get_timestamp() - en->txn->get_timestamp()));
                   canwait = false;
+#if CC_ALG == WAIT_DIE
+                  wait_die_debug_increment(&wait_die_debug.conflict_abort);
+#endif
                   break;
                 }
                 en = en->next;
@@ -141,6 +145,12 @@ RC Row_lock::lock_get(lock_t type, TxnManager * txn, uint64_t* &txnids, int &txn
                 }
 
                 waiter_cnt ++;
+#if CC_ALG == WAIT_DIE
+                wait_die_debug_increment(&wait_die_debug.wait_enqueued);
+                const uint64_t current =
+                    __sync_add_and_fetch(&wait_die_debug.wait_current, 1);
+                wait_die_debug_update_max(&wait_die_debug.wait_max, current);
+#endif
                 DEBUG("lk_wait (%ld,%ld): owners %d, own type %d, req type %d, key %ld %lx\n",txn->get_txn_id(),txn->get_batch_id(),owner_cnt,lock_type,type,_row->get_primary_key(),(uint64_t)_row);
                 //txn->twopl_wait_start = get_sys_clock();
                 rc = WAIT;
@@ -300,6 +310,10 @@ RC Row_lock::lock_release(TxnManager * txn) {
               waiters_tail = en->prev;
           return_entry(en);
           waiter_cnt --;
+#if CC_ALG == WAIT_DIE
+          wait_die_debug_increment(&wait_die_debug.wait_removed);
+          __sync_sub_and_fetch(&wait_die_debug.wait_current, 1);
+#endif
       }
 #endif
 
@@ -333,6 +347,13 @@ RC Row_lock::lock_release(TxnManager * txn) {
 #endif 
           owner_cnt ++;
           waiter_cnt --;
+#if CC_ALG == WAIT_DIE
+          wait_die_debug_increment(&wait_die_debug.wait_promoted);
+          __sync_sub_and_fetch(&wait_die_debug.wait_current, 1);
+          wait_die_debug_add(&wait_die_debug.wait_promote_ns, timespan);
+          wait_die_debug_update_max(&wait_die_debug.wait_promote_max_ns,
+                                    timespan);
+#endif
           if(entry->txn->get_timestamp() > max_owner_ts) {
               max_owner_ts = entry->txn->get_timestamp();
           }
