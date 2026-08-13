@@ -27,7 +27,6 @@
 #include "pool.h"
 #include "work_queue.h"
 #include "message.h"
-#include "wait_die_debug.h"
 
 #if CC_ALG == LIFE && LIFE_DEBUG_COUNTERS
 extern volatile uint64_t life_dbg_execute_sent;
@@ -63,7 +62,25 @@ void TxnTable::init() {
     pool[i]->modify = false;
     pool[i]->min_ts = UINT64_MAX;
   }
+#if CC_ALG == LIFE
+  life_names.init(g_thread_cnt);
+#endif
 }
+
+#if CC_ALG == LIFE
+void TxnTable::assign_life_name(TxnManager *txn_man) {
+  assert(txn_man != NULL);
+  assert(IS_LOCAL(txn_man->get_txn_id()));
+  assert(!txn_man->has_life_name());
+  const uint64_t originating_worker =
+      (txn_man->get_txn_id() / g_node_cnt) % g_thread_cnt;
+  const uint64_t name =
+      life_names.acquire(originating_worker, txn_man->get_txn_id());
+  assert(name != UINT64_MAX);
+  txn_man->assign_life_name(originating_worker, name);
+}
+
+#endif
 
 void TxnTable::dump() {
 #if CC_ALG == LIFE && LIFE_DEBUG_COUNTERS
@@ -199,9 +216,6 @@ TxnManager * TxnTable::get_transaction_manager(uint64_t thd_id, uint64_t txn_id,
 }
 
 void TxnTable::restart_txn(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id){
-#if CC_ALG == WAIT_DIE
-  wait_die_debug_increment(&wait_die_debug.restart_requested);
-#endif
   uint64_t pool_id = txn_id % pool_size;
   // set modify bit for this pool: txn_id % pool_size
   while(!ATOM_CAS(pool[pool_id]->modify,false,true)) { };
@@ -217,9 +231,6 @@ void TxnTable::restart_txn(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id){
         work_queue.enqueue(thd_id,Message::create_message(t_node->txn_man,RTXN_CONT),false);
       else
         work_queue.enqueue(thd_id,Message::create_message(t_node->txn_man,RQRY_CONT),false);
-#if CC_ALG == WAIT_DIE
-      wait_die_debug_increment(&wait_die_debug.restart_enqueued);
-#endif
 #endif
       break;
     }
@@ -229,10 +240,6 @@ void TxnTable::restart_txn(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id){
   // unset modify bit for this pool: txn_id % pool_size
   ATOM_CAS(pool[pool_id]->modify,true,false);
 
-#if CC_ALG == WAIT_DIE
-  if (t_node == NULL)
-    wait_die_debug_increment(&wait_die_debug.restart_missing);
-#endif
 }
 
 uint64_t TxnTable::active_count() {
@@ -291,6 +298,18 @@ void TxnTable::release_transaction_manager(uint64_t thd_id, uint64_t txn_id, uin
   prof_starttime = get_sys_clock();
   assert(t_node);
   assert(t_node->txn_man);
+
+#if CC_ALG == LIFE
+  if (IS_LOCAL(txn_id) && t_node->txn_man->has_life_name()) {
+    const uint64_t originating_worker =
+        t_node->txn_man->get_life_originating_worker();
+    const bool released = life_names.release(
+        originating_worker, t_node->txn_man->get_life_name(), txn_id);
+    assert(released);
+    if (released)
+      t_node->txn_man->clear_life_name();
+  }
+#endif
 
   txn_man_pool.put(thd_id,t_node->txn_man);
     

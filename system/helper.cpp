@@ -106,29 +106,19 @@ void init_client_globals() {
 /****************************************************/
 
 uint64_t get_wall_clock() {
-	timespec * tp = new timespec;
-  clock_gettime(CLOCK_REALTIME, tp);
-  uint64_t ret = tp->tv_sec * 1000000000 + tp->tv_nsec;
-  delete tp;
-  return ret;
+	timespec tp;
+  clock_gettime(CLOCK_REALTIME, &tp);
+  return static_cast<uint64_t>(tp.tv_sec) * 1000000000UL + tp.tv_nsec;
 }
 
 uint64_t get_server_clock() {
-#if defined(__i386__)
-    uint64_t ret;
-    __asm__ __volatile__("rdtsc" : "=A" (ret));
-#elif defined(__x86_64__)
-    unsigned hi, lo;
-    __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
-    uint64_t ret = ( (uint64_t)lo)|( ((uint64_t)hi)<<32 );
-	ret = (uint64_t) ((double)ret / CPU_FREQ);
-#else 
-	timespec * tp = new timespec;
-    clock_gettime(CLOCK_REALTIME, tp);
-    uint64_t ret = tp->tv_sec * 1000000000 + tp->tv_nsec;
-		delete tp;
-#endif
-    return ret;
+	// RDTSC only measures nanoseconds after division by the machine's actual
+	// invariant-TSC frequency.  The old hard-coded CPU_FREQ silently scaled all
+	// latency values on other processors.  REALTIME also retains the shared
+	// clock domain required by timestamps carried between experiment hosts.
+	timespec tp;
+	clock_gettime(CLOCK_REALTIME, &tp);
+	return static_cast<uint64_t>(tp.tv_sec) * 1000000000UL + tp.tv_nsec;
 }
 
 uint64_t get_sys_clock() {
@@ -145,4 +135,3 @@ uint64_t myrand::next() {
 	seed = (seed * 1103515247UL + 12345UL) % (1UL<<63);
 	return (seed / 65537) % RAND_MAX;
 }
-

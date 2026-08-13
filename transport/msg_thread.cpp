@@ -24,7 +24,6 @@
 #include "tpcc_query.h"
 #include "pool.h"
 #include "global.h"
-#include "wait_die_debug.h"
 
 void MessageThread::init(uint64_t thd_id) { 
   buffer_cnt = g_total_node_cnt;
@@ -89,9 +88,6 @@ void MessageThread::run() {
     return;
   }
   assert(msg);
-#if CC_ALG == WAIT_DIE
-  wait_die_debug_increment(&wait_die_debug.messages_output[msg->rtype]);
-#endif
   assert(dest_node_id < g_total_node_cnt);
   assert(dest_node_id != g_node_id);
 

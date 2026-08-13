@@ -344,18 +344,174 @@ void test_rollback_runs_inline_help() {
 
   life_row.rollback(prepared_owner);
 
+  // PHeap retains the aborted owner. The inline contender cannot pass it;
+  // the next caller is directed to retry/help that higher-priority attempt.
+  const LifeTxnDescriptor later = descriptor(3, 30, 1, YCSB_0, 0);
+  const LifeExecuteResult help = life_row.execute(later, contender_read);
+  assert(help.code == LifeResultCode::Help);
+#if life_fairness
+  assert(help.transaction == prepared_owner);
+#else
   LifeHistoryEntry contender_entry;
   contender_entry.operation = contender_read;
   contender_entry.response = first.response;
   LifeTxnDescriptor helped = contender;
   helped.history.push_back(contender_entry);
-
-  const LifeTxnDescriptor later = descriptor(3, 30, 1, YCSB_0, 0);
-  const LifeExecuteResult help = life_row.execute(later, contender_read);
-  assert(help.code == LifeResultCode::Help);
   assert(help.transaction == helped);
+#endif
 
   std::free(row.data);
+}
+
+void test_priority_heap_orders_all_uncommitted_transactions() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+  row_t row;
+  row.init(&table, 4, 0);
+  row.set_primary_key(7);
+  const uint64_t initial_value = 42;
+  std::memcpy(row.data, &initial_value, sizeof(initial_value));
+  Row_life life_row;
+  life_row.init(&row);
+  const LifeOperation read = operation(row, LifeOperationKind::ReadField, 0);
+
+  LifeTxnDescriptor lower = descriptor(2, 20, 1, YCSB_0, 0);
+  LifeExecuteResult lower_result = life_row.execute(lower, read);
+  assert(lower_result.code == LifeResultCode::Success);
+  LifeHistoryEntry lower_entry;
+  lower_entry.operation = read;
+  lower_entry.response = lower_result.response;
+  lower.history.push_back(lower_entry);
+
+  // A higher-priority transaction may replace A, but the aborted former
+  // holder remains in PHeap and must be helped after the new top is removed.
+  LifeTxnDescriptor higher = descriptor(1, 10, 1, YCSB_0, 0);
+  LifeExecuteResult higher_result = life_row.execute(higher, read);
+  assert(higher_result.code == LifeResultCode::Success);
+  LifeHistoryEntry higher_entry;
+  higher_entry.operation = read;
+  higher_entry.response = higher_result.response;
+  higher.history.push_back(higher_entry);
+  assert(life_row.prepare(higher).code == LifeResultCode::Success);
+
+  const LifeTxnDescriptor contender = descriptor(3, 30, 1, YCSB_0, 0);
+  LifeExecuteResult first_help = life_row.execute(contender, read);
+  assert(first_help.code == LifeResultCode::Finalize);
+  assert(first_help.transaction == higher);
+
+  life_row.commit(higher);
+  LifeExecuteResult second_help = life_row.execute(contender, read);
+  assert(second_help.code == LifeResultCode::Help);
+  assert(second_help.transaction == lower);
+
+  std::free(row.data);
+  delete[] schema._columns;
+}
+
+void test_prepared_holder_blocks_higher_priority_contender() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+  row_t row;
+  row.init(&table, 4, 0);
+  row.set_primary_key(7);
+  const uint64_t initial_value = 42;
+  std::memcpy(row.data, &initial_value, sizeof(initial_value));
+  Row_life life_row;
+  life_row.init(&row);
+  const LifeOperation read = operation(row, LifeOperationKind::ReadField, 0);
+
+  LifeTxnDescriptor prepared = descriptor(2, 20, 1, YCSB_0, 0);
+  LifeExecuteResult executed = life_row.execute(prepared, read);
+  LifeHistoryEntry entry;
+  entry.operation = read;
+  entry.response = executed.response;
+  prepared.history.push_back(entry);
+  assert(life_row.prepare(prepared).code == LifeResultCode::Success);
+
+  const LifeTxnDescriptor higher = descriptor(1, 10, 1, YCSB_0, 0);
+  const LifeExecuteResult result = life_row.execute(higher, read);
+  assert(result.code == LifeResultCode::Finalize);
+  assert(result.transaction == prepared);
+
+  std::free(row.data);
+  delete[] schema._columns;
+}
+
+void test_higher_attempt_reuses_heap_node_and_rejects_stale_commit() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+  row_t row;
+  row.init(&table, 4, 0);
+  row.set_primary_key(7);
+  const uint64_t initial_value = 42;
+  std::memcpy(row.data, &initial_value, sizeof(initial_value));
+  Row_life life_row;
+  life_row.init(&row);
+  const LifeOperation read = operation(row, LifeOperationKind::ReadField, 0);
+
+  LifeTxnDescriptor first = descriptor(1, 10, 1, YCSB_0, 0);
+  LifeExecuteResult first_result = life_row.execute(first, read);
+  assert(first_result.code == LifeResultCode::Success);
+  LifeHistoryEntry first_entry;
+  first_entry.operation = read;
+  first_entry.response = first_result.response;
+  first.history.push_back(first_entry);
+  life_row.rollback(first);
+
+  LifeTxnDescriptor retry = descriptor(1, 10, 2, YCSB_0, 0);
+  LifeExecuteResult retry_result = life_row.execute(retry, read);
+  assert(retry_result.code == LifeResultCode::Success);
+  LifeHistoryEntry retry_entry;
+  retry_entry.operation = read;
+  retry_entry.response = retry_result.response;
+  retry.history.push_back(retry_entry);
+
+  const LifeTxnDescriptor contender = descriptor(2, 20, 1, YCSB_0, 0);
+  LifeExecuteResult before_stale_commit = life_row.execute(contender, read);
+  assert(before_stale_commit.code == LifeResultCode::Help);
+  assert(before_stale_commit.transaction == retry);
+
+  life_row.commit(first);
+  LifeExecuteResult after_stale_commit = life_row.execute(contender, read);
+  assert(after_stale_commit.code == LifeResultCode::Help);
+  assert(after_stale_commit.transaction == retry);
+
+  assert(life_row.prepare(retry).code == LifeResultCode::Success);
+  life_row.commit(retry);
+  assert(life_row.execute(contender, read).code == LifeResultCode::Success);
+
+  std::free(row.data);
+  delete[] schema._columns;
 }
 
 void test_prepare_retry_and_commit_publish() {
@@ -423,6 +579,70 @@ void test_prepare_retry_and_commit_publish() {
   assert(retry.code == LifeResultCode::Committed);
 
   std::free(row.data);
+}
+
+void test_recycled_process_name_rejects_stale_transaction() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+  row_t row;
+  row.init(&table, 4, 0);
+  row.set_primary_key(7);
+  const uint64_t initial_value = 42;
+  std::memcpy(row.data, &initial_value, sizeof(initial_value));
+
+  Row_life life_row;
+  life_row.init(&row);
+  LifeOperation write = operation(row, LifeOperationKind::WriteField, 84);
+
+  LifeTxnDescriptor old_tx = descriptor(1, 10, 1, YCSB_0, 0);
+  LifeExecuteResult old_result = life_row.execute(old_tx, write);
+  assert(old_result.code == LifeResultCode::Success);
+  LifeHistoryEntry old_entry;
+  old_entry.operation = write;
+  old_entry.response = old_result.response;
+  old_tx.history.push_back(old_entry);
+  assert(life_row.prepare(old_tx).code == LifeResultCode::Success);
+  life_row.commit(old_tx);
+
+  // The newer transaction deliberately has the same pid: its virtual name
+  // has been recycled after the old transaction terminated.
+  LifeTxnDescriptor new_tx = descriptor(1, 20, 1, YCSB_0, 0);
+  LifeOperation new_write = operation(row, LifeOperationKind::WriteField, 99);
+  LifeExecuteResult new_result = life_row.execute(new_tx, new_write);
+  assert(new_result.code == LifeResultCode::Success);
+
+  // A delayed old commit must not publish its write over the new owner.
+  life_row.commit(old_tx);
+  uint64_t value = 0;
+  std::memcpy(&value, row.data, sizeof(value));
+  assert(value == 84);
+
+  LifeHistoryEntry new_entry;
+  new_entry.operation = new_write;
+  new_entry.response = new_result.response;
+  new_tx.history.push_back(new_entry);
+  assert(life_row.prepare(new_tx).code == LifeResultCode::Success);
+  life_row.commit(new_tx);
+  std::memcpy(&value, row.data, sizeof(value));
+  assert(value == 99);
+
+  assert(life_row.execute(old_tx, write).code == LifeResultCode::Committed);
+  life_row.rollback(old_tx);
+  std::memcpy(&value, row.data, sizeof(value));
+  assert(value == 99);
+
+  std::free(row.data);
+  delete[] schema._columns;
 }
 
 void test_eight_byte_operation_preserves_rest_of_ycsb_field() {
@@ -513,9 +733,15 @@ void test_shared_prepare_owns_descriptor_and_read_commit_is_stable() {
   assert(frozen.use_count() == 2);
   std::vector<size_t> indices(1, 0);
   life_row.commit(frozen, indices);
+#if life_fairness
+  assert(frozen.use_count() == 1);
+  frozen.reset();
+  assert(retained.expired());
+#else
   assert(frozen.use_count() == 2);
   frozen.reset();
   assert(!retained.expired());
+#endif
 
   uint64_t value_after_read_commit = 0;
   std::memcpy(&value_after_read_commit, row.data,
@@ -525,6 +751,9 @@ void test_shared_prepare_owns_descriptor_and_read_commit_is_stable() {
   const LifeTxnDescriptor same_tx = descriptor(1, 10, 1, YCSB_0, 0);
   const LifeExecuteResult committed = life_row.execute(same_tx, read);
   assert(committed.code == LifeResultCode::Committed);
+#if life_fairness
+  assert(committed.transaction.history.empty());
+#endif
 
   const LifeTxnDescriptor replacement = descriptor(2, 11, 1, YCSB_0, 0);
   assert(life_row.execute(replacement, read).code == LifeResultCode::Success);
@@ -596,10 +825,19 @@ void test_prepared_rows_share_one_frozen_descriptor() {
   const LifeExecuteResult committed_first =
       first_life_row.execute(tx, first_read);
   assert(committed_first.code == LifeResultCode::Committed);
+#if life_fairness
+  assert(committed_first.transaction.history.empty());
+  assert(frozen.use_count() == 2);
+  second_life_row.commit(frozen, std::vector<size_t>(1, 1));
+  assert(frozen.use_count() == 1);
+  frozen.reset();
+  assert(retained.expired());
+#else
   assert(committed_first.transaction.history.size() == tx.history.size());
   second_life_row.commit(frozen, std::vector<size_t>(1, 1));
   assert(frozen.use_count() == 3);
   assert(!retained.expired());
+#endif
 
   std::free(first_row.data);
   std::free(second_row.data);
@@ -672,7 +910,13 @@ int main() {
 #endif
   test_execute_stale_history_refresh_and_help();
   test_rollback_runs_inline_help();
+#if life_fairness
+  test_priority_heap_orders_all_uncommitted_transactions();
+  test_prepared_holder_blocks_higher_priority_contender();
+  test_higher_attempt_reuses_heap_node_and_rejects_stale_commit();
+#endif
   test_prepare_retry_and_commit_publish();
+  test_recycled_process_name_rejects_stale_transaction();
   test_eight_byte_operation_preserves_rest_of_ycsb_field();
   test_shared_prepare_owns_descriptor_and_read_commit_is_stable();
   test_prepared_rows_share_one_frozen_descriptor();

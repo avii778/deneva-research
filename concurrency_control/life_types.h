@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -14,10 +15,33 @@ class Row_life;
 struct LifeProcessId {
   LifeProcessId() : node_id(0), worker_id(0) {}
   uint32_t node_id;
-  // Stable process/transaction identity component assigned at admission.
-  // It is not the worker currently executing a migrated continuation.
+  // Encodes an originating worker and a reusable virtual-process name. It is
+  // not necessarily the worker currently executing a migrated continuation.
   uint64_t worker_id;
 };
+
+inline bool life_encode_virtual_worker(uint64_t originating_worker,
+                                       uint64_t name,
+                                       uint64_t worker_count,
+                                       uint64_t &encoded) {
+  if (worker_count == 0 || originating_worker >= worker_count ||
+      name > (std::numeric_limits<uint64_t>::max() - originating_worker) /
+                 worker_count)
+    return false;
+  encoded = name * worker_count + originating_worker;
+  return true;
+}
+
+inline uint64_t life_originating_worker(uint64_t encoded,
+                                        uint64_t worker_count) {
+  assert(worker_count != 0);
+  return encoded % worker_count;
+}
+
+inline uint64_t life_process_name(uint64_t encoded, uint64_t worker_count) {
+  assert(worker_count != 0);
+  return encoded / worker_count;
+}
 
 inline bool operator==(const LifeProcessId &lhs, const LifeProcessId &rhs) {
   return lhs.node_id == rhs.node_id && lhs.worker_id == rhs.worker_id;

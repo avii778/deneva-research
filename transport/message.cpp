@@ -865,7 +865,10 @@ void YCSBClientQueryMessage::copy_from_query(BaseQuery * query) {
 */
   requests.copy(((YCSBQuery*)(query))->requests);
 #if WORKLOAD == YCSB && CC_ALG == CALVIN
-  recon = true;
+  // Database-wide pre-lock mode holds an exclusive token on every server, so
+  // the first sequenced attempt can safely read and write without a separate
+  // unlocked reconnaissance attempt.
+  recon = !CALVIN_PRE_LOCK;
   recon_records.clear();
 #endif
 }
@@ -1405,6 +1408,7 @@ void DoneMessage::copy_to_buf(char * buf) {
 uint64_t ForwardMessage::get_size() {
   uint64_t size = Message::mget_size();
   size += sizeof(RC);
+  size += sizeof(CALVIN_FORWARD_PHASE);
 #if WORKLOAD == TPCC
 	size += sizeof(uint64_t);
 #endif
@@ -1414,6 +1418,7 @@ uint64_t ForwardMessage::get_size() {
 void ForwardMessage::copy_from_txn(TxnManager * txn) {
   Message::mcopy_from_txn(txn);
   rc = txn->get_rc();
+  calvin_phase = CALVIN_FORWARD_READ_DONE;
 #if WORKLOAD == TPCC
   o_id = ((TPCCQuery*)txn->query)->o_id;
 #endif
@@ -1431,6 +1436,7 @@ void ForwardMessage::copy_from_buf(char * buf) {
   Message::mcopy_from_buf(buf);
   uint64_t ptr = Message::mget_size();
   COPY_VAL(rc,buf,ptr);
+  COPY_VAL(calvin_phase,buf,ptr);
 #if WORKLOAD == TPCC
   COPY_VAL(o_id,buf,ptr);
 #endif
@@ -1441,6 +1447,7 @@ void ForwardMessage::copy_to_buf(char * buf) {
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   COPY_BUF(buf,rc,ptr);
+  COPY_BUF(buf,calvin_phase,ptr);
 #if WORKLOAD == TPCC
   COPY_BUF(buf,o_id,ptr);
 #endif

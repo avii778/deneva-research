@@ -261,6 +261,8 @@ void Transaction::init() {
   life_pid.worker_id = 0;
   life_tid.time = 0;
   life_tid.attempt = 1;
+  life_name = UINT64_MAX;
+  life_name_leased = false;
   life_status = LifeTxnStatus::Aborted;
   life_history.reserve(g_req_per_query);
   life_objects.reserve(g_req_per_query);
@@ -340,6 +342,7 @@ void TxnManager::init(uint64_t thd_id, Workload *h_wl) {
 #if CC_ALG == CALVIN
   phase = CALVIN_RW_ANALYSIS;
   locking_done = false;
+  calvin_write_rsp_cnt = 0;
   calvin_locked_rows.init(MAX_ROW_PER_TXN);
 #endif
 
@@ -481,6 +484,7 @@ void TxnManager::reset() {
 #if CC_ALG == CALVIN
   phase = CALVIN_RW_ANALYSIS;
   locking_done = false;
+  calvin_write_rsp_cnt = 0;
   calvin_locked_rows.clear();
 #endif
 
@@ -720,9 +724,41 @@ void TxnManager::register_thread(Thread *h_thd) {
 void TxnManager::set_txn_id(txnid_t txn_id) {
   txn->txn_id = txn_id;
   txn->life_pid.node_id = GET_NODE_ID(txn_id);
-  txn->life_pid.worker_id = txn_id / g_node_cnt;
+  txn->life_pid.worker_id = UINT64_MAX;
   txn->life_tid.time = txn_id;
   txn->life_tid.attempt = 1;
+  txn->life_name = UINT64_MAX;
+  txn->life_name_leased = false;
+}
+
+void TxnManager::assign_life_name(uint64_t originating_worker,
+                                  uint64_t name) {
+  assert(CC_ALG == LIFE);
+  assert(!txn->life_name_leased);
+  uint64_t encoded_worker = UINT64_MAX;
+  const bool encoded = life_encode_virtual_worker(
+      originating_worker, name, g_thread_cnt, encoded_worker);
+  assert(encoded);
+  if (!encoded)
+    return;
+  txn->life_pid.node_id = GET_NODE_ID(txn->txn_id);
+  txn->life_pid.worker_id = encoded_worker;
+  txn->life_name = name;
+  txn->life_name_leased = true;
+}
+
+bool TxnManager::has_life_name() const { return txn->life_name_leased; }
+
+uint64_t TxnManager::get_life_name() const { return txn->life_name; }
+
+uint64_t TxnManager::get_life_originating_worker() const {
+  assert(txn->life_name_leased);
+  return life_originating_worker(txn->life_pid.worker_id, g_thread_cnt);
+}
+
+void TxnManager::clear_life_name() {
+  txn->life_name = UINT64_MAX;
+  txn->life_name_leased = false;
 }
 
 txnid_t TxnManager::get_txn_id() { return txn->txn_id; }
@@ -1060,6 +1096,30 @@ RC TxnManager::send_remote_reads() {
   return RCOK;
 }
 
+RC TxnManager::send_calvin_write_done() {
+  assert(CC_ALG == CALVIN);
+  for (uint64_t i = 0; i < g_node_cnt; ++i) {
+    if (i == g_node_id)
+      continue;
+    ForwardMessage *msg = static_cast<ForwardMessage *>(
+        Message::create_message(this, RFWD));
+    msg->calvin_phase = CALVIN_FORWARD_WRITE_DONE;
+    msg_queue.enqueue(get_thd_id(), msg, i);
+  }
+  return RCOK;
+}
+
+int TxnManager::received_calvin_response(CALVIN_FORWARD_PHASE response_phase,
+                                         RC rc) {
+  assert(CC_ALG == CALVIN);
+  assert(txn->rc == RCOK || txn->rc == Abort);
+  if (txn->rc == RCOK)
+    txn->rc = rc;
+  if (response_phase == CALVIN_FORWARD_WRITE_DONE)
+    return ++calvin_write_rsp_cnt;
+  return ++rsp_cnt;
+}
+
 bool TxnManager::calvin_exec_phase_done() {
   bool ready = (phase == CALVIN_DONE) && (get_rc() != WAIT);
   if (ready) {
@@ -1075,6 +1135,11 @@ bool TxnManager::calvin_collect_phase_done() {
     DEBUG("(%ld,%ld) calvin collect phase done!\n", txn->txn_id, txn->batch_id);
   }
   return ready;
+}
+
+bool TxnManager::calvin_write_collect_phase_done() {
+  return phase == CALVIN_COLLECT_WR &&
+         calvin_write_rsp_cnt == calvin_expected_rsp_cnt;
 }
 
 void TxnManager::release_locks(RC rc) {

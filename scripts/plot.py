@@ -22,6 +22,13 @@ def default_result_dir():
             return os.path.abspath(candidate) + os.sep
     return os.path.abspath(os.path.join(SCRIPT_DIR, "..", "results")) + os.sep
 
+def normalize_result_dir(path):
+    """Return an absolute results directory with a trailing separator."""
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(path):
+        raise ValueError("Results directory does not exist: {}".format(path))
+    return path + os.sep
+
 def require_db_pass(result_file, node):
     passed = False
     with open(result_file, "r") as f:
@@ -53,12 +60,16 @@ plot = True;
 clear = False;
 _timedate = [];
 exps = []
-res_dir = False
 for arg in sys.argv[1:]:
     if last_arg == "-n":
         exp_cnt = int(arg)
     elif last_arg == "-tdate":
         _timedate.append(arg)
+    elif last_arg == "-r" or last_arg == "--results-dir":
+        try:
+            result_dir = normalize_result_dir(arg)
+        except ValueError as exc:
+            sys.exit(str(exc))
     elif arg == "-clear":
         clear = True
     elif arg == "-s":
@@ -69,21 +80,24 @@ for arg in sys.argv[1:]:
         plot = False
     elif arg == "-u":
         use_tmp = True
-    elif arg == "-r":
-        res_dir = True
-    elif arg == "-n" or arg == "-tdate":
+    elif arg == "-n" or arg == "-tdate" or arg == "-r" or arg == "--results-dir":
         blah = True
     elif arg == "-d":
         drop = True
     elif arg == "-help" or arg == "-h":
-        sys.exit("Usage: {} [-np no plot] [-clear clear all pickle files] [-tdate [date-time]] ".format(sys.argv[0]))
+        sys.exit(
+            "Usage: {} [-r RESULTS_DIR] [-np no plot] "
+            "[-clear clear all pickle files] [-tdate [date-time]] EXPERIMENT ..."
+            .format(sys.argv[0])
+        )
     else:
         exps.append(arg)
     last_arg = arg
 
+if last_arg == "-r" or last_arg == "--results-dir":
+    sys.exit("{} requires a results directory".format(last_arg))
+
 test_dir = ""
-if res_dir:
-    result_dir = default_result_dir()
 
 
 

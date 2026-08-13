@@ -5,13 +5,17 @@ def plot_all():
     return 0
 
 def _ycsb_scaling_dimension_plot(summary,summary_cl,x_name,fixed_name,
-                                 xlab,name_suffix,logscalex=False):
+                                 xlab,name_suffix,logscalex=False,
+                                 experiment_generator=None,
+                                 x_divisor=None):
     """Plot one YCSB scaling dimension while holding the other constant."""
     from experiments import ycsb_scaling, apply_algo_thread_counts
     from helper import plot_prep
     from plot_helper import tput, latency, abort_rate, time_breakdown_line
 
-    nfmt,nexp = apply_algo_thread_counts(*ycsb_scaling())
+    if experiment_generator is None:
+        experiment_generator = ycsb_scaling
+    nfmt,nexp = apply_algo_thread_counts(*experiment_generator())
     v_name = "CC_ALG"
     fixed_vals = sorted(set(row[nfmt.index(fixed_name)] for row in nexp))
 
@@ -30,6 +34,7 @@ def _ycsb_scaling_dimension_plot(summary,summary_cl,x_name,fixed_name,
             "xlab": xlab,
             "new_cfgs": lst,
             "logscalex": logscalex,
+            "x_divisor": fixed_val if x_divisor == fixed_name else 1,
         }
         tput(x_vals,v_vals,summary,summary_cl,
              name="tput_ycsb_scaling_{}_{}".format(name_suffix,fixed_label),**common)
@@ -53,9 +58,147 @@ def ycsb_scaling_nodes_plot(summary,summary_cl):
         logscalex=True
     )
 
+def ycsb_scaling_uniform_plot(summary,summary_cl):
+    """Plot uniform-distribution results by server count."""
+    from experiments import ycsb_scaling_uniform
+    _ycsb_scaling_dimension_plot(
+        summary,summary_cl,"NODE_CNT","ZIPF_THETA","Server Count","nodes_skew",
+        logscalex=True,experiment_generator=ycsb_scaling_uniform
+    )
+
+def ycsb_scaling_life_fairness_comparison_plot(summary,summary_cl):
+    """Compare LIFE throughput and latency with fairness on and off."""
+    from experiments import (ycsb_scaling_life_fairness_comparison,
+                             apply_algo_thread_counts)
+    from helper import plot_prep
+    from plot_helper import tput, latency, abort_rate, time_breakdown_line
+
+    nfmt,nexp = apply_algo_thread_counts(
+        *ycsb_scaling_life_fairness_comparison())
+    x_name = "NODE_CNT"
+    v_name = "life_fairness"
+    x_vals,v_vals,fmt,exp,lst = plot_prep(
+        nexp,nfmt,x_name,v_name,constants={})
+    common = {
+        "cfg_fmt": fmt,
+        "cfg": list(exp),
+        "xname": x_name,
+        "vname": v_name,
+        "title": "LIFE fairness comparison",
+        "xlab": "Server Count",
+        "new_cfgs": lst,
+        "logscalex": len(x_vals) > 1,
+    }
+    tput(x_vals,v_vals,summary,summary_cl,
+         name="tput_ycsb_life_fairness",**common)
+    latency(x_vals,v_vals,summary,summary_cl,
+            name="latency_ycsb_life_fairness",**common)
+    abort_rate(x_vals,v_vals,summary,summary_cl,
+               name="aborts_ycsb_life_fairness",**common)
+    time_breakdown_line(x_vals,v_vals,summary,
+                        name="time_break_line_ycsb_life_fairness",**common)
+
+def ycsb_scaling_calvin_prelock_plot(summary,summary_cl):
+    """Plot Calvin pre-lock results by server count."""
+    from experiments import ycsb_scaling_calvin_prelock
+    _ycsb_scaling_dimension_plot(
+        summary,summary_cl,"NODE_CNT","ZIPF_THETA","Server Count",
+        "calvin_prelock_nodes_skew",logscalex=True,
+        experiment_generator=ycsb_scaling_calvin_prelock
+    )
+
+def ycsb_scaling_table_size_plot(summary,summary_cl):
+    """Plot YCSB performance by per-node table size for each server count."""
+    _ycsb_scaling_dimension_plot(
+        summary,summary_cl,"SYNTH_TABLE_SIZE","NODE_CNT","Table Size per Node",
+        "table_size_nodes",logscalex=True,x_divisor="NODE_CNT"
+    )
+
+def ycsb_ppt_plot(summary,summary_cl):
+    """Plot throughput against partitions per transaction for each algorithm."""
+    from experiments import ycsb_scaling, apply_algo_thread_counts
+    from helper import plot_prep
+    from plot_helper import tput
+
+    nfmt,nexp = apply_algo_thread_counts(*ycsb_scaling())
+    x_name = "PART_PER_TXN"
+    v_name = "CC_ALG"
+    x_vals,v_vals,fmt,exp,lst = plot_prep(nexp,nfmt,x_name,v_name,constants={})
+    tput(
+        x_vals,v_vals,summary,summary_cl,
+        cfg_fmt=fmt,
+        cfg=list(exp),
+        xname=x_name,
+        vname=v_name,
+        title="",
+        name="tput_ycsb_ppt",
+        xlab="Partitions per Transaction",
+        new_cfgs=lst,
+    )
+
+def ycsb_scaling_inflight_plot(summary,summary_cl):
+    """Plot YCSB performance while varying the transaction in-flight limit."""
+    from experiments import ycsb_scaling, apply_algo_thread_counts
+    from helper import plot_prep
+    from plot_helper import tput, latency, abort_rate, time_breakdown_line
+
+    nfmt,nexp = apply_algo_thread_counts(*ycsb_scaling())
+    x_name = "MAX_TXN_IN_FLIGHT"
+    v_name = "CC_ALG"
+    x_vals,v_vals,fmt,exp,lst = plot_prep(
+        nexp,nfmt,x_name,v_name,constants={}
+    )
+    common = {
+        "cfg_fmt": fmt,
+        "cfg": list(exp),
+        "xname": x_name,
+        "vname": v_name,
+        "title": "",
+        "xlab": "Maximum Transactions in Flight",
+        "new_cfgs": lst,
+    }
+    tput(x_vals,v_vals,summary,summary_cl,
+         name="tput_ycsb_scaling_inflight",**common)
+    latency(x_vals,v_vals,summary,summary_cl,
+            name="latency_ycsb_scaling_inflight",**common)
+    abort_rate(x_vals,v_vals,summary,summary_cl,
+               name="aborts_ycsb_scaling_inflight",**common)
+    time_breakdown_line(x_vals,v_vals,summary,
+                        name="time_break_line_ycsb_scaling_inflight",**common)
+
+def ycsb_scaling_req_plot(summary,summary_cl):
+    """Plot YCSB performance as the number of requests per query increases."""
+    from experiments import ycsb_scaling_req, apply_algo_thread_counts
+    from helper import plot_prep
+    from plot_helper import tput, latency, abort_rate, time_breakdown_line
+
+    nfmt,nexp = apply_algo_thread_counts(*ycsb_scaling_req())
+    x_name = "REQ_PER_QUERY"
+    v_name = "CC_ALG"
+    x_vals,v_vals,fmt,exp,lst = plot_prep(
+        nexp,nfmt,x_name,v_name,constants={}
+    )
+    common = {
+        "cfg_fmt": fmt,
+        "cfg": list(exp),
+        "xname": x_name,
+        "vname": v_name,
+        "title": "",
+        "xlab": "Requests per Transaction",
+        "new_cfgs": lst,
+    }
+    tput(x_vals,v_vals,summary,summary_cl,
+         name="tput_ycsb_scaling_req",**common)
+    latency(x_vals,v_vals,summary,summary_cl,
+            name="latency_ycsb_scaling_req",**common)
+    abort_rate(x_vals,v_vals,summary,summary_cl,
+               name="aborts_ycsb_scaling_req",**common)
+    time_breakdown_line(x_vals,v_vals,summary,
+                        name="time_break_line_ycsb_scaling_req",**common)
+
 def ycsb_scaling_current_plot(summary,summary_cl):
-    """Default to the skew-axis plot used by the current ycsb_scaling sweep."""
-    ycsb_scaling_skew_plot(summary,summary_cl)
+    """Plot the dimension varied by the current ycsb_scaling sweep."""
+    ycsb_scaling_table_size_plot(summary,summary_cl)
 
 def ppr_ycsb_scaling_plot(summary,summary_cl):
     from experiments import ycsb_scaling

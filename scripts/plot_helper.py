@@ -337,10 +337,26 @@ def latency(xval,vval,summary,summary_cl,
         ylimit=0,
         logscale=False,
         logscalex=False,
+        x_divisor=1,
         legend=False,
 #        legend=True,
         ):
     global plot_cnt
+    def weighted_node_stat(values, counts):
+        """Return a count-weighted mean of node-level summary statistics.
+
+        Result files contain node percentiles, not the raw latency samples, so
+        an exact cluster-wide percentile cannot be reconstructed here.  A
+        weighted node statistic is honest about that limitation and avoids
+        giving idle/failed nodes the same influence as busy nodes.
+        """
+        pairs = [(float(value), float(count))
+                 for value, count in zip(values, counts) if float(count) > 0]
+        if not pairs:
+            return float('nan')
+        total = sum(count for _, count in pairs)
+        return sum(value * count for value, count in pairs) / total
+
     ccl50 = {}
     ccl99 = {}
     fscl50 = {}
@@ -366,7 +382,7 @@ def latency(xval,vval,summary,summary_cl,
         _xval = sorted(_xval)
         _xlab = xname + " (Sec)"
     else:
-        _xval = xval
+        _xval = [float(x) / x_divisor for x in xval]
         if xlab == "":
             _xlab = xname
         else:
@@ -408,24 +424,36 @@ def latency(xval,vval,summary,summary_cl,
             try:
                 s = summary
                 s2 = summary_cl
-                ccl50[_v][xi] = min(avg(s2[cfgs]['ccl50']),60)
-                ccl99[_v][xi] = min(avg(s2[cfgs]['ccl99']),60)
-                fscl50[_v][xi] = min(avg(s[cfgs]['fscl50']),60)
-                fscl99[_v][xi] = min(avg(s[cfgs]['fscl99']),60)
-                lscl50[_v][xi] = min(avg(s[cfgs]['lscl50']),60)
-                lscl99[_v][xi] = min(avg(s[cfgs]['lscl99']),60)
-                sacl50[_v][xi] = min(avg(s[cfgs]['sacl50']),60)
-                sacl99[_v][xi] = min(avg(s[cfgs]['sacl99']),60)
+                # Older result files predate ccl_cnt; txn_cnt on a client is
+                # the number of completed requests and is the same weight.
+                client_counts = s2[cfgs].get('ccl_cnt',
+                                             s2[cfgs]['txn_cnt'])
+                ccl50[_v][xi] = weighted_node_stat(
+                    s2[cfgs]['ccl50'], client_counts)
+                ccl99[_v][xi] = weighted_node_stat(
+                    s2[cfgs]['ccl99'], client_counts)
+                fscl50[_v][xi] = weighted_node_stat(
+                    s[cfgs]['fscl50'], s[cfgs]['fscl_cnt'])
+                fscl99[_v][xi] = weighted_node_stat(
+                    s[cfgs]['fscl99'], s[cfgs]['fscl_cnt'])
+                lscl50[_v][xi] = weighted_node_stat(
+                    s[cfgs]['lscl50'], s[cfgs]['lscl_cnt'])
+                lscl99[_v][xi] = weighted_node_stat(
+                    s[cfgs]['lscl99'], s[cfgs]['lscl_cnt'])
+                sacl50[_v][xi] = weighted_node_stat(
+                    s[cfgs]['sacl50'], s[cfgs]['sacl_cnt'])
+                sacl99[_v][xi] = weighted_node_stat(
+                    s[cfgs]['sacl99'], s[cfgs]['sacl_cnt'])
             except KeyError:
                 print("KeyError: {}, {} {} -- {}".format(tmp,v,x,cfgs))
-                ccl50[_v][xi] = 0
-                ccl99[_v][xi] = 0
-                fscl50[_v][xi] = 0
-                fscl99[_v][xi] = 0
-                lscl50[_v][xi] = 0
-                lscl99[_v][xi] = 0
-                sacl50[_v][xi] = 0
-                sacl99[_v][xi] = 0
+                ccl50[_v][xi] = float('nan')
+                ccl99[_v][xi] = float('nan')
+                fscl50[_v][xi] = float('nan')
+                fscl99[_v][xi] = float('nan')
+                lscl50[_v][xi] = float('nan')
+                lscl99[_v][xi] = float('nan')
+                sacl50[_v][xi] = float('nan')
+                sacl99[_v][xi] = float('nan')
                 continue
             stats = get_summary_stats(stats,summary[cfgs],summary_cl[cfgs],x,v,cc)
 
@@ -455,14 +483,11 @@ def latency(xval,vval,summary,summary_cl,
     print("Created plot {} {}".format(name,_title))
     if logscalex:
         _xlab = _xlab + " (Log Scale)"
-    _ylab= 'Latency (s)'
+    _ylab = 'Count-weighted node latency statistic (s)'
     if logscale:
-        _ylab = 'Latency\n(s, Log Scale)'
+        _ylab = 'Count-weighted node latency statistic\n(s, Log Scale)'
     print(_xval)
     
-    if "WAIT_DIE" in fscl99.keys():
-        fscl99["WAIT_DIE"] = [ 60 if x > 2 else y for x,y in zip(_xval,fscl99["WAIT_DIE"])]
-        
     draw_line(name+'ccl50',ccl50,_xval,ylab=_ylab,xlab=_xlab,title=_title,bbox=bbox,ncol=2,ltitle=vname,ylimit=ylimit,logscale=logscale,logscalex=logscalex,legend=legend,base=base)
     draw_line(name+'ccl99',ccl99,_xval,ylab=_ylab,xlab=_xlab,title=_title,bbox=bbox,ncol=2,ltitle=vname,ylimit=ylimit,logscale=logscale,logscalex=logscalex,legend=legend,base=base)
     draw_line(name+'fscl50',fscl50,_xval,ylab=_ylab,xlab=_xlab,title=_title,bbox=bbox,ncol=2,ltitle=vname,ylimit=ylimit,logscale=logscale,logscalex=logscalex,legend=legend,base=base)
@@ -488,6 +513,7 @@ def tput(xval,vval,summary,summary_cl,
         ylimit=0,
         logscale=False,
         logscalex=False,
+        x_divisor=1,
         legend=False,
 #        legend=True,
         ):
@@ -511,7 +537,7 @@ def tput(xval,vval,summary,summary_cl,
         _xval = sorted(_xval)
         _xlab = xname + " (Sec)"
     else:
-        _xval = xval
+        _xval = [float(x) / x_divisor for x in xval]
         if xlab == "":
             _xlab = xname
         else:
@@ -557,7 +583,6 @@ def tput(xval,vval,summary,summary_cl,
                 print("{} - {} -> {}".format(s[cfgs]['txn_cnt'],s[cfgs]['post_warmup_txn_cnt'],tot_txn_cnt))
                 tmp = 2
                 avg_run_time = avg(s[cfgs]['total_runtime'])
-                avg_run_time = 60
                 tmp = 3
 #FIXME
                 avg_txn_cnt = avg(s[cfgs]['txn_cnt'])
@@ -924,7 +949,8 @@ def abort_rate(xval,
         name="",
         xlab="",
         new_cfgs = {},
-        logscalex=False
+        logscalex=False,
+        x_divisor=1
         ):
     tpt = {}
     if name == "":
@@ -984,7 +1010,11 @@ def abort_rate(xval,
     if vname == "NETWORK_DELAY":
         bbox = [0.8,0.95]
     print("Created plot {}".format(name))
-    draw_line(name,tpt,xval,ylab='Average Aborts / Txn',xlab=xname,title=_title,bbox=bbox,ncol=2,ltitle=vname) 
+    _xval = [float(x) / x_divisor for x in xval]
+    _xlab = xlab if xlab else xname
+    if logscalex:
+        _xlab += " (Log Scale)"
+    draw_line(name,tpt,_xval,ylab='Average Aborts / Txn',xlab=_xlab,title=_title,bbox=bbox,ncol=2,ltitle=vname,logscalex=logscalex)
 
 
 
@@ -1394,6 +1424,7 @@ def time_breakdown_line(xval,vval,summary,
         xlab="",
         new_cfgs = {},
         logscalex=False,
+        x_divisor=1,
         legend=False
         ):
     stack_names = [
@@ -1425,8 +1456,8 @@ def time_breakdown_line(xval,vval,summary,
         _xval = sorted(_xval)
         _xlab = xname + " (Sec)"
     else:
-        _xval = xval
-        _xlab = xname
+        _xval = [float(x) / x_divisor for x in xval]
+        _xlab = xlab if xlab else xname
 
     time_idle = [0] * len(xval)
     time_index = [0] * len(xval)
@@ -1500,7 +1531,9 @@ def time_breakdown_line(xval,vval,summary,
     # Quick and dirty label fix by Dana
     if "MAAT" in _xval:
         _xval[_xval.index("MAAT")] = "OCC"
-    draw_line(name,twopc,_xval,ylab="Percent of Total Time",xlab="Server Count (Log Scale)",ltitle=vname,title=_title,logscalex=logscalex,legend=legend)
+    if logscalex:
+        _xlab += " (Log Scale)"
+    draw_line(name,twopc,_xval,ylab="Percent of Total Time",xlab=_xlab,ltitle=vname,title=_title,logscalex=logscalex,legend=legend)
     print("Created plot {}".format(name))
 
 

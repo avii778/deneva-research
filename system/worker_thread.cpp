@@ -18,7 +18,6 @@
 #include "manager.h"
 #include "thread.h"
 #include "worker_thread.h"
-#include "wait_die_debug.h"
 #include "txn.h"
 #include "wl.h"
 #include "query.h"
@@ -95,9 +94,6 @@ void WorkerThread::setup() {
 }
 
 void WorkerThread::process(Message * msg) {
-#if CC_ALG == WAIT_DIE
-  wait_die_debug_increment(&wait_die_debug.messages_processed[msg->rtype]);
-#endif
   RC rc __attribute__ ((unused));
 
   DEBUG("%ld Processing %ld %d\n",get_thd_id(),msg->get_txn_id(),msg->get_rtype());
@@ -215,6 +211,14 @@ void WorkerThread::release_txn_man() {
 void WorkerThread::calvin_wrapup() {
   const RC outcome = txn_man->get_rc();
   txn_man->release_locks(outcome);
+#if WORKLOAD == YCSB && CALVIN_PRE_LOCK
+  // WRITE_DONE is a cluster-wide barrier, so reaching wrapup means every
+  // server has finished this same scheduled transaction. Release the local
+  // admission turn only after releasing its database token; each scheduler
+  // can now advance to the identical next entry.
+  static_cast<YCSBWorkload *>(txn_man->get_wl())
+      ->release_calvin_global_turn();
+#endif
   // Reconnaissance and failed validation attempts are protocol attempts, not
   // committed transactions. The sequencer records the logical commit after
   // it has collected every ACK.
@@ -524,9 +528,6 @@ RC WorkerThread::process_rqry_cont(Message * msg) {
   DEBUG("RQRY_CONT %ld\n",msg->get_txn_id());
   assert(!IS_LOCAL(msg->get_txn_id()));
   RC rc = RCOK;
-#if CC_ALG == WAIT_DIE
-  wait_die_debug_increment(&wait_die_debug.rqry_cont_processed);
-#endif
 
   txn_man->run_txn_post_wait();
   rc = txn_man->run_txn();
@@ -811,6 +812,9 @@ RC WorkerThread::process_rtxn(Message * msg) {
 					// Put txn in txn_table
           txn_man = txn_table.get_transaction_manager(get_thd_id(),txn_id,0);
           assert(txn_man);
+#if CC_ALG == LIFE
+          txn_table.assign_life_name(txn_man);
+#endif
           txn_man->register_thread(this);
           uint64_t ready_starttime = get_sys_clock();
 #if CC_ALG == LIFE
@@ -906,9 +910,14 @@ RC WorkerThread::process_rfwd(Message * msg) {
   DEBUG("RFWD (%ld,%ld)\n",msg->get_txn_id(),msg->get_batch_id());
   txn_man->txn_stats.remote_wait_time += get_sys_clock() - txn_man->txn_stats.wait_starttime;
   assert(CC_ALG == CALVIN);
-  int responses_left = txn_man->received_response(((ForwardMessage*)msg)->rc);
+  ForwardMessage *forward = (ForwardMessage *)msg;
+  int responses_left = txn_man->received_calvin_response(
+      forward->calvin_phase, forward->rc);
   assert(responses_left >=0);
-  if(txn_man->calvin_collect_phase_done()) {
+  if ((forward->calvin_phase == CALVIN_FORWARD_READ_DONE &&
+       txn_man->calvin_collect_phase_done()) ||
+      (forward->calvin_phase == CALVIN_FORWARD_WRITE_DONE &&
+       txn_man->calvin_write_collect_phase_done())) {
     assert(ISSERVERN(txn_man->return_id));
     RC rc = txn_man->run_calvin_txn();
     if(rc == RCOK && txn_man->calvin_exec_phase_done()) {

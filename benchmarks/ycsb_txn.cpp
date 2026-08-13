@@ -236,6 +236,12 @@ RC YCSBTxnManager::acquire_locks() {
   incr_lr();
   assert(ycsb_query->requests.size() == g_req_per_query);
   assert(phase == CALVIN_RW_ANALYSIS);
+#if CALVIN_PRE_LOCK
+  RC token_rc =
+      get_lock(_wl->get_calvin_db_lock_row(), WR);
+  if (token_rc != RCOK)
+    rc = token_rc;
+#else
   for (uint32_t rid = 0; rid < ycsb_query->requests.size(); rid++) {
     ycsb_request *req = ycsb_query->requests[rid];
     uint64_t part_id = _wl->key_to_part(req->key);
@@ -252,6 +258,7 @@ RC YCSBTxnManager::acquire_locks() {
       rc = rc2;
     }
   }
+#endif
   if (decr_lr() == 0) {
     if (ATOM_CAS(lock_ready, false, true))
       rc = RCOK;
@@ -1875,7 +1882,13 @@ RC YCSBTxnManager::run_calvin_txn() {
       DEBUG("(%ld,%ld) local reads\n", txn->txn_id, txn->batch_id);
       rc = run_ycsb();
       // release_read_locks(query);
-      this->phase = isRecon() ? CALVIN_DONE : CALVIN_VALIDATE;
+      // Pre-lock mode acquired the database-wide token before reaching this
+      // phase. Continue directly while retaining it; there is no unlocked
+      // reconnaissance window to validate.
+      this->phase = isRecon()
+                        ? CALVIN_DONE
+                        : (CALVIN_PRE_LOCK ? CALVIN_SERVE_RD
+                                           : CALVIN_VALIDATE);
       break;
     case CALVIN_VALIDATE:
       // Phase 3: Recheck the reconnaissance reads while Calvin locks are held.
@@ -1915,6 +1928,25 @@ RC YCSBTxnManager::run_calvin_txn() {
       DEBUG("(%ld,%ld) execute writes\n", txn->txn_id, txn->batch_id);
       if (txn->rc == RCOK)
         rc = run_ycsb();
+#if CALVIN_PRE_LOCK
+      // Keep the database token until every server has completed its local
+      // writes. WRITE_DONE responses use a separate counter so an early
+      // response cannot be mistaken for a read-barrier response.
+      this->phase = CALVIN_COLLECT_WR;
+      if (rc == RCOK)
+        rc = send_calvin_write_done();
+      if (rc == RCOK) {
+        if (calvin_write_collect_phase_done()) {
+          this->phase = CALVIN_DONE;
+        } else {
+          rc = WAIT;
+        }
+      }
+#else
+      this->phase = CALVIN_DONE;
+#endif
+      break;
+    case CALVIN_COLLECT_WR:
       this->phase = CALVIN_DONE;
       break;
     default:
@@ -1935,7 +1967,8 @@ RC YCSBTxnManager::run_ycsb() {
 
   for (uint64_t i = 0; i < ycsb_query->requests.size(); i++) {
     ycsb_request *req = ycsb_query->requests[i];
-    if (this->phase == CALVIN_LOC_RD && req->acctype == WR && !isRecon())
+    if (this->phase == CALVIN_LOC_RD && req->acctype == WR && !isRecon() &&
+        !CALVIN_PRE_LOCK)
       continue;
     if (this->phase == CALVIN_EXEC_WR &&
         (req->acctype == RD || req->acctype == SCAN))
@@ -1946,6 +1979,17 @@ RC YCSBTxnManager::run_ycsb() {
 
     if (!loc)
       continue;
+
+    if (CALVIN_PRE_LOCK && this->phase == CALVIN_LOC_RD) {
+      // The database token protects the row, so the reconnaissance/read pass
+      // can observe every requested tuple without adding a second access for
+      // write rows or creating validation snapshots.
+      itemid_t *item = index_read(_wl->the_index, req->key, part_id);
+      row_t *read_row = static_cast<row_t *>(item->location);
+      rc = run_ycsb_1(RD, static_cast<uint8_t>(req->value), read_row);
+      assert(rc == RCOK);
+      continue;
+    }
 
     // Reconnaissance observes every touched row, including write-only rows,
     // but must never acquire a write access or mutate the tuple.

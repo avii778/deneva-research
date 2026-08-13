@@ -429,6 +429,7 @@ void Stats_thd::print_client(FILE * outf, bool prog) {
           ",ccl98=%f"
           ",ccl99=%f"
           ",ccl100=%f"
+          ",ccl_cnt=%ld"
           ,(double)client_client_latency.get_idx(0) / BILLION
           ,(double)client_client_latency.get_percentile(1) / BILLION
           ,(double)client_client_latency.get_percentile(10) / BILLION
@@ -442,6 +443,7 @@ void Stats_thd::print_client(FILE * outf, bool prog) {
           ,(double)client_client_latency.get_percentile(98) / BILLION
           ,(double)client_client_latency.get_percentile(99) / BILLION
           ,(double)client_client_latency.get_idx(client_client_latency.cnt-1) / BILLION
+          ,client_client_latency.cnt
           );
   }
 
@@ -1238,7 +1240,7 @@ void Stats_thd::combine(Stats_thd * stats) {
   if(stats->total_runtime > total_runtime)
     total_runtime = stats->total_runtime;
 
-  last_start_commit_latency.append(stats->first_start_commit_latency);
+  last_start_commit_latency.append(stats->last_start_commit_latency);
   first_start_commit_latency.append(stats->first_start_commit_latency);
   start_abort_commit_latency.append(stats->start_abort_commit_latency);
   client_client_latency.append(stats->client_client_latency);
@@ -1616,22 +1618,22 @@ void Stats::print(bool prog) {
   totals->print(outf,prog);
 #if CC_ALG == LIFE
   // The aggregate counters above remain suitable for baseline comparisons.
-  // These fields expose which native worker dequeued each continuation type,
-  // including failed claims that never reach worker_process_cnt_by_type.
+  // Keep worker diagnostics one-dimensional: per-type totals are already
+  // emitted above, so printing the full worker-by-type matrix makes every
+  // progress record unnecessarily large.
   for (uint64_t tid = 0; tid < thd_cnt; ++tid) {
+    uint64_t count = 0;
+    double wait = 0;
     for (uint64_t type = 0; type < NO_MSG; ++type) {
-      const uint64_t count =
-          _stats[tid]->life_cont_dequeue_cnt_by_type[type];
-      const double wait =
-          _stats[tid]->life_cont_dequeue_wait_time_by_type[type];
-      const double average = count == 0 ? 0 : wait / count;
-      fprintf(outf,
-              ",life_cont_dequeue_worker%ld_type%ld=%ld"
-              ",life_cont_dequeue_wait_worker%ld_type%ld=%f"
-              ",life_cont_dequeue_wait_avg_worker%ld_type%ld=%f",
-              tid, type, count, tid, type, wait / BILLION, tid, type,
-              average / BILLION);
+      count += _stats[tid]->life_cont_dequeue_cnt_by_type[type];
+      wait += _stats[tid]->life_cont_dequeue_wait_time_by_type[type];
     }
+    const double average = count == 0 ? 0 : wait / count;
+    fprintf(outf,
+            ",life_cont_dequeue_worker%ld=%ld"
+            ",life_cont_dequeue_wait_worker%ld=%f"
+            ",life_cont_dequeue_wait_avg_worker%ld=%f",
+            tid, count, tid, wait / BILLION, tid, average / BILLION);
   }
 #endif
 #if CC_ALG == LIFE && LIFE_DEBUG_COUNTERS

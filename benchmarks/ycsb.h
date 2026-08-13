@@ -36,6 +36,8 @@ enum YCSBRemTxnType { YCSB_0, YCSB_1, YCSB_FIN, YCSB_RDONE };
 
 class YCSBWorkload : public Workload {
 public:
+  YCSBWorkload()
+      : calvin_db_lock_row(NULL), calvin_global_turn_busy(false) {}
   RC init();
   RC init_table();
   RC init_schema(const char *schema_file);
@@ -43,6 +45,17 @@ public:
   int key_to_part(uint64_t key);
   INDEX *the_index;
   table_t *the_table;
+  row_t *get_calvin_db_lock_row() const {
+    assert(calvin_db_lock_row != NULL);
+    return calvin_db_lock_row;
+  }
+  bool try_claim_calvin_global_turn() {
+    return ATOM_CAS(calvin_global_turn_busy, false, true);
+  }
+  void release_calvin_global_turn() {
+    const bool released = ATOM_CAS(calvin_global_turn_busy, true, false);
+    assert(released);
+  }
 
 private:
   void init_table_parallel();
@@ -52,6 +65,8 @@ private:
     return NULL;
   }
   pthread_mutex_t insert_lock;
+  row_t *calvin_db_lock_row;
+  volatile bool calvin_global_turn_busy;
   //  For parallel initialization
   static int next_tid;
 };

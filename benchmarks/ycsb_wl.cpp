@@ -49,6 +49,17 @@ RC YCSBWorkload::init() {
   fflush(stdout);
 	init_schema( path.c_str() );
   printf("Done\n");
+
+#if CC_ALG == CALVIN && CALVIN_PRE_LOCK
+  // This non-indexed row is Calvin's exclusive token for the entire local
+  // YCSB database.  It deliberately does not consume a user-visible key.
+  calvin_db_lock_row =
+      (row_t *)mem_allocator.align_alloc(sizeof(row_t));
+  assert(calvin_db_lock_row != NULL);
+  calvin_db_lock_row->init(the_table, GET_PART_ID(0, g_node_id));
+  calvin_db_lock_row->set_primary_key(UINT64_MAX);
+  calvin_db_lock_row->init_manager(calvin_db_lock_row);
+#endif
 	
   printf("Initializing table... ");
   fflush(stdout);

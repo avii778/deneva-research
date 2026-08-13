@@ -21,6 +21,7 @@
 #include "txn.h"
 #include "wl.h"
 #include "query.h"
+#include "ycsb.h"
 #include "ycsb_query.h"
 #include "tpcc_query.h"
 #include "mem_alloc.h"
@@ -48,9 +49,21 @@ RC CalvinLockThread::run() {
     while(!simulation->is_done()) {
         txn_man = NULL;
 
+#if WORKLOAD == YCSB && CALVIN_PRE_LOCK
+        // The scheduler queues already define Calvin's cluster-wide order
+        // (epoch, sequencer/source, then source-local FIFO). Admit only the
+        // head transaction on each server. No later transaction may enter a
+        // local token wait queue and choose a different cluster-wide owner.
+        YCSBWorkload *ycsb_wl = static_cast<YCSBWorkload *>(_wl);
+        if (!ycsb_wl->try_claim_calvin_global_turn())
+            continue;
+#endif
         Message * msg = work_queue.sched_dequeue(_thd_id);
 
         if(!msg) {
+#if WORKLOAD == YCSB && CALVIN_PRE_LOCK
+            ycsb_wl->release_calvin_global_turn();
+#endif
             if(idle_starttime == 0)
                 idle_starttime = get_sys_clock();
             continue;
@@ -84,6 +97,13 @@ RC CalvinLockThread::run() {
         if (!txn_man->isRecon()) {
             rc = txn_man->acquire_locks();
         }
+
+#if WORKLOAD == YCSB && CALVIN_PRE_LOCK
+        // Single admission means the database token must be immediately
+        // available. Waiting here would reintroduce independent local token
+        // queue ordering.
+        assert(rc != WAIT);
+#endif
 
         if(rc == RCOK) {
             work_queue.enqueue(_thd_id,msg,false);

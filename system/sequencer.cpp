@@ -141,9 +141,18 @@ void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
               if (warmup_done)
                   INC_STATS_ARR(0, start_abort_commit_latency, timespan);
               cl_msg->recon_records.clear();
+#if CALVIN_PRE_LOCK
+              // Database-wide locking removes the validation/recon retry
+              // protocol. Retry an unrelated execution failure directly
+              // under the same global-lock protocol.
+              cl_msg->recon = false;
+              DEBUG("YCSB global-lock execution retry (%ld,%ld)\n",
+                    msg->get_txn_id(), msg->get_batch_id());
+#else
               cl_msg->recon = true;
               DEBUG("YCSB OLLP validation abort (%ld,%ld)\n",
                     msg->get_txn_id(), msg->get_batch_id());
+#endif
               INC_STATS(0, total_txn_abort_cnt, 1);
               abort_cnt++;
           }

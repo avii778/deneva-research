@@ -19,6 +19,9 @@
 
 #include "global.h"
 #include "helper.h"
+#if CC_ALG == LIFE
+#include "life_name_pool.h"
+#endif
 
 class TxnManager;
 class BaseQuery;
@@ -64,6 +67,9 @@ public:
   void update_min_ts(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id,uint64_t ts);
   uint64_t get_min_ts(uint64_t thd_id); 
   uint64_t active_count();
+#if CC_ALG == LIFE
+  void assign_life_name(TxnManager *txn_man);
+#endif
 
 private:
   bool is_matching_txn_node(txn_node_t t_node, uint64_t txn_id, uint64_t batch_id);
@@ -71,6 +77,9 @@ private:
 //  TxnMap pool;
   uint64_t pool_size;
   pool_node ** pool;
+#if CC_ALG == LIFE
+  LifeNamePool life_names;
+#endif
 
 };
 

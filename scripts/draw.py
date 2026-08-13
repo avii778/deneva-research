@@ -441,9 +441,16 @@ def draw_line(fname, data, xticks,
         ticklabel_format(axis='y', style='plain')
         #ticklabel_format(axis='y', style='sci', scilimits=(-3,5))
     if logscalex:
-#ax.get_xaxis().set_major_formatter(matplotlib.ticker.ScalarFormatter())
+        # Anchor logarithmic axes to the values that were actually measured;
+        # otherwise Matplotlib chooses nearby powers of the log base (for
+        # example 1,048,576 instead of a measured value of 1,000,000).
+        ax.set_xticks(plot_xticks)
         if xlab == "Network Latency (ms) (Log Scale)" or xlab == "Network Latency (ms)":
             ax.get_xaxis().set_major_formatter(matplotlib.ticker.FormatStrFormatter('%.1f'))
+        elif xlab.startswith("Table Size per Node"):
+            ax.get_xaxis().set_major_formatter(matplotlib.ticker.FuncFormatter(
+                lambda value, position: '{}M'.format(value / 1000000.0).replace('.0M', 'M')
+            ))
         else:
             ax.get_xaxis().set_major_formatter(matplotlib.ticker.FormatStrFormatter('%d'))
     if legend :

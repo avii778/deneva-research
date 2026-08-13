@@ -62,6 +62,7 @@ dbms benchmark has the following parameters in the config file. Parameters with 
   DONE_TIMER : number of nanoseconds to run experiment
   WARMUP_TIMER		: number of nanoseconds to run for warmup
   SEQ_BATCH_TIMER : number of nanoseconds between CALVIN batches
+  CALVIN_PRE_LOCK : for Calvin/YCSB, admit one cluster-ordered transaction at a time and exclusively lock the database on every server through read and write barriers
   WORKLOAD		: workload supported (TPCC, YCSB, or PPS)
   CC_ALG		: concurrency control algorithm (WAIT_DIE, NO_WAIT, TIMESTAMP, MVCC, CALVIN, or MAAT)
   ISOLATION_LEVEL : system isolation level (SERIALIZABLE, READ_COMMITTED, READ_UNCOMMITTED, or NOLOCK)
@@ -88,6 +89,7 @@ dbms benchmark has the following parameters in the config file. Parameters with 
   
   // for YCSB Benchmark
   SYNTH_TABLE_SIZE	: table size
+  SKEW_METHOD		: row distribution: ZIPF, HOT, or UNIFORM
   ZIPF_THETA	: theta in zipfian distribution (rows accessed follow zipfian distribution)
   READ_PERC		:
   WRITE_PERC	:

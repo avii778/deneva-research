@@ -41,6 +41,8 @@ SHORTNAMES = {
     "SYNTH_TABLE_SIZE": "TBL",
     "ISOLATION_LEVEL": "LVL",
     "YCSB_ABORT_MODE": "ABRTMODE",
+    "CALVIN_PRE_LOCK": "CPLOCK",
+    "life_fairness": "LFAIR",
     "NUM_WH": "WH",
 }
 
@@ -64,8 +66,8 @@ fmt_title = [
 YCSB_ALGOS = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP", "LIFE"]
 YCSB_SINGLE_NODE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
 YCSB_LIFE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
-TESTING = ["WAIT_DIE"]
-TESTN = [2, 4, 8]
+TESTING = ["LIFE"]
+TESTN = [16]
 NORMAL = [2, 4, 8, 16]
 
 WORKER_THREAD_CNTS = {
@@ -111,12 +113,12 @@ def ycsb_scaling():
     # nnodes = TESTN
     algos = YCSB_LIFE_ALGOS
     # algos = TESTING
-    base_table_size = 1000000
+    base_table_sizes = [4000000]
     txn_write_perc = [0.9]
     tup_write_perc = [0.5]
     tcnt = [4]
     load = [10000]
-    skew = [0.0]
+    skew = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
     part_per_txn = [2]
     strict_ppt = [1]
     fmt = [
@@ -137,7 +139,7 @@ def ycsb_scaling():
             wl,
             n,
             algo,
-            base_table_size * n,
+            table_size * n,
             tup_wr_perc,
             txn_wr_perc,
             ld,
@@ -146,7 +148,88 @@ def ycsb_scaling():
             ppt,
             sppt,
         ]
-        for sppt, ppt, thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo in itertools.product(
+        for sppt, ppt, thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo, table_size in itertools.product(
+            strict_ppt,
+            part_per_txn,
+            tcnt,
+            txn_write_perc,
+            tup_write_perc,
+            skew,
+            load,
+            nnodes,
+            algos,
+            base_table_sizes,
+        )
+    ]
+
+    return fmt, exp
+
+
+def ycsb_scaling_uniform():
+    fmt, exp = ycsb_scaling()
+    return fmt + ["SKEW_METHOD"], [row + ["UNIFORM"] for row in exp]
+
+
+def ycsb_scaling_life_fairness_comparison():
+    """Run the LIFE scaling workload with fairness enabled and disabled."""
+    fmt, exp = ycsb_scaling()
+    algo_idx = fmt.index("CC_ALG")
+    life_exp = [row for row in exp if row[algo_idx] == "LIFE"]
+    return fmt + ["life_fairness"], [
+        row + [enabled]
+        for row, enabled in itertools.product(life_exp, ["true", "false"])
+    ]
+
+
+def ycsb_scaling_calvin_prelock():
+    fmt, exp = ycsb_scaling()
+    return fmt + ["CALVIN_PRE_LOCK"], [row + [1] for row in exp]
+
+
+def ycsb_scaling_req():
+    wl = "YCSB"
+    nnodes = [16]
+    algos = YCSB_LIFE_ALGOS
+    base_table_size = 4000000
+    txn_write_perc = [0.9]
+    tup_write_perc = [0.5]
+    tcnt = [4]
+    load = [10000]
+    skew = [0.0]
+    part_per_txn = [2]
+    strict_ppt = [1]
+    rpq = [2, 3, 4, 5, 6, 7, 8, 9, 10]
+    fmt = [
+        "WORKLOAD",
+        "NODE_CNT",
+        "CC_ALG",
+        "SYNTH_TABLE_SIZE",
+        "TUP_WRITE_PERC",
+        "TXN_WRITE_PERC",
+        "MAX_TXN_IN_FLIGHT",
+        "ZIPF_THETA",
+        "THREAD_CNT",
+        "PART_PER_TXN",
+        "STRICT_PPT",
+        "REQ_PER_QUERY",
+    ]
+    exp = [
+        [
+            wl,
+            n,
+            algo,
+            base_table_size * n,
+            tup_wr_perc,
+            txn_wr_perc,
+            ld,
+            sk,
+            thr,
+            ppt,
+            sppt,
+            req_per_query,
+        ]
+        for req_per_query, sppt, ppt, thr, txn_wr_perc, tup_wr_perc, sk, ld, n, algo in itertools.product(
+            rpq,
             strict_ppt,
             part_per_txn,
             tcnt,
@@ -158,7 +241,6 @@ def ycsb_scaling():
             algos,
         )
     ]
-
     return fmt, exp
 
 
@@ -898,14 +980,28 @@ def wait_die_tcp_diag_16_long():
 experiment_map = {
     "pps_scaling": with_algo_thread_counts(pps_scaling),
     "ycsb_scaling": with_algo_thread_counts(ycsb_scaling),
+    "ycsb_scaling_inflight": with_algo_thread_counts(ycsb_scaling),
+    "ycsb_scaling_req": with_algo_thread_counts(ycsb_scaling_req),
+    "ycsb_scaling_req_plot": ycsb_scaling_req_plot,
+    "ycsb_scaling_uniform": with_algo_thread_counts(ycsb_scaling_uniform),
+    "ycsb_scaling_life_fairness_comparison": with_algo_thread_counts(
+        ycsb_scaling_life_fairness_comparison
+    ),
     "ycsb_scaling_skew": with_algo_thread_counts(ycsb_scaling),
     "ycsb_scaling_nodes": with_algo_thread_counts(ycsb_scaling),
+    "ycsb_scaling_table_size": with_algo_thread_counts(ycsb_scaling),
     "ycsb_single_node": with_algo_thread_counts(ycsb_single_node),
     "life_wait_sweep": with_algo_thread_counts(life_wait_sweep),
     "ycsb_single_node_plot": ycsb_single_node_plot,
     "ycsb_scaling_plot": ycsb_scaling_current_plot,
+    "ycsb_scaling_inflight_plot": ycsb_scaling_inflight_plot,
+    "ycsb_ppt": with_algo_thread_counts(ycsb_scaling),
+    "ycsb_ppt_plot": ycsb_ppt_plot,
     "ycsb_scaling_skew_plot": ycsb_scaling_skew_plot,
     "ycsb_scaling_nodes_plot": ycsb_scaling_nodes_plot,
+    "ycsb_scaling_table_size_plot": ycsb_scaling_table_size_plot,
+    "ycsb_scaling_uniform_plot": ycsb_scaling_uniform_plot,
+    "ycsb_scaling_life_fairness_comparison_plot": ycsb_scaling_life_fairness_comparison_plot,
     "ppr_ycsb_single_node": with_algo_thread_counts(ycsb_single_node),
     "ppr_ycsb_single_node_plot": ycsb_single_node_plot,
     "ycsb_single_node_writes": with_algo_thread_counts(ycsb_single_node_writes),
@@ -926,6 +1022,8 @@ experiment_map = {
     "tpcc_scaling2": with_algo_thread_counts(tpcc_scaling2),
     "tpcc_scaling_whset": with_algo_thread_counts(tpcc_scaling_whset),
     "ycsb_skew_abort": with_algo_thread_counts(ycsb_skew_abort),
+    "ycsb_scaling_calvin_prelock": with_algo_thread_counts(ycsb_scaling_calvin_prelock),
+    "ycsb_scaling_calvin_prelock_plot": ycsb_scaling_calvin_prelock_plot,
     "ppr_pps_scaling": with_algo_thread_counts(pps_scaling),
     "ppr_pps_scaling_plot": ppr_pps_scaling_plot,
     "ppr_ycsb_scaling": with_algo_thread_counts(ycsb_scaling),
@@ -1015,6 +1113,8 @@ configs = {
     "SKEW_METHOD": "ZIPF",
     "ENVIRONMENT_EC2": "false",
     "YCSB_ABORT_MODE": "false",
+    "CALVIN_PRE_LOCK": "false",
+    "life_fairness": "false",
     "LOAD_METHOD": "LOAD_MAX",
     "ISOLATION_LEVEL": "SERIALIZABLE",
 }

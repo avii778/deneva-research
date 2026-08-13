@@ -5,7 +5,10 @@
 
 A transaction consists of:
 
-- `pid`: Identifier of the process that invoked this transaction.
+- `pid`: Identifier of a reusable virtual process name. Its node component is
+  the originating node. Its worker component encodes `(name, worker)` as
+  `name * worker_count + worker`. A physical process may use multiple names
+  concurrently, but each name runs at most one transaction at a time.
 - `tid`: A tuple `(time, attempt)` where:
   - `time` is a globally unique identifier for this transaction.
   - `attempt` is the current attempt number of this transaction.
@@ -52,6 +55,10 @@ For an object `O` of type `T`:
 - `A`: Identifier of the process that most recently modified this object, initially `None`.
 - `P`: Mapping from process identifiers and `None` to `(transaction, status)`.
 
+Virtual process names are returned to their originating process after a
+transaction terminates. If a name is reassigned, the new transaction's
+`tid.time` must be strictly greater than the previous assignment's time.
+
 Status values:
 
 - `Executing`
@@ -85,6 +92,16 @@ If `InLine = None`, then:
 InLine.tid = (∞, ∞)
 ```
 
+- `PHeap`: An indexed priority heap containing one node for every transaction
+  that has touched this object and has not committed. Nodes are ordered by
+  `<p`. The node is stored with the transaction's reusable `P` slot, so a
+  higher attempt updates and reheapifies the existing node rather than adding
+  a duplicate.
+
+`config.h` exposes the compile-time toggle `life_fairness`. When true,
+`Row_life` uses `PHeap` and releases committed descriptors immediately. When
+false, it uses the original single-`A` helping policy and descriptor lifetime.
+
 ---
 
 # Algorithm 1: Container Object Specification
@@ -96,7 +113,7 @@ InLine.tid = (∞, ∞)
 
 4      if
            cstatus = Prepared
-        OR ctx.tid <p tx.tid
+        OR (PHeap != empty AND PHeap.top.tid <p tx.tid)
         OR tx.tid < ltx.tid
         OR (tx.tid = ltx.tid
             AND (lstatus = Aborted
@@ -110,8 +127,9 @@ InLine.tid = (∞, ∞)
 
 7              return (Finalize, ctx)
 
-8          else if ctx.tid <p tx.tid then
-               return (Help, ctx)
+8          else if PHeap != empty
+                    AND PHeap.top.tid <p tx.tid then
+               return (Help, PHeap.top)
 
 9          else if tx.tid.time < ltx.tid.time then
                return (Committed, *)
@@ -127,7 +145,7 @@ InLine.tid = (∞, ∞)
 
 12     else if
            cstatus ≠ Prepared
-        AND tx.tid ≤p ctx.tid
+        AND (PHeap = empty OR tx.tid ≤p PHeap.top.tid)
         AND ltx.tid ≤ tx.tid
         AND (
              tx.tid ≠ ltx.tid
@@ -138,25 +156,27 @@ InLine.tid = (∞, ∞)
         )
        then
 
-13         P[A].status := Aborted
+13         PHeap.insert-or-update(tx)
 
-14         ((-, op1, -), ..., (-, opn, -))
+14         P[A].status := Aborted
+
+15         ((-, op1, -), ..., (-, opn, -))
               := tx.history[O]
 
-15         s := S
+16         s := S
 
-16         foreach i ∈ [1..n] do
+17         foreach i ∈ [1..n] do
                (s, -) := applyT(opi, s)
 
-17         (-, response) := applyT(op, s)
+18         (-, response) := applyT(op, s)
 
-18         A := tx.pid
+19         A := tx.pid
 
-19         P[tx.pid] := (tx, Executing)
+20         P[tx.pid] := (tx, Executing)
 
-20         tx.history.append((O, op, response))
+21         tx.history.append((O, op, response))
 
-21         return (Success, response)
+22         return (Success, response)
 
 22 Prepare(tx)
 
@@ -193,9 +213,11 @@ InLine.tid = (∞, ∞)
 
 33     P[tx.pid].status := Committed
 
-34 Help(tx)
+34     PHeap.remove(tx)
 
-35 Rollback(tx)
+35     Help(tx)
+
+36 Rollback(tx)
 
 36     (ltx, lstatus) := P[tx.pid]
 
@@ -438,4 +460,3 @@ InLine.tid = (∞, ∞)
 
 49     tx.history := [(-,-,Init)]
 ```
-

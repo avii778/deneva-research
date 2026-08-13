@@ -20,6 +20,8 @@ LifeTxnId max_txn_id() {
                    std::numeric_limits<uint64_t>::max()};
 }
 
+const size_t NO_HEAP_INDEX = std::numeric_limits<size_t>::max();
+
 const LifeTxnId &record_tid_or(const LifeProcessRecord *record,
                                const LifeTxnId &fallback) {
   return record != NULL ? record->tid : fallback;
@@ -61,6 +63,7 @@ void Row_life::init(row_t *row) {
   active_process.reset();
 
   processes.reset();
+  priority_heap.clear();
   inline_operation.reset();
 
   pthread_mutex_init(&latch, NULL);
@@ -117,17 +120,91 @@ Row_life::process_record(const LifeProcessId &pid) const {
     return NULL;
 
   ProcessSlots::const_iterator it = processes->find(pid);
-  if (it == processes->end() || !it->second.has_value)
+  if (it == processes->end() || !it->second.record.has_value)
     return NULL;
-  return &it->second;
+  return &it->second.record;
 }
 
 LifeProcessRecord &Row_life::mutable_process_record(const LifeProcessId &pid) {
+  return mutable_process_slot(pid)->record;
+}
+
+Row_life::ProcessSlot *
+Row_life::mutable_process_slot(const LifeProcessId &pid) {
   if (!processes) {
     processes.reset(new ProcessSlots());
     processes->reserve(g_node_cnt * g_thread_cnt);
   }
-  return (*processes)[pid];
+  ProcessSlot &slot = (*processes)[pid];
+  slot.pid = pid;
+  return &slot;
+}
+
+const Row_life::ProcessSlot *Row_life::priority_top() const {
+  return priority_heap.empty() ? NULL : priority_heap.front();
+}
+
+void Row_life::priority_swap(size_t lhs, size_t rhs) {
+  std::swap(priority_heap[lhs], priority_heap[rhs]);
+  priority_heap[lhs]->heap_index = lhs;
+  priority_heap[rhs]->heap_index = rhs;
+}
+
+void Row_life::priority_sift_up(size_t index) {
+  while (index != 0) {
+    const size_t parent = (index - 1) / 2;
+    if (!(priority_heap[index]->record.tid <
+          priority_heap[parent]->record.tid))
+      break;
+    priority_swap(index, parent);
+    index = parent;
+  }
+}
+
+void Row_life::priority_sift_down(size_t index) {
+  for (;;) {
+    const size_t left = index * 2 + 1;
+    if (left >= priority_heap.size())
+      return;
+    const size_t right = left + 1;
+    size_t best = left;
+    if (right < priority_heap.size() &&
+        priority_heap[right]->record.tid < priority_heap[left]->record.tid)
+      best = right;
+    if (!(priority_heap[best]->record.tid <
+          priority_heap[index]->record.tid))
+      return;
+    priority_swap(index, best);
+    index = best;
+  }
+}
+
+void Row_life::priority_insert_or_update(ProcessSlot *slot) {
+  assert(slot != NULL && slot->record.has_value);
+  if (slot->heap_index == NO_HEAP_INDEX) {
+    slot->heap_index = priority_heap.size();
+    priority_heap.push_back(slot);
+    priority_sift_up(slot->heap_index);
+    return;
+  }
+  const size_t index = slot->heap_index;
+  priority_sift_up(index);
+  priority_sift_down(slot->heap_index);
+}
+
+void Row_life::priority_remove(ProcessSlot *slot) {
+  if (slot == NULL || slot->heap_index == NO_HEAP_INDEX)
+    return;
+  const size_t index = slot->heap_index;
+  const size_t last = priority_heap.size() - 1;
+  if (index != last)
+    priority_swap(index, last);
+  priority_heap.pop_back();
+  slot->heap_index = NO_HEAP_INDEX;
+  if (index < priority_heap.size()) {
+    priority_sift_up(index);
+    priority_sift_down(priority_heap[index]->heap_index);
+  }
 }
 
 // Return the record of the current proposed action for the transaction
@@ -351,10 +428,20 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 
   const LifeProcessRecord *context = context_record();
   const LifeProcessRecord *local = process_record(tx.pid);
+#if life_fairness
+  const ProcessSlot *heap_top = priority_top();
+#endif
   const LifeTxnId no_local_tid = min_txn_id();
-  const LifeTxnId no_context_tid = max_txn_id();
+  const LifeTxnId no_blocking_tid = max_txn_id();
   const LifeTxnId &local_tid = record_tid_or(local, no_local_tid);
-  const LifeTxnId &context_tid = record_tid_or(context, no_context_tid);
+#if life_fairness
+  const LifeProcessRecord *blocking =
+      heap_top != NULL ? &heap_top->record : NULL;
+#else
+  const LifeProcessRecord *blocking = context;
+#endif
+  const LifeTxnId &blocking_tid =
+      record_tid_or(blocking, no_blocking_tid);
   const LifeTxnStatus local_status = record_status_or_aborted(local);
   const LifeTxnStatus context_status = record_status_or_aborted(context);
 
@@ -406,7 +493,7 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   }
 
   const bool must_defer =
-      context_status == LifeTxnStatus::Prepared || context_tid < tx.tid ||
+      context_status == LifeTxnStatus::Prepared || blocking_tid < tx.tid ||
       tx.tid.time < local_tid.time || local_has_newer_attempt ||
       (same_process_txn_attempt && (local_status == LifeTxnStatus::Aborted ||
                                     local_status == LifeTxnStatus::Committed ||
@@ -427,7 +514,13 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
       (void)allow_help_wait;
 #endif
 
-      if (!inline_operation || tx.tid <= inline_operation->transaction->tid) {
+      if (!inline_operation ||
+#if life_fairness
+          tx.tid < inline_operation->transaction->tid
+#else
+          tx.tid <= inline_operation->transaction->tid
+#endif
+      ) {
         LifeInlineOperation pending;
         pending.transaction = std::make_shared<LifeTxnDescriptor>(tx);
         pending.operation = operation;
@@ -442,7 +535,7 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
       return result;
     }
 
-    if (context_tid < tx.tid) {
+    if (blocking_tid < tx.tid) {
 #if LIFE_HELP_WAIT_US > 0
       if (allow_help_wait) {
         guard.unlock();
@@ -454,8 +547,8 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 #endif
 
       LifeExecuteResult result = make_result(LifeResultCode::Help);
-      assert(context != NULL && context->transaction);
-      const LifeTxnDescriptorPtr context_transaction = context->transaction;
+      assert(blocking != NULL && blocking->transaction);
+      const LifeTxnDescriptorPtr context_transaction = blocking->transaction;
       guard.unlock();
       result.transaction = *context_transaction;
       return result;
@@ -489,21 +582,21 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
     }
   }
 
-  // Keep committed descriptors helpable/idempotent until a later transaction
-  // is admitted on this row. Once that happens, their terminal ID/status is
-  // sufficient to reject stale execute/commit calls without retaining the
-  // full workload and history payload.
+#if !life_fairness
+  // Original policy retains committed descriptors until any later transaction
+  // is admitted, then keeps only their terminal tombstones.
   if (processes) {
     for (ProcessSlots::iterator it = processes->begin(); it != processes->end();
          ++it) {
-      if (it->second.has_value &&
-          it->second.status == LifeTxnStatus::Committed &&
-          it->second.tid < tx.tid) {
-        it->second.transaction.reset();
-      }
+      LifeProcessRecord &record = it->second.record;
+      if (record.has_value && record.status == LifeTxnStatus::Committed &&
+          record.tid < tx.tid)
+        record.transaction.reset();
     }
   }
+#endif
 
+#if !life_fairness
   if (active_process.has_value) {
     assert(processes);
     LifeProcessRecord *active =
@@ -511,7 +604,10 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
     if (active != NULL)
       active->status = LifeTxnStatus::Aborted;
   }
+#endif
 
+  // Validate and evaluate before changing A, P, or PHeap. Invalid input must
+  // not leave a phantom heap entry in fairness mode.
   LifeResponse response;
   if (tx_object_history_size == 0) {
     if (!evaluate_committed_operation(operation, response))
@@ -541,8 +637,22 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   updated.status = LifeTxnStatus::Executing;
   updated.has_value = true;
 
+#if life_fairness
+  if (active_process.has_value) {
+    assert(processes);
+    LifeProcessRecord *active =
+        const_cast<LifeProcessRecord *>(process_record(active_process.value));
+    if (active != NULL)
+      active->status = LifeTxnStatus::Aborted;
+  }
+#endif
+
+  ProcessSlot *slot = mutable_process_slot(tx.pid);
+  slot->record = updated;
+#if life_fairness
+  priority_insert_or_update(slot);
+#endif
   active_process.set(tx.pid);
-  mutable_process_record(tx.pid) = updated;
 
   LifeExecuteResult result = make_result(LifeResultCode::Success);
   guard.unlock();
@@ -647,6 +757,15 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
       return;
     }
 
+#if life_fairness
+    // A delayed commit for an older attempt must not publish data or remove
+    // the indexed node belonging to the current attempt.
+    if (local == NULL || local->tid != tx->tid ||
+        local_status == LifeTxnStatus::Aborted) {
+      return;
+    }
+#endif
+
     for (size_t i = 0; i < history_indices.size(); ++i) {
       if (!validate_committed_operation(
               tx->history[history_indices[i]].operation)) {
@@ -661,20 +780,27 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
       (void)applied;
     }
 
+    ProcessSlot *slot = mutable_process_slot(tx->pid);
+    LifeProcessRecord &updated = slot->record;
+#if life_fairness
+    // The terminal tid/status tombstone rejects stale traffic. The descriptor
+    // is no longer needed after removal from PHeap and may be shared by other
+    // prepared rows, so release this row's ownership immediately.
+    updated.transaction.reset();
+    updated.tid = tx->tid;
+    updated.status = LifeTxnStatus::Committed;
+    updated.has_value = true;
+    priority_remove(slot);
+#else
     LifeTxnDescriptorPtr retained_transaction = tx;
     if (local != NULL && local->tid == tx->tid &&
         local->status == LifeTxnStatus::Prepared && local->transaction)
       retained_transaction = local->transaction;
-
-    LifeProcessRecord &updated = mutable_process_record(tx->pid);
-    // Keep the committed descriptor until a later transaction is admitted on
-    // this row. Algorithm 1 stores P[pid] = (tx, Committed); retaining tx keeps
-    // duplicate commits idempotent and lets stale helpers replay/observe the
-    // same committed transaction instead of losing the row-local history.
     updated.transaction = retained_transaction;
     updated.tid = tx->tid;
     updated.status = LifeTxnStatus::Committed;
     updated.has_value = true;
+#endif
 
     // Publish the terminal record and detach the active context atomically.
     // A contender must never observe an active committed record whose full
@@ -703,7 +829,9 @@ void Row_life::rollback(const LifeTxnDescriptor &tx) {
         local->status != LifeTxnStatus::Committed) {
       LifeProcessRecord &record = mutable_process_record(tx.pid);
       record.status = LifeTxnStatus::Aborted;
+#if !life_fairness
       record.transaction.reset();
+#endif
     }
 
     if (active_process.has_value && active_process.value == tx.pid) {

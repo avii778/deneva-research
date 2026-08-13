@@ -18,8 +18,10 @@ CONFIG_PARAMS = [
     "TWOPL_LITE",
     "ISOLATION_LEVEL",
     "YCSB_ABORT_MODE",
+    "CALVIN_PRE_LOCK",
+    "life_fairness",
     "LOGGING",
-    "NETWORK_DELAY_TEST"
+    "NETWORK_DELAY_TEST",
 #    "SHMEM_ENV"
     ]
 
@@ -77,6 +79,7 @@ SHORTNAMES = {
     "TXN_READ_PERC" : "RD",
     "TXN_WRITE_PERC" : "WR",
     "ZIPF_THETA" : "SKEW",
+    "REQ_PER_QUERY" : "RPQ",
     "MSG_TIME_LIMIT" : "BT",
     "MSG_SIZE_MAX" : "BS",
     "DATA_PERC":"D",
@@ -93,6 +96,8 @@ SHORTNAMES = {
     # when discovering those files.
     "SYNTH_TABLE_SIZE":"TBL",
     "ISOLATION_LEVEL":"LVL",
+    "CALVIN_PRE_LOCK":"CPLOCK",
+    "life_fairness":"LFAIR",
 }
 
 stat_map = OrderedDict([
@@ -399,15 +404,19 @@ stat_map = OrderedDict([
 # Latency
   ('ccl50', []),
   ('ccl99', []),
+  ('ccl_cnt', []),
   ('fscl50', []),
   ('fscl99', []),
   ('fscl_avg', []),
+  ('fscl_cnt', []),
   ('lscl50', []),
   ('lscl99', []),
   ('lscl_avg', []),
+  ('lscl_cnt', []),
   ('sacl50', []),
   ('sacl99', []),
   ('sacl_avg', []),
+  ('sacl_cnt', []),
   ('lat_l_loc_work_queue_time', []),
   ('lat_l_loc_msg_queue_time', []),
   ('lat_l_loc_cc_block_time', []),
@@ -604,6 +613,7 @@ stat_map2 = {
 # Latency
   'ccl50': [],
   'ccl99': [],
+  'ccl_cnt': [],
   'fscl50': [],
   'fscl99': [],
   'fscl_avg': [],

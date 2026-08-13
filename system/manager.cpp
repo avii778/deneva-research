@@ -59,7 +59,8 @@ Manager::get_ts(uint64_t thread_id) {
 		assert(false);
 		break;
 	case TS_CLOCK :
-		time = get_wall_clock() * (g_node_cnt + g_thread_cnt) + (g_node_id * g_thread_cnt + thread_id);
+		time = get_wall_clock() * (g_node_cnt * g_thread_cnt) +
+			(g_node_id * g_thread_cnt + thread_id);
 		break;
 	default :
 		assert(false);

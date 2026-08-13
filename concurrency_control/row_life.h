@@ -2,6 +2,7 @@
 #define ROW_LIFE_H
 
 #include "life_types.h"
+#include <limits>
 #include <pthread.h>
 #include <unordered_map>
 #include <vector>
@@ -30,8 +31,17 @@ public:
   void help(const LifeTxnDescriptor &tx);
 
 private:
-  typedef std::unordered_map<LifeProcessId, LifeProcessRecord,
-                             LifeProcessIdHash> ProcessSlots;
+  struct ProcessSlot {
+    ProcessSlot()
+        : pid(), record(), heap_index(std::numeric_limits<size_t>::max()) {}
+
+    LifeProcessId pid;
+    LifeProcessRecord record;
+    size_t heap_index;
+  };
+
+  typedef std::unordered_map<LifeProcessId, ProcessSlot, LifeProcessIdHash>
+      ProcessSlots;
 
   LifeExecuteResult execute(const LifeTxnDescriptor &tx,
                             const LifeOperation &operation,
@@ -47,6 +57,13 @@ private:
   const LifeProcessRecord *process_record(const LifeProcessId &pid) const;
   const LifeProcessRecord *context_record() const;
   LifeProcessRecord &mutable_process_record(const LifeProcessId &pid);
+  ProcessSlot *mutable_process_slot(const LifeProcessId &pid);
+  const ProcessSlot *priority_top() const;
+  void priority_insert_or_update(ProcessSlot *slot);
+  void priority_remove(ProcessSlot *slot);
+  void priority_sift_up(size_t index);
+  void priority_sift_down(size_t index);
+  void priority_swap(size_t lhs, size_t rhs);
   LifeExecuteResult make_result(LifeResultCode code) const;
   LifeObjectId object_id() const;
   bool apply_operation(const LifeOperation &operation,
@@ -64,6 +81,7 @@ private:
   row_t *_row;
   LifeOptional<LifeProcessId> active_process;
   std::unique_ptr<ProcessSlots> processes;
+  std::vector<ProcessSlot *> priority_heap;
   std::unique_ptr<LifeInlineOperation> inline_operation;
 };
 

@@ -350,6 +350,7 @@ public:
   void release() {}
 
   RC rc;
+  CALVIN_FORWARD_PHASE calvin_phase;
 #if WORKLOAD == TPCC
 	uint64_t o_id;
 #endif

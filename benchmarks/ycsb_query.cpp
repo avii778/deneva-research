@@ -44,6 +44,8 @@ BaseQuery * YCSBQueryGenerator::create_query(Workload * h_wl, uint64_t home_part
   } else if (SKEW_METHOD == ZIPF){
     assert(the_n != 0);
     query = static_cast<YCSBQuery *>(gen_requests_zipf(home_partition_id, h_wl));
+  } else if (SKEW_METHOD == UNIFORM) {
+    query = static_cast<YCSBQuery *>(gen_requests_uniform(home_partition_id, h_wl));
   }
 
   assert(query != NULL);
@@ -135,6 +137,15 @@ uint64_t YCSBQuery::get_participants(Workload * wl) {
   }
   assert(participant_nodes.size()==g_node_cnt);
   assert(active_nodes.size()==g_node_cnt);
+#if CC_ALG == CALVIN && CALVIN_PRE_LOCK
+  // The database token is the declared write set. Every server participates
+  // in both barriers even when this request has no keys stored there.
+  for (uint64_t i = 0; i < g_node_cnt; ++i) {
+    participant_nodes.set(i, 1);
+    active_nodes.set(i, 1);
+  }
+  return g_node_cnt;
+#endif
   for(uint64_t i = 0; i < requests.size(); i++) {
     uint64_t req_nid = GET_NODE_ID(((YCSBWorkload*)wl)->key_to_part(requests[i]->key));
     // Reconnaissance samples the complete read/write set, but only values
@@ -166,6 +177,11 @@ uint64_t YCSBQuery::participants(bool *& pps,Workload * wl) {
 
 std::set<uint64_t> YCSBQuery::participants(Message * msg, Workload * wl) {
   std::set<uint64_t> participant_set;
+#if CC_ALG == CALVIN && CALVIN_PRE_LOCK
+  for (uint64_t i = 0; i < g_node_cnt; ++i)
+    participant_set.insert(i);
+  return participant_set;
+#endif
   YCSBClientQueryMessage* ycsb_msg = ((YCSBClientQueryMessage*)msg);
   for(uint64_t i = 0; i < ycsb_msg->requests.size(); i++) {
     uint64_t req_nid = GET_NODE_ID(((YCSBWorkload*)wl)->key_to_part(ycsb_msg->requests[i]->key));
@@ -324,6 +340,15 @@ BaseQuery * YCSBQueryGenerator::gen_requests_hot(uint64_t home_partition_id, Wor
 }
 
 BaseQuery * YCSBQueryGenerator::gen_requests_zipf(uint64_t home_partition_id, Workload * h_wl) {
+  return gen_requests_partitioned(home_partition_id, h_wl, false);
+}
+
+BaseQuery * YCSBQueryGenerator::gen_requests_uniform(uint64_t home_partition_id, Workload * h_wl) {
+  return gen_requests_partitioned(home_partition_id, h_wl, true);
+}
+
+BaseQuery * YCSBQueryGenerator::gen_requests_partitioned(
+    uint64_t home_partition_id, Workload * h_wl, bool uniform) {
   YCSBQuery * query = (YCSBQuery*) mem_allocator.alloc(sizeof(YCSBQuery));
   new(query) YCSBQuery();
   query->requests.init(g_req_per_query);
@@ -332,6 +357,7 @@ BaseQuery * YCSBQueryGenerator::gen_requests_zipf(uint64_t home_partition_id, Wo
 	set<uint64_t> all_keys;
 	set<uint64_t> partitions_accessed;
   uint64_t table_size = g_synth_table_size / g_part_cnt;
+  assert(table_size > 0);
 
   double r_twr = (double)(mrand->next() % 10000) / 10000;		
 
@@ -355,7 +381,8 @@ BaseQuery * YCSBQueryGenerator::gen_requests_zipf(uint64_t home_partition_id, Wo
 			req->acctype = RD;
 		else
 			req->acctype = WR;
-    uint64_t row_id = zipf(table_size - 1, g_zipf_theta);; 
+    uint64_t row_id = uniform ? mrand->next() % table_size
+                              : zipf(table_size - 1, g_zipf_theta);
 		assert(row_id < table_size);
 		uint64_t primary_key = row_id * g_part_cnt + partition_id;
     assert(primary_key < g_synth_table_size);

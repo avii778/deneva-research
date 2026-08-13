@@ -114,9 +114,11 @@
 // per-row lock/ts management or central lock/ts management
 #define CENTRAL_MAN false
 #define BUCKET_CNT 31
-#define ABORT_PENALTY 10 * 1000000UL   // in ns.
-#define ABORT_PENALTY_MAX 5 * 100 * 1000000UL   // in ns.
+#define ABORT_PENALTY 10 * 1000000UL          // in ns.
+#define ABORT_PENALTY_MAX 5 * 100 * 1000000UL // in ns.
 #define LIFE_HELP_WAIT_US 0
+// true: indexed PHeap fairness; false: original single-holder LIFE policy.
+#define life_fairness false
 #define BACKOFF true
 // [ INDEX ]
 #define ENABLE_LATCH false
@@ -144,6 +146,9 @@
 #define TXN_QUEUE_SIZE_LIMIT THREAD_CNT
 // [CALVIN]
 #define SEQ_THREAD_CNT 4
+// For Calvin/YCSB, lock an exclusive database-wide token on every server and
+// retain it through the distributed read and write barriers without recon.
+#define CALVIN_PRE_LOCK true
 
 /***********************************************/
 // Logging
@@ -151,7 +156,7 @@
 #define LOG_COMMAND false
 #define LOG_REDO false
 #define LOG_LIFE false
-#define LIFE_DEBUG_COUNTERS false
+#define LIFE_DEBUG_COUNTERS true
 #define PPS_STATE_DEBUG_COUNTERS true
 #define LIFE_LOG_FILE "life_timing.log"
 #define LOGGING false
@@ -172,6 +177,7 @@
 // SKEW_METHOD:
 //    ZIPF: use ZIPF_THETA distribution
 //    HOT: use ACCESS_PERC of the accesses go to DATA_PERC of the data
+//    UNIFORM: access rows uniformly while preserving partition controls
 #define SKEW_METHOD ZIPF
 #define DATA_PERC 100
 #define ACCESS_PERC 0.03
@@ -335,6 +341,7 @@ enum PPSTxnType {
 // SKEW METHODS
 #define ZIPF 1
 #define HOT 2
+#define UNIFORM 3
 // PRIORITY WORK QUEUE
 #define PRIORITY_FCFS 1
 #define PRIORITY_ACTIVE 2
@@ -369,8 +376,8 @@ enum PPSTxnType {
 #define PROG_TIMER 10 * BILLION // in s
 #define BATCH_TIMER 0
 #define SEQ_BATCH_TIMER 5 * 1 * MILLION // ~5ms -- same as CALVIN paper
-#define DONE_TIMER 1 * 60 * BILLION // ~1 minutes
-#define WARMUP_TIMER 1 * 60 * BILLION // ~1 minutes
+#define DONE_TIMER 1 * 60 * BILLION     // ~1 minutes
+#define WARMUP_TIMER 1 * 60 * BILLION   // ~1 minutes
 
 #define SEED 0
 #define SHMEM_ENV false

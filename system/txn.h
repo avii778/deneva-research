@@ -86,6 +86,8 @@ public:
 
   LifeProcessId life_pid;
   LifeTxnId life_tid;
+  uint64_t life_name;
+  bool life_name_leased;
   LifeTxnStatus life_status;
   std::vector<LifeHistoryEntry> life_history;
   std::vector<Row_life *> life_objects;
@@ -169,6 +171,11 @@ public:
   uint64_t get_thd_id();
   Workload *get_wl();
   void set_txn_id(txnid_t txn_id);
+  void assign_life_name(uint64_t originating_worker, uint64_t name);
+  bool has_life_name() const;
+  uint64_t get_life_name() const;
+  uint64_t get_life_originating_worker() const;
+  void clear_life_name();
   txnid_t get_txn_id();
   void set_query(BaseQuery *qry);
   BaseQuery *get_query();
@@ -282,11 +289,15 @@ public:
   // Calvin
   uint32_t lock_ready_cnt;
   uint32_t calvin_expected_rsp_cnt;
+  uint32_t calvin_write_rsp_cnt;
   bool locking_done;
   CALVIN_PHASE phase;
   Array<row_t *> calvin_locked_rows;
   bool calvin_exec_phase_done();
   bool calvin_collect_phase_done();
+  bool calvin_write_collect_phase_done();
+  int received_calvin_response(CALVIN_FORWARD_PHASE phase, RC rc);
+  RC send_calvin_write_done();
 
 protected:
   int rsp_cnt;
