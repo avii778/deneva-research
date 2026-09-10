@@ -87,26 +87,51 @@ inline bool operator<=(const LifeTxnId &lhs, const LifeTxnId &rhs) {
 }
 
 struct LifeObjectId {
-  LifeObjectId() : table_id(0), partition_id(0), primary_key(0), row_id(0) {}
+  LifeObjectId()
+      : table_id(0), partition_id(0), routing_partition_id(UINT64_MAX),
+        primary_key(0), row_id(0) {}
 
   uint64_t table_id;
+  // Physical index/row partition. Replicated rows can use a different logical
+  // partition for protocol routing while retaining the same local identity.
   uint64_t partition_id;
+  uint64_t routing_partition_id;
   uint64_t primary_key;
   // A table-local physical identity. This disambiguates rows behind a
   // non-unique index (PPS USES/SUPPLIES) without changing their lookup key.
   uint64_t row_id;
 };
 
-inline bool operator==(const LifeObjectId &lhs, const LifeObjectId &rhs) {
+inline uint64_t life_routing_partition(const LifeObjectId &object) {
+  return object.routing_partition_id == UINT64_MAX
+             ? object.partition_id
+             : object.routing_partition_id;
+}
+
+inline bool life_same_physical_object(const LifeObjectId &lhs,
+                                      const LifeObjectId &rhs) {
   return lhs.table_id == rhs.table_id && lhs.partition_id == rhs.partition_id &&
          lhs.primary_key == rhs.primary_key && lhs.row_id == rhs.row_id;
+}
+
+inline bool operator==(const LifeObjectId &lhs, const LifeObjectId &rhs) {
+  return life_same_physical_object(lhs, rhs) &&
+         life_routing_partition(lhs) == life_routing_partition(rhs);
 }
 
 inline bool operator!=(const LifeObjectId &lhs, const LifeObjectId &rhs) {
   return !(lhs == rhs);
 }
 
-enum class LifeOperationKind { ReadField, WriteField, AddInt64 };
+enum class LifeOperationKind {
+  ReadField,
+  WriteField,
+  AddInt64,
+  TpccPaymentYtd,
+  TpccPaymentCustomer,
+  TpccNextOrderId,
+  TpccUpdateStock
+};
 
 static const size_t LIFE_INLINE_VALUE_CAPACITY = sizeof(uint64_t);
 
@@ -243,7 +268,7 @@ struct LifeYcsbSnapshot {
   uint64_t next_record_id;
 };
 
-enum class LifeWorkloadKind { Ycsb, Pps };
+enum class LifeWorkloadKind { Ycsb, Pps, Tpcc };
 
 // Serialized continuation state for a PPS transaction. Values are stored as
 // integers here so life_types.h remains independent of the PPS headers.
@@ -265,6 +290,57 @@ struct LifePpsSnapshot {
   uint64_t program_index;
   std::vector<uint64_t> part_keys;
 };
+
+struct LifeTpccItem {
+  LifeTpccItem() : item_id(0), supply_w_id(0), quantity(0) {}
+  uint64_t item_id;
+  uint64_t supply_w_id;
+  uint64_t quantity;
+};
+
+inline bool operator==(const LifeTpccItem &lhs, const LifeTpccItem &rhs) {
+  return lhs.item_id == rhs.item_id &&
+         lhs.supply_w_id == rhs.supply_w_id && lhs.quantity == rhs.quantity;
+}
+
+struct LifeTpccSnapshot {
+  LifeTpccSnapshot()
+      : txn_type(0), state(0), program_index(0), w_id(0), d_id(0), c_id(0),
+        d_w_id(0), c_w_id(0), c_d_id(0), h_amount_bits(0), by_last_name(false),
+        remote(false), ol_cnt(0), o_entry_d(0), o_id(0), item_index(0),
+        stock_quantity(0), scratch_bits(0), materialized(false) {
+    for (size_t i = 0; i < sizeof(c_last); ++i) c_last[i] = 0;
+  }
+  uint32_t txn_type;
+  uint32_t state;
+  uint64_t program_index;
+  uint64_t w_id, d_id, c_id, d_w_id, c_w_id, c_d_id;
+  uint64_t h_amount_bits;
+  bool by_last_name;
+  char c_last[32];
+  bool remote;
+  uint64_t ol_cnt, o_entry_d, o_id, item_index, stock_quantity, scratch_bits;
+  bool materialized;
+  std::vector<LifeTpccItem> items;
+};
+
+inline bool operator==(const LifeTpccSnapshot &lhs,
+                       const LifeTpccSnapshot &rhs) {
+  if (lhs.txn_type != rhs.txn_type || lhs.state != rhs.state ||
+      lhs.program_index != rhs.program_index || lhs.w_id != rhs.w_id ||
+      lhs.d_id != rhs.d_id || lhs.c_id != rhs.c_id ||
+      lhs.d_w_id != rhs.d_w_id || lhs.c_w_id != rhs.c_w_id ||
+      lhs.c_d_id != rhs.c_d_id || lhs.h_amount_bits != rhs.h_amount_bits ||
+      lhs.by_last_name != rhs.by_last_name || lhs.remote != rhs.remote ||
+      lhs.ol_cnt != rhs.ol_cnt || lhs.o_entry_d != rhs.o_entry_d ||
+      lhs.o_id != rhs.o_id || lhs.item_index != rhs.item_index ||
+      lhs.stock_quantity != rhs.stock_quantity || lhs.scratch_bits != rhs.scratch_bits ||
+      lhs.materialized != rhs.materialized || lhs.items != rhs.items)
+    return false;
+  for (size_t i = 0; i < sizeof(lhs.c_last); ++i)
+    if (lhs.c_last[i] != rhs.c_last[i]) return false;
+  return true;
+}
 
 inline bool operator==(const LifePpsSnapshot &lhs,
                        const LifePpsSnapshot &rhs) {
@@ -334,6 +410,7 @@ struct LifeTxnDescriptor {
   std::vector<LifeHistoryEntry> history;
   LifeYcsbSnapshot ycsb;
   LifePpsSnapshot pps;
+  LifeTpccSnapshot tpcc;
   std::vector<TouchedObject> touched_objects;
 };
 
@@ -378,7 +455,7 @@ inline bool operator==(const LifeTxnDescriptor &lhs,
                        const LifeTxnDescriptor &rhs) {
   return lhs.pid == rhs.pid && lhs.tid == rhs.tid &&
          lhs.workload == rhs.workload && lhs.history == rhs.history &&
-         lhs.ycsb == rhs.ycsb && lhs.pps == rhs.pps;
+         lhs.ycsb == rhs.ycsb && lhs.pps == rhs.pps && lhs.tpcc == rhs.tpcc;
 }
 
 inline bool operator!=(const LifeTxnDescriptor &lhs,

@@ -28,15 +28,35 @@
 #include "transport.h"
 #include "msg_queue.h"
 #include "message.h"
+#if CC_ALG == LIFE
+#include "mem_alloc.h"
+#include "row_life.h"
+#endif
+#include <algorithm>
+#include <cstring>
+
+#if CC_ALG == LIFE
+TPCCTxnManager::TPCCTxnManager()
+    : _wl(NULL), _rc(RCOK), row(NULL), next_item_id(0) {}
+#endif
 
 void TPCCTxnManager::init(uint64_t thd_id, Workload * h_wl) {
+#if CC_ALG == LIFE
+	YCSBTxnManager::init(thd_id, h_wl);
+#else
 	TxnManager::init(thd_id, h_wl);
+#endif
 	_wl = (TPCCWorkload *) h_wl;
   reset();
+#if CC_ALG != LIFE
 	TxnManager::reset();
+#endif
 }
 
 void TPCCTxnManager::reset() {
+#if CC_ALG == LIFE
+  discard_all_life_staged_inserts();
+#endif
   TPCCQuery* tpcc_query = (TPCCQuery*) query;
   state = TPCC_PAYMENT0;
   if(tpcc_query->txn_type == TPCC_PAYMENT) {
@@ -45,7 +65,11 @@ void TPCCTxnManager::reset() {
     state = TPCC_NEWORDER0;
   }
   next_item_id = 0;
+#if CC_ALG == LIFE
+  YCSBTxnManager::reset();
+#else
 	TxnManager::reset();
+#endif
 }
 
 RC TPCCTxnManager::run_txn_post_wait() {
@@ -72,9 +96,13 @@ RC TPCCTxnManager::run_txn() {
 #if DISTR_DEBUG
     query->print();
 #endif
-    query->partitions_touched.add_unique(GET_PART_ID(0,g_node_id));
+    query->partitions_touched.add_unique(
+        wh_to_part(static_cast<TPCCQuery *>(query)->w_id));
   }
 
+#if CC_ALG == LIFE
+  return run_life_txn();
+#endif
 
   while(rc == RCOK && !is_done()) {
     rc = run_txn_state();
@@ -669,7 +697,7 @@ inline RC TPCCTxnManager::run_payment_5(uint64_t w_id, uint64_t d_id,uint64_t c_
   assert(r_cust_local != NULL);
 	double c_balance;
 	double c_ytd_payment;
-	double c_payment_cnt;
+	uint64_t c_payment_cnt;
 
 	r_cust_local->get_value(C_BALANCE, c_balance);
 	r_cust_local->set_value(C_BALANCE, c_balance - h_amount);
@@ -892,7 +920,7 @@ inline RC TPCCTxnManager::new_order_9(uint64_t w_id,uint64_t  d_id,bool remote, 
 		r_stock_local->set_value(S_ORDER_CNT, s_order_cnt + 1);
 		s_data = r_stock_local->get_value(S_DATA);
 #endif
-		if (remote) {
+			if (ol_supply_w_id != w_id) {
 			s_remote_cnt = *(int64_t*)r_stock_local->get_value(S_REMOTE_CNT);
 			s_remote_cnt ++;
 			r_stock_local->set_value(S_REMOTE_CNT, &s_remote_cnt);
@@ -931,6 +959,407 @@ inline RC TPCCTxnManager::new_order_9(uint64_t w_id,uint64_t  d_id,bool remote, 
 
 	return RCOK;
 }
+
+#if CC_ALG == LIFE
+namespace {
+
+uint64_t tpcc_double_bits(double value) {
+  uint64_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+double tpcc_bits_double(uint64_t bits) {
+  double value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+LifeOperation tpcc_operation(uint64_t table_id, uint64_t partition_id,
+                             uint64_t key, LifeOperationKind kind,
+                             uint32_t field, uint64_t argument = 0,
+                             uint64_t routing_partition_id = UINT64_MAX) {
+  LifeOperation op;
+  op.object.table_id = table_id;
+  op.object.partition_id = partition_id;
+  op.object.routing_partition_id = routing_partition_id;
+  op.object.primary_key = key;
+  op.object.row_id = key;
+  op.kind = kind;
+  op.field_id = field;
+  op.value_size = sizeof(uint64_t);
+  if (kind != LifeOperationKind::ReadField) {
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&argument);
+    op.argument.assign(bytes, bytes + sizeof(argument));
+  }
+  return op;
+}
+
+uint64_t tpcc_neworder_item_steps() { return 2; }
+
+uint64_t tpcc_neworder_steps(const LifeTpccSnapshot &tpcc) {
+  // Warehouse read, customer read, district RMW, then item read + stock RMW.
+  return 3 + tpcc.items.size() * tpcc_neworder_item_steps();
+}
+
+} // namespace
+
+LifeTxnDescriptor TPCCTxnManager::life_descriptor() const {
+  LifeTxnDescriptor descriptor = TxnManager::life_descriptor();
+  const TPCCQuery *q = static_cast<const TPCCQuery *>(query);
+  descriptor.workload = LifeWorkloadKind::Tpcc;
+  descriptor.tpcc.txn_type = static_cast<uint32_t>(q->txn_type);
+  descriptor.tpcc.state = static_cast<uint32_t>(state);
+  descriptor.tpcc.program_index = descriptor.history.size();
+  descriptor.tpcc.w_id = q->w_id;
+  descriptor.tpcc.d_id = q->d_id;
+  descriptor.tpcc.c_id = q->c_id;
+  descriptor.tpcc.d_w_id = q->d_w_id;
+  descriptor.tpcc.c_w_id = q->c_w_id;
+  descriptor.tpcc.c_d_id = q->c_d_id;
+  descriptor.tpcc.h_amount_bits = tpcc_double_bits(q->h_amount);
+  descriptor.tpcc.by_last_name = q->by_last_name;
+  std::memcpy(descriptor.tpcc.c_last, q->c_last,
+              std::min(sizeof(descriptor.tpcc.c_last), sizeof(q->c_last)));
+  descriptor.tpcc.remote = q->remote;
+  descriptor.tpcc.ol_cnt = q->ol_cnt;
+  descriptor.tpcc.o_entry_d = q->o_entry_d;
+  descriptor.tpcc.o_id = q->o_id;
+  descriptor.tpcc.item_index = next_item_id;
+  descriptor.tpcc.materialized = false;
+  descriptor.tpcc.items.reserve(q->items.size());
+  for (uint64_t i = 0; i < q->items.size(); ++i) {
+    LifeTpccItem item;
+    item.item_id = q->items[i]->ol_i_id;
+    item.supply_w_id = q->items[i]->ol_supply_w_id;
+    item.quantity = q->items[i]->ol_quantity;
+    descriptor.tpcc.items.push_back(item);
+  }
+  descriptor.history.reserve(3 + q->items.size() * 2);
+  descriptor.touched_objects.reserve(3 + q->items.size() * 2);
+  return descriptor;
+}
+
+void TPCCTxnManager::life_reset_workload() {
+  state = static_cast<TPCCQuery *>(query)->txn_type == TPCC_PAYMENT
+              ? TPCC_PAYMENT0 : TPCC_NEWORDER0;
+  next_item_id = 0;
+  reset_pending_life_finalize();
+  reset_life_piggyback_prepare();
+}
+
+void TPCCTxnManager::life_reconcile_descriptor(LifeTxnDescriptor &descriptor) {
+  LifeTpccSnapshot &tpcc = descriptor.tpcc;
+  assert(descriptor.workload == LifeWorkloadKind::Tpcc);
+  while (tpcc.program_index < descriptor.history.size()) {
+    const LifeResponse &response = descriptor.history[tpcc.program_index].response;
+    if (response.value.size() == sizeof(uint64_t))
+      std::memcpy(&tpcc.scratch_bits, response.value.data(), sizeof(uint64_t));
+
+    const uint64_t step = tpcc.program_index;
+    if (tpcc.txn_type == TPCC_NEW_ORDER) {
+      if (step == 2) {
+        tpcc.o_id = tpcc.scratch_bits;
+      } else if (step >= 3) {
+        tpcc.item_index = (step - 3) / tpcc_neworder_item_steps();
+      }
+    }
+    ++tpcc.program_index;
+  }
+  const uint64_t total = tpcc.txn_type == TPCC_PAYMENT
+                             ? 3
+                             : tpcc_neworder_steps(tpcc);
+  tpcc.state = tpcc.program_index >= total ? TPCC_FIN :
+      (tpcc.txn_type == TPCC_PAYMENT ? TPCC_PAYMENT0 : TPCC_NEWORDER0);
+}
+
+bool TPCCTxnManager::life_program_done(const LifeTxnDescriptor &d) const {
+  return d.tpcc.program_index >=
+      (d.tpcc.txn_type == TPCC_PAYMENT ? 3
+                                       : tpcc_neworder_steps(d.tpcc));
+}
+
+LifeOperation TPCCTxnManager::life_current_operation(LifeTxnDescriptor &d) const {
+  const LifeTpccSnapshot &t = d.tpcc;
+  uint64_t step = t.program_index;
+  const uint64_t amount = t.h_amount_bits;
+  if (t.txn_type == TPCC_PAYMENT) {
+    if (step == 0)
+      return tpcc_operation(
+          _wl->t_warehouse->get_table_id(), wh_to_part(t.w_id), t.w_id,
+          g_wh_update ? LifeOperationKind::TpccPaymentYtd
+                      : LifeOperationKind::ReadField,
+          W_YTD, amount);
+    if (step == 1)
+      return tpcc_operation(
+          _wl->t_district->get_table_id(), wh_to_part(t.d_w_id),
+          distKey(t.d_id, t.d_w_id), LifeOperationKind::TpccPaymentYtd,
+          D_YTD, amount);
+    assert(step == 2);
+    const uint64_t customer_key = t.by_last_name
+        ? custNPKey(const_cast<char *>(t.c_last), t.c_d_id, t.c_w_id)
+        : custKey(t.c_id, t.c_d_id, t.c_w_id);
+    LifeOperation op = tpcc_operation(
+        _wl->t_customer->get_table_id(), wh_to_part(t.c_w_id), customer_key,
+        LifeOperationKind::TpccPaymentCustomer, C_BALANCE, amount);
+    if (t.by_last_name) op.object.row_id = UINT64_MAX;
+    return op;
+  }
+
+  if (step == 0)
+    return tpcc_operation(_wl->t_warehouse->get_table_id(), wh_to_part(t.w_id),
+                          t.w_id, LifeOperationKind::ReadField, W_TAX);
+  if (step == 1)
+    return tpcc_operation(_wl->t_customer->get_table_id(), wh_to_part(t.w_id),
+        custKey(t.c_id, t.d_id, t.w_id), LifeOperationKind::ReadField,
+        C_DISCOUNT);
+  if (step == 2)
+    return tpcc_operation(_wl->t_district->get_table_id(), wh_to_part(t.w_id),
+        distKey(t.d_id, t.w_id), LifeOperationKind::TpccNextOrderId,
+        D_NEXT_O_ID);
+
+  const uint64_t offset = step - 3;
+  const size_t item_index = offset / tpcc_neworder_item_steps();
+  assert(item_index < t.items.size());
+  const LifeTpccItem &item = t.items[item_index];
+  const uint64_t stock_key = stockKey(item.item_id, item.supply_w_id);
+  const uint64_t stock_part = wh_to_part(item.supply_w_id);
+  if (offset % tpcc_neworder_item_steps() == 0)
+    // ITEM is replicated. Execute its read at the stock participant, as
+    // Calvin does, while lookup_life_row uses physical index partition 0.
+    return tpcc_operation(_wl->t_item->get_table_id(), 0, item.item_id,
+                          LifeOperationKind::ReadField, I_PRICE, 0,
+                          stock_part);
+  const uint64_t packed = item.quantity |
+      (item.supply_w_id != t.w_id ? (uint64_t(1) << 63) : 0);
+  return tpcc_operation(_wl->t_stock->get_table_id(), stock_part, stock_key,
+                        LifeOperationKind::TpccUpdateStock, S_QUANTITY,
+                        packed);
+}
+
+row_t *TPCCTxnManager::lookup_life_row(const LifeObjectId &object) const {
+  INDEX *index = NULL;
+  if (object.table_id == _wl->t_warehouse->get_table_id()) index = _wl->i_warehouse;
+  else if (object.table_id == _wl->t_district->get_table_id()) index = _wl->i_district;
+  else if (object.table_id == _wl->t_customer->get_table_id()) index = _wl->i_customer_id;
+  else if (object.table_id == _wl->t_item->get_table_id()) index = _wl->i_item;
+  else if (object.table_id == _wl->t_stock->get_table_id()) index = _wl->i_stock;
+  else assert(false);
+  const uint64_t index_partition =
+      object.table_id == _wl->t_item->get_table_id() ? 0 : object.partition_id;
+  itemid_t *item = const_cast<TPCCTxnManager *>(this)->index_read(
+      index, object.primary_key, index_partition);
+  assert(item != NULL);
+  return static_cast<row_t *>(item->location);
+}
+
+LifeExecuteResult TPCCTxnManager::execute_life_operation(
+    LifeTxnDescriptor &descriptor, LifeOperation &operation) {
+  operation = life_current_operation(descriptor);
+  row_t *target = NULL;
+  if (descriptor.tpcc.by_last_name && operation.object.row_id == UINT64_MAX) {
+    itemid_t *item = index_read(_wl->i_customer_last, operation.object.primary_key,
+                                operation.object.partition_id);
+    assert(item != NULL);
+    itemid_t *mid = item;
+    uint64_t count = 0;
+    for (itemid_t *it = item; it != NULL; it = it->next) {
+      ++count;
+      if (count % 2 == 0) mid = mid->next;
+    }
+    target = static_cast<row_t *>(mid->location);
+    operation.object.primary_key = target->get_primary_key();
+    operation.object.row_id = target->get_primary_key();
+  } else {
+    target = lookup_life_row(operation.object);
+  }
+  operation.manager = target->manager;
+  return target->execute_life(descriptor, operation);
+}
+
+void TPCCTxnManager::life_advance_program(LifeTxnDescriptor &d,
+                                           const LifeOperation &op,
+                                           const LifeResponse &response) {
+  LifeHistoryEntry entry;
+  entry.operation = op;
+  entry.response = response;
+  life_append_history(d, entry);
+  life_reconcile_descriptor(d);
+}
+
+uint64_t TPCCTxnManager::life_program_position(const LifeTxnDescriptor &d) const {
+  return d.tpcc.program_index;
+}
+bool TPCCTxnManager::life_program_present(const LifeTxnDescriptor &d) const {
+  return d.workload == LifeWorkloadKind::Tpcc;
+}
+void TPCCTxnManager::life_reset_program(LifeTxnDescriptor &d) {
+  d.tpcc.program_index = 0;
+  d.tpcc.item_index = 0;
+  d.tpcc.o_id = 0;
+  d.tpcc.stock_quantity = 0;
+  d.tpcc.scratch_bits = 0;
+  d.tpcc.state = d.tpcc.txn_type == TPCC_PAYMENT ? TPCC_PAYMENT0 : TPCC_NEWORDER0;
+}
+void TPCCTxnManager::life_copy_program_to_workload(const LifeTxnDescriptor &d) {
+  state = static_cast<TPCCRemTxnType>(d.tpcc.state);
+  next_item_id = d.tpcc.item_index;
+  static_cast<TPCCQuery *>(query)->o_id = d.tpcc.o_id;
+}
+void TPCCTxnManager::life_copy_remote_program(LifeTxnDescriptor &dst,
+                                               const LifeTxnDescriptor &src) {
+  assert(src.workload == LifeWorkloadKind::Tpcc);
+  dst.workload = src.workload;
+  dst.tpcc = src.tpcc;
+}
+uint64_t TPCCTxnManager::life_remote_batch_stop(const LifeTxnDescriptor &d,
+                                                 uint64_t node) const {
+  LifeTxnDescriptor probe = d;
+  uint64_t stop = probe.tpcc.program_index;
+  while (!life_program_done(probe)) {
+    LifeOperation op = life_current_operation(probe);
+    if (GET_NODE_ID(life_routing_partition(op.object)) != node) break;
+    ++probe.tpcc.program_index;
+    ++stop;
+  }
+  return stop == d.tpcc.program_index ? stop + 1 : stop;
+}
+
+void TPCCTxnManager::stage_life_insert(const LifeTxnDescriptor &descriptor,
+                                       row_t *staged_row,
+                                       table_t *table) {
+  LifeStagedInsert insert;
+  insert.pid = descriptor.pid;
+  insert.tid = descriptor.tid;
+  insert.row = staged_row;
+  insert.table = table;
+  life_staged_inserts.push_back(insert);
+}
+
+void TPCCTxnManager::stage_life_inserts(
+    const LifeTxnDescriptor &descriptor) {
+  const LifeTpccSnapshot &t = descriptor.tpcc;
+  if (t.txn_type == TPCC_PAYMENT) {
+    if (GET_NODE_ID(wh_to_part(t.c_w_id)) != g_node_id) return;
+    row_t *hist;
+    uint64_t row_id = 0;
+    _wl->t_history->get_new_row(hist, wh_to_part(t.c_w_id), row_id);
+    hist->set_value(H_C_ID, t.c_id);
+    hist->set_value(H_C_D_ID, t.c_d_id);
+    hist->set_value(H_C_W_ID, t.c_w_id);
+    hist->set_value(H_D_ID, t.d_id);
+    hist->set_value(H_W_ID, t.w_id);
+    int64_t date = 2013;
+    hist->set_value(H_DATE, date);
+    const double amount = tpcc_bits_double(t.h_amount_bits);
+    hist->set_value(H_AMOUNT, amount);
+    stage_life_insert(descriptor, hist, _wl->t_history);
+    return;
+  }
+
+  if (GET_NODE_ID(wh_to_part(t.w_id)) == g_node_id) {
+    uint64_t row_id = 0;
+    row_t *order;
+    _wl->t_order->get_new_row(order, wh_to_part(t.w_id), row_id);
+    order->set_value(O_ID, t.o_id);
+    order->set_value(O_C_ID, t.c_id);
+    order->set_value(O_D_ID, t.d_id);
+    order->set_value(O_W_ID, t.w_id);
+    order->set_value(O_ENTRY_D, t.o_entry_d);
+    order->set_value(O_OL_CNT, t.ol_cnt);
+    const int64_t all_local = t.remote ? 0 : 1;
+    order->set_value(O_ALL_LOCAL, all_local);
+    stage_life_insert(descriptor, order, _wl->t_order);
+
+    row_t *new_order;
+    _wl->t_neworder->get_new_row(new_order, wh_to_part(t.w_id), row_id);
+    new_order->set_value(NO_O_ID, t.o_id);
+    new_order->set_value(NO_D_ID, t.d_id);
+    new_order->set_value(NO_W_ID, t.w_id);
+    stage_life_insert(descriptor, new_order, _wl->t_neworder);
+  }
+
+  for (size_t i = 0; i < t.items.size(); ++i) {
+    const LifeTpccItem &item = t.items[i];
+    if (GET_NODE_ID(wh_to_part(item.supply_w_id)) != g_node_id) continue;
+    uint64_t row_id = 0;
+    row_t *line;
+    _wl->t_orderline->get_new_row(line, wh_to_part(item.supply_w_id), row_id);
+    line->set_value(OL_O_ID, t.o_id);
+    line->set_value(OL_D_ID, t.d_id);
+    line->set_value(OL_W_ID, t.w_id);
+    const uint64_t number = i;
+    line->set_value(OL_NUMBER, number);
+    line->set_value(OL_I_ID, item.item_id);
+#if !TPCC_SMALL
+    line->set_value(OL_SUPPLY_W_ID, item.supply_w_id);
+    line->set_value(OL_QUANTITY, item.quantity);
+    const uint64_t amount = 0;
+    line->set_value(OL_AMOUNT, amount);
+#endif
+    stage_life_insert(descriptor, line, _wl->t_orderline);
+  }
+}
+
+void TPCCTxnManager::life_stage_inserts(
+    const LifeTxnDescriptor &descriptor) {
+  if (descriptor.workload != LifeWorkloadKind::Tpcc)
+    return;
+  for (std::vector<LifeStagedInsert>::const_iterator it =
+           life_staged_inserts.begin();
+       it != life_staged_inserts.end(); ++it) {
+    if (it->pid == descriptor.pid && it->tid == descriptor.tid)
+      return;
+  }
+  stage_life_inserts(descriptor);
+}
+
+void TPCCTxnManager::life_publish_staged_inserts(
+    const LifeTxnDescriptor &descriptor) {
+  for (std::vector<LifeStagedInsert>::iterator it =
+           life_staged_inserts.begin();
+       it != life_staged_inserts.end();) {
+    if (it->pid != descriptor.pid || it->tid != descriptor.tid) {
+      ++it;
+      continue;
+    }
+    // Runtime TPC-C inserts have no active index publication in this codebase;
+    // committed rows are retained when transaction-owned insert tracking is
+    // cleared. Dropping the staging record transfers that same ownership
+    // without tying a helped transaction's committed rows to the helper's
+    // later abort cleanup.
+    it = life_staged_inserts.erase(it);
+  }
+}
+
+void TPCCTxnManager::life_discard_staged_inserts(
+    const LifeTxnDescriptor &descriptor) {
+  for (std::vector<LifeStagedInsert>::iterator it =
+           life_staged_inserts.begin();
+       it != life_staged_inserts.end();) {
+    if (it->pid != descriptor.pid || it->tid != descriptor.tid) {
+      ++it;
+      continue;
+    }
+    it->row->manager->~Row_life();
+    mem_allocator.free(it->row->manager, 0);
+    it->row->free_row();
+    mem_allocator.free(it->row, sizeof(row_t));
+    it = life_staged_inserts.erase(it);
+  }
+}
+
+void TPCCTxnManager::discard_all_life_staged_inserts() {
+  while (!life_staged_inserts.empty()) {
+    LifeStagedInsert &insert = life_staged_inserts.back();
+    insert.row->manager->~Row_life();
+    mem_allocator.free(insert.row->manager, 0);
+    insert.row->free_row();
+    mem_allocator.free(insert.row, sizeof(row_t));
+    life_staged_inserts.pop_back();
+  }
+}
+#endif
 
 
 RC TPCCTxnManager::run_calvin_txn() {
@@ -1099,10 +1528,10 @@ RC TPCCTxnManager::run_tpcc_phase5() {
       }
       break;
 		case TPCC_NEW_ORDER :
-      if(w_loc) {
-        //rc = new_order_4( w_id, d_id, c_id, remote, ol_cnt, o_entry_d, &tpcc_query->o_id, row); 
-        rc = new_order_5( w_id, d_id, c_id, remote, ol_cnt, o_entry_d, &tpcc_query->o_id, row); 
-      }
+	      if(w_loc) {
+	        rc = new_order_4( w_id, d_id, c_id, remote, ol_cnt, o_entry_d, &tpcc_query->o_id, row);
+	        rc = new_order_5( w_id, d_id, c_id, remote, ol_cnt, o_entry_d, &tpcc_query->o_id, row);
+	      }
         for(uint64_t i = 0; i < tpcc_query->ol_cnt; i++) {
 
           uint64_t ol_number = i;
@@ -1123,4 +1552,3 @@ RC TPCCTxnManager::run_tpcc_phase5() {
   return rc;
 
 }
-

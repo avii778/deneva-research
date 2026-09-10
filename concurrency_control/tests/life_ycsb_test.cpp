@@ -5,6 +5,9 @@
 #include "../../storage/row.h"
 #include "../../storage/table.h"
 #include "../../system/mem_alloc.h"
+#if WORKLOAD == TPCC
+#include "../../benchmarks/tpcc_const.h"
+#endif
 
 #include <cassert>
 #include <cstdlib>
@@ -179,6 +182,9 @@ void test_add_int64_replays_and_commits() {
 
   LifeTxnDescriptor tx = descriptor(1, 44, 1, YCSB_0, 0);
   LifeOperation add = operation(row, LifeOperationKind::AddInt64, 0);
+  // A replicated row keeps its physical identity while protocol routing can
+  // target a different logical partition.
+  add.object.routing_partition_id = 7;
   const int64_t delta = -3;
   add.argument.assign(reinterpret_cast<const uint8_t *>(&delta),
                       reinterpret_cast<const uint8_t *>(&delta) +
@@ -294,6 +300,117 @@ void test_execute_stale_history_refresh_and_help() {
   assert(refreshed_help.transaction == refreshed);
 
   std::free(row.data);
+}
+
+void test_execute_rejects_globally_stale_descriptor() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+
+  row_t row;
+  row.init(&table, 4, 0);
+  row.set_primary_key(7);
+  const uint64_t initial_value = 42;
+  std::memcpy(row.data, &initial_value, sizeof(initial_value));
+
+  Row_life life_row;
+  life_row.init(&row);
+
+  const LifeOperation read = operation(row, LifeOperationKind::ReadField, 0);
+  LifeTxnDescriptor newest = descriptor(1, 10, 1, YCSB_0, 0);
+
+  // Model progress on two other objects. The row record must retain this
+  // complete descriptor even if a delayed continuation has the same amount of
+  // history for this row.
+  for (uint64_t key = 100; key < 102; ++key) {
+    LifeHistoryEntry foreign;
+    foreign.operation = read;
+    foreign.operation.object.table_id = 99;
+    foreign.operation.object.primary_key = key;
+    foreign.operation.object.row_id = key;
+    newest.history.push_back(foreign);
+  }
+
+  const LifeExecuteResult first = life_row.execute(newest, read);
+  assert(first.code == LifeResultCode::Success);
+  LifeHistoryEntry read_entry;
+  read_entry.operation = read;
+  read_entry.response = first.response;
+  newest.history.push_back(read_entry);
+
+  LifeTxnDescriptor stale = descriptor(1, 10, 1, YCSB_0, 0);
+  stale.history.push_back(read_entry);
+  const LifeOperation write = operation(row, LifeOperationKind::WriteField, 84);
+  const LifeExecuteResult rejected = life_row.execute(stale, write);
+  assert(rejected.code == LifeResultCode::InvalidOperation);
+
+  const LifeTxnDescriptor contender = descriptor(2, 20, 1, YCSB_0, 0);
+  const LifeExecuteResult help = life_row.execute(contender, read);
+  assert(help.code == LifeResultCode::Help);
+  assert(help.transaction == newest);
+
+  std::free(row.data);
+  delete[] schema._columns;
+}
+
+void test_prepared_holder_precedes_committed_duplicate() {
+  Catalog schema;
+  schema.table_name = "MAIN_TABLE";
+  schema.table_id = 3;
+  schema.field_cnt = 1;
+  schema.tuple_size = sizeof(uint64_t);
+  schema._columns = new Column[1];
+  schema._columns[0].id = 0;
+  schema._columns[0].size = sizeof(uint64_t);
+  schema._columns[0].index = 0;
+
+  table_t table;
+  table.init(&schema);
+
+  row_t row;
+  row.init(&table, 4, 0);
+  row.set_primary_key(7);
+  const uint64_t initial_value = 42;
+  std::memcpy(row.data, &initial_value, sizeof(initial_value));
+
+  Row_life life_row;
+  life_row.init(&row);
+  const LifeOperation read = operation(row, LifeOperationKind::ReadField, 0);
+
+  LifeTxnDescriptor committed = descriptor(1, 10, 1, YCSB_0, 0);
+  const LifeExecuteResult committed_execute = life_row.execute(committed, read);
+  assert(committed_execute.code == LifeResultCode::Success);
+  LifeHistoryEntry committed_entry;
+  committed_entry.operation = read;
+  committed_entry.response = committed_execute.response;
+  committed.history.push_back(committed_entry);
+  assert(life_row.prepare(committed).code == LifeResultCode::Success);
+  life_row.commit(committed);
+
+  LifeTxnDescriptor holder = descriptor(2, 20, 1, YCSB_0, 0);
+  const LifeExecuteResult holder_execute = life_row.execute(holder, read);
+  assert(holder_execute.code == LifeResultCode::Success);
+  LifeHistoryEntry holder_entry;
+  holder_entry.operation = read;
+  holder_entry.response = holder_execute.response;
+  holder.history.push_back(holder_entry);
+  assert(life_row.prepare(holder).code == LifeResultCode::Success);
+
+  const LifeExecuteResult duplicate = life_row.execute(committed, read);
+  assert(duplicate.code == LifeResultCode::Finalize);
+  assert(duplicate.transaction == holder);
+
+  std::free(row.data);
+  delete[] schema._columns;
 }
 
 void test_rollback_runs_inline_help() {
@@ -897,6 +1014,204 @@ void test_local_row_cache_and_incremental_grouping() {
   std::free(row.data);
 }
 
+#if WORKLOAD == TPCC
+void init_uniform_schema(Catalog &schema, uint64_t table_id,
+                         uint32_t field_count) {
+  schema.table_id = table_id;
+  schema.table_name = "TPCC_RMW_TEST";
+  schema.field_cnt = field_count;
+  schema.tuple_size = field_count * sizeof(uint64_t);
+  schema._columns = new Column[field_count];
+  for (uint32_t field = 0; field < field_count; ++field) {
+    schema._columns[field].id = field;
+    schema._columns[field].size = sizeof(uint64_t);
+    schema._columns[field].index = field * sizeof(uint64_t);
+  }
+}
+
+LifeOperation tpcc_operation(row_t &row, LifeOperationKind kind,
+                             uint32_t field, uint64_t argument) {
+  LifeOperation op;
+  op.object.table_id = row.table->get_table_id();
+  op.object.partition_id = row.get_part_id();
+  op.object.primary_key = row.get_primary_key();
+  op.object.row_id = row.get_primary_key();
+  op.kind = kind;
+  op.field_id = field;
+  op.value_size = sizeof(argument);
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&argument);
+  op.argument.assign(bytes, bytes + sizeof(argument));
+  return op;
+}
+
+LifeExecuteResult execute_and_commit(Row_life &manager, LifeTxnDescriptor &tx,
+                                     LifeOperation &operation) {
+  operation.manager = &manager;
+  LifeExecuteResult result = manager.execute(tx, operation);
+  assert(result.code == LifeResultCode::Success);
+  LifeHistoryEntry entry;
+  entry.operation = operation;
+  entry.response = result.response;
+  life_append_history(tx, entry);
+  assert(tx.history.size() == 1);
+  assert(manager.prepare(tx).code == LifeResultCode::Success);
+  manager.commit(tx);
+  return result;
+}
+
+void test_tpcc_payment_ytd_rmw() {
+  Catalog schema;
+  init_uniform_schema(schema, 30, W_YTD + 1);
+  table_t table;
+  table.init(&schema);
+  row_t row;
+  row.init(&table, 0, 0);
+  row.set_primary_key(1);
+  double ytd = 30000.0;
+  std::memcpy(row.data + schema.get_field_index(W_YTD), &ytd, sizeof(ytd));
+  Row_life manager;
+  manager.init(&row);
+
+  const double amount = 125.5;
+  uint64_t amount_bits;
+  std::memcpy(&amount_bits, &amount, sizeof(amount_bits));
+  LifeOperation operation = tpcc_operation(
+      row, LifeOperationKind::TpccPaymentYtd, W_YTD, amount_bits);
+  LifeTxnDescriptor tx = descriptor(1, 100, 1, YCSB_0, 0);
+  execute_and_commit(manager, tx, operation);
+  std::memcpy(&ytd, row.data + schema.get_field_index(W_YTD), sizeof(ytd));
+  assert(ytd == 30125.5);
+
+  std::free(row.data);
+  delete[] schema._columns;
+}
+
+void test_tpcc_customer_payment_rmw() {
+  Catalog schema;
+  init_uniform_schema(schema, 31, C_PAYMENT_CNT + 1);
+  table_t table;
+  table.init(&schema);
+  row_t row;
+  row.init(&table, 0, 0);
+  row.set_primary_key(2);
+  double balance = 1000.0;
+  double ytd = 50.0;
+  uint64_t count = 7;
+  const uint64_t untouched = 99;
+  std::memcpy(row.data + schema.get_field_index(C_DISCOUNT), &untouched,
+              sizeof(untouched));
+  std::memcpy(row.data + schema.get_field_index(C_BALANCE), &balance,
+              sizeof(balance));
+  std::memcpy(row.data + schema.get_field_index(C_YTD_PAYMENT), &ytd,
+              sizeof(ytd));
+  std::memcpy(row.data + schema.get_field_index(C_PAYMENT_CNT), &count,
+              sizeof(count));
+  Row_life manager;
+  manager.init(&row);
+
+  const double amount = 25.0;
+  uint64_t amount_bits;
+  std::memcpy(&amount_bits, &amount, sizeof(amount_bits));
+  LifeOperation operation = tpcc_operation(
+      row, LifeOperationKind::TpccPaymentCustomer, C_BALANCE, amount_bits);
+  LifeTxnDescriptor tx = descriptor(2, 101, 1, YCSB_0, 0);
+  execute_and_commit(manager, tx, operation);
+  uint64_t unchanged;
+  std::memcpy(&balance, row.data + schema.get_field_index(C_BALANCE),
+              sizeof(balance));
+  std::memcpy(&ytd, row.data + schema.get_field_index(C_YTD_PAYMENT),
+              sizeof(ytd));
+  std::memcpy(&count, row.data + schema.get_field_index(C_PAYMENT_CNT),
+              sizeof(count));
+  std::memcpy(&unchanged, row.data + schema.get_field_index(C_DISCOUNT),
+              sizeof(unchanged));
+  assert(balance == 975.0);
+  assert(ytd == 75.0);
+  assert(count == 8);
+  assert(unchanged == untouched);
+
+  std::free(row.data);
+  delete[] schema._columns;
+}
+
+void test_tpcc_next_order_id_rmw_returns_new_value() {
+  Catalog schema;
+  init_uniform_schema(schema, 32, D_NEXT_O_ID + 1);
+  table_t table;
+  table.init(&schema);
+  row_t row;
+  row.init(&table, 0, 0);
+  row.set_primary_key(3);
+  uint64_t order_id = 3001;
+  std::memcpy(row.data + schema.get_field_index(D_NEXT_O_ID), &order_id,
+              sizeof(order_id));
+  Row_life manager;
+  manager.init(&row);
+
+  LifeOperation operation = tpcc_operation(
+      row, LifeOperationKind::TpccNextOrderId, D_NEXT_O_ID, 0);
+  LifeTxnDescriptor tx = descriptor(3, 102, 1, YCSB_0, 0);
+  const LifeExecuteResult result = execute_and_commit(manager, tx, operation);
+  assert(result.response.value.size() == sizeof(order_id));
+  uint64_t returned_id;
+  std::memcpy(&returned_id, result.response.value.data(), sizeof(returned_id));
+  std::memcpy(&order_id, row.data + schema.get_field_index(D_NEXT_O_ID),
+              sizeof(order_id));
+  assert(returned_id == 3002);
+  assert(order_id == 3002);
+
+  std::free(row.data);
+  delete[] schema._columns;
+}
+
+void test_tpcc_stock_rmw_branches_and_remote_count() {
+  Catalog schema;
+  init_uniform_schema(schema, 33, S_REMOTE_CNT + 1);
+  table_t table;
+  table.init(&schema);
+
+  for (uint32_t branch = 0; branch < 2; ++branch) {
+    row_t row;
+    row.init(&table, 0, 0);
+    row.set_primary_key(10 + branch);
+    uint64_t quantity = branch == 0 ? 100 : 15;
+    uint64_t remote_count = 4;
+    std::memcpy(row.data + schema.get_field_index(S_QUANTITY), &quantity,
+                sizeof(quantity));
+    std::memcpy(row.data + schema.get_field_index(S_REMOTE_CNT), &remote_count,
+                sizeof(remote_count));
+    Row_life manager;
+    manager.init(&row);
+
+    const bool remote = branch != 0;
+    const uint64_t packed = 5 | (remote ? (uint64_t(1) << 63) : 0);
+    LifeOperation operation = tpcc_operation(
+        row, LifeOperationKind::TpccUpdateStock, S_QUANTITY, packed);
+    LifeTxnDescriptor tx = descriptor(4 + branch, 103 + branch, 1, YCSB_0, 0);
+    execute_and_commit(manager, tx, operation);
+    std::memcpy(&quantity, row.data + schema.get_field_index(S_QUANTITY),
+                sizeof(quantity));
+    std::memcpy(&remote_count,
+                row.data + schema.get_field_index(S_REMOTE_CNT),
+                sizeof(remote_count));
+    assert(quantity == (branch == 0 ? 95 : 101));
+    assert(remote_count == (remote ? 5 : 4));
+#if !TPCC_SMALL
+    uint64_t ytd;
+    uint64_t order_count;
+    std::memcpy(&ytd, row.data + schema.get_field_index(S_YTD), sizeof(ytd));
+    std::memcpy(&order_count,
+                row.data + schema.get_field_index(S_ORDER_CNT),
+                sizeof(order_count));
+    assert(ytd == 5);
+    assert(order_count == 1);
+#endif
+    std::free(row.data);
+  }
+  delete[] schema._columns;
+}
+#endif
+
 } // namespace
 
 int main() {
@@ -909,6 +1224,8 @@ int main() {
   test_query_stably_groups_destinations_home_first();
 #endif
   test_execute_stale_history_refresh_and_help();
+  test_execute_rejects_globally_stale_descriptor();
+  test_prepared_holder_precedes_committed_duplicate();
   test_rollback_runs_inline_help();
 #if life_fairness
   test_priority_heap_orders_all_uncommitted_transactions();
@@ -921,5 +1238,11 @@ int main() {
   test_shared_prepare_owns_descriptor_and_read_commit_is_stable();
   test_prepared_rows_share_one_frozen_descriptor();
   test_local_row_cache_and_incremental_grouping();
+#if WORKLOAD == TPCC
+  test_tpcc_payment_ytd_rmw();
+  test_tpcc_customer_payment_rmw();
+  test_tpcc_next_order_id_rmw_returns_new_value();
+  test_tpcc_stock_rmw_branches_and_remote_count();
+#endif
   return 0;
 }

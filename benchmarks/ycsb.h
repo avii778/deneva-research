@@ -152,9 +152,16 @@ protected:
       const LifeTxnDescriptor &descriptor);
   virtual void life_copy_remote_program(LifeTxnDescriptor &destination,
                                         const LifeTxnDescriptor &source);
+  virtual void life_stage_inserts(const LifeTxnDescriptor &descriptor);
+  virtual void life_publish_staged_inserts(
+      const LifeTxnDescriptor &descriptor);
+  virtual void life_discard_staged_inserts(
+      const LifeTxnDescriptor &descriptor);
   bool finalize_life_descriptor(LifeTxnDescriptor &descriptor);
   void reset_life_descriptor(LifeTxnDescriptor &descriptor,
                              uint64_t observed_attempt);
+  void rollback_and_reset_life_descriptor(LifeTxnDescriptor &descriptor,
+                                          uint64_t observed_attempt);
   void append_life_success(LifeTxnDescriptor &descriptor,
                            const LifeOperation &operation,
                            const LifeResponse &response);

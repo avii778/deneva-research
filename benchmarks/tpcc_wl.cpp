@@ -247,7 +247,7 @@ void TPCCWorkload::init_tab_wh() {
     if(GET_NODE_ID(wh_to_part(wid)) != g_node_id) continue;
 		row_t * row;
 		uint64_t row_id;
-		t_warehouse->get_new_row(row, 0, row_id);
+		t_warehouse->get_new_row(row, wh_to_part(wid), row_id);
 		row->set_primary_key(wid);
 
 		row->set_value(W_ID, wid);
@@ -282,8 +282,8 @@ void TPCCWorkload::init_tab_dist(uint64_t wid) {
 	for (uint64_t did = 1; did <= g_dist_per_wh; did++) {
 		row_t * row;
 		uint64_t row_id;
-		t_district->get_new_row(row, 0, row_id);
-		row->set_primary_key(did);
+		t_district->get_new_row(row, wh_to_part(wid), row_id);
+		row->set_primary_key(distKey(did, wid));
 		
 		row->set_value(D_ID, did);
 		row->set_value(D_W_ID, wid);
@@ -318,8 +318,8 @@ void TPCCWorkload::init_tab_stock(int id, uint64_t wid) {
 	for (UInt32 sid = id + 1; sid <= g_max_items; sid+=g_init_parallelism) {
 		row_t * row;
 		uint64_t row_id;
-		t_stock->get_new_row(row, 0, row_id);
-		row->set_primary_key(sid);
+		t_stock->get_new_row(row, wh_to_part(wid), row_id);
+		row->set_primary_key(stockKey(sid, wid));
 		row->set_value(S_I_ID, sid);
 		row->set_value(S_W_ID, wid);
 		row->set_value(S_QUANTITY, URand(10, 100));
@@ -360,8 +360,8 @@ void TPCCWorkload::init_tab_cust(int id, uint64_t did, uint64_t wid) {
 	for (UInt32 cid = id+1; cid <= g_cust_per_dist; cid += g_init_parallelism) {
 		row_t * row;
 		uint64_t row_id;
-		t_customer->get_new_row(row, 0, row_id);
-		row->set_primary_key(cid);
+		t_customer->get_new_row(row, wh_to_part(wid), row_id);
+		row->set_primary_key(custKey(cid, did, wid));
 
 		row->set_value(C_ID, cid);		
 		row->set_value(C_D_ID, did);
@@ -416,7 +416,8 @@ void TPCCWorkload::init_tab_cust(int id, uint64_t did, uint64_t wid) {
 		row->set_value(C_DISCOUNT, (double)RAND(5000) / 10000);
 		row->set_value(C_BALANCE, -10.0);
 		row->set_value(C_YTD_PAYMENT, 10.0);
-		row->set_value(C_PAYMENT_CNT, 1);
+		const uint64_t payment_count = 1;
+		row->set_value(C_PAYMENT_CNT, payment_count);
 		uint64_t key;
 		key = custNPKey(c_last, did, wid);
 		index_insert(i_customer_last, key, row, wh_to_part(wid));
@@ -629,6 +630,3 @@ void * TPCCWorkload::threadInitOrder(void * This) {
 	printf("ORDER Done\n");
 	return NULL;
 }
-
-
-

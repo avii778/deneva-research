@@ -21,6 +21,9 @@
 #include "txn.h"
 #include "query.h"
 #include "row.h"
+#if CC_ALG == LIFE
+#include "ycsb.h"
+#endif
 
 class TPCCQuery;
 class TPCCQueryMessage;
@@ -117,9 +120,17 @@ private:
     UInt32 tot;
   };
 
-class TPCCTxnManager : public TxnManager
+class TPCCTxnManager : public
+#if CC_ALG == LIFE
+  LifeTxnManager
+#else
+  TxnManager
+#endif
 {
 public:
+#if CC_ALG == LIFE
+  TPCCTxnManager();
+#endif
 	void init(uint64_t thd_id, Workload * h_wl);
   void reset();
   RC acquire_locks(); 
@@ -130,12 +141,45 @@ public:
   RC run_tpcc_phase5(); 
 	TPCCRemTxnType state;
   void copy_remote_items(TPCCQueryMessage * msg); 
+#if CC_ALG == LIFE
+  LifeTxnDescriptor life_descriptor() const;
+  void life_reset_workload();
+protected:
+  LifeExecuteResult execute_life_operation(LifeTxnDescriptor &, LifeOperation &);
+  void life_reconcile_descriptor(LifeTxnDescriptor &);
+  bool life_program_done(const LifeTxnDescriptor &) const;
+  LifeOperation life_current_operation(LifeTxnDescriptor &) const;
+  void life_advance_program(LifeTxnDescriptor &, const LifeOperation &,
+                            const LifeResponse &);
+  uint64_t life_program_position(const LifeTxnDescriptor &) const;
+  bool life_program_present(const LifeTxnDescriptor &) const;
+  void life_reset_program(LifeTxnDescriptor &);
+  void life_copy_program_to_workload(const LifeTxnDescriptor &);
+  void life_copy_remote_program(LifeTxnDescriptor &, const LifeTxnDescriptor &);
+  void life_stage_inserts(const LifeTxnDescriptor &);
+  void life_publish_staged_inserts(const LifeTxnDescriptor &);
+  void life_discard_staged_inserts(const LifeTxnDescriptor &);
+  uint64_t life_remote_batch_stop(const LifeTxnDescriptor &, uint64_t) const;
+  row_t *lookup_life_row(const LifeObjectId &) const;
+#endif
 private:
 	TPCCWorkload * _wl;
 	volatile RC _rc;
   row_t * row;
 
   uint64_t next_item_id;
+#if CC_ALG == LIFE
+  struct LifeStagedInsert {
+    LifeProcessId pid;
+    LifeTxnId tid;
+    row_t *row;
+    table_t *table;
+  };
+  std::vector<LifeStagedInsert> life_staged_inserts;
+  void stage_life_insert(const LifeTxnDescriptor &, row_t *, table_t *);
+  void stage_life_inserts(const LifeTxnDescriptor &);
+  void discard_all_life_staged_inserts();
+#endif
 
 void next_tpcc_state();
 RC run_txn_state();

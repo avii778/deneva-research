@@ -111,13 +111,14 @@ void life_read_bytes(char *buf, uint64_t &ptr, LifeBytes &bytes) {
 }
 
 uint64_t life_object_id_size() {
-  return sizeof(uint64_t) * 4;
+  return sizeof(uint64_t) * 5;
 }
 
 void life_write_object_id(char *buf, uint64_t &ptr,
                           const LifeObjectId &object) {
   COPY_BUF(buf, object.table_id, ptr);
   COPY_BUF(buf, object.partition_id, ptr);
+  COPY_BUF(buf, object.routing_partition_id, ptr);
   COPY_BUF(buf, object.primary_key, ptr);
   COPY_BUF(buf, object.row_id, ptr);
 }
@@ -125,6 +126,7 @@ void life_write_object_id(char *buf, uint64_t &ptr,
 void life_read_object_id(char *buf, uint64_t &ptr, LifeObjectId &object) {
   COPY_VAL(object.table_id, buf, ptr);
   COPY_VAL(object.partition_id, buf, ptr);
+  COPY_VAL(object.routing_partition_id, buf, ptr);
   COPY_VAL(object.primary_key, buf, ptr);
   COPY_VAL(object.row_id, buf, ptr);
 }
@@ -206,47 +208,90 @@ void life_read_ycsb_request(char *buf, uint64_t &ptr,
   request.row = NULL;
 }
 
-uint64_t life_descriptor_size(const LifeTxnDescriptor &descriptor) {
+uint64_t life_descriptor_size(const LifeTxnDescriptor &descriptor,
+                              bool include_requests = true) {
   uint64_t size = sizeof(descriptor.pid.node_id) +
                   sizeof(descriptor.pid.worker_id) + sizeof(uint64_t) * 2;
   size += sizeof(uint32_t); // workload
-  size += sizeof(uint32_t) + sizeof(uint64_t);
-  size += sizeof(uint32_t) * 2 + sizeof(uint64_t) * 6 + sizeof(size_t) +
-          sizeof(uint64_t) * descriptor.pps.part_keys.size();
+  if (descriptor.workload == LifeWorkloadKind::Ycsb) {
+    size += sizeof(uint32_t) + sizeof(uint64_t);
+  } else if (descriptor.workload == LifeWorkloadKind::Pps) {
+    size += sizeof(uint32_t) * 2 + sizeof(uint64_t) * 6 + sizeof(size_t) +
+            sizeof(uint64_t) * descriptor.pps.part_keys.size();
+  } else if (descriptor.workload == LifeWorkloadKind::Tpcc) {
+    size += sizeof(uint32_t) * 2 + sizeof(uint64_t) * 14 + sizeof(bool) * 3 +
+            sizeof(descriptor.tpcc.c_last) + sizeof(size_t) +
+            sizeof(uint64_t) * 3 * descriptor.tpcc.items.size();
+  }
 
   size += sizeof(size_t);
   for (size_t i = 0; i < descriptor.history.size(); ++i)
     size += life_history_entry_size(descriptor.history[i]);
 
-  size += sizeof(size_t);
-  for (size_t i = 0; i < descriptor.ycsb.requests.size(); ++i)
-    size += life_ycsb_request_size();
+  if (descriptor.workload == LifeWorkloadKind::Ycsb) {
+    size += sizeof(size_t);
+    if (include_requests)
+      size += descriptor.ycsb.requests.size() * life_ycsb_request_size();
+  }
 
   return size;
 }
 
 void life_write_descriptor(char *buf, uint64_t &ptr,
-                           const LifeTxnDescriptor &descriptor) {
+                           const LifeTxnDescriptor &descriptor,
+                           bool include_requests = true) {
   COPY_BUF(buf, descriptor.pid.node_id, ptr);
   COPY_BUF(buf, descriptor.pid.worker_id, ptr);
   COPY_BUF(buf, descriptor.tid.time, ptr);
   COPY_BUF(buf, descriptor.tid.attempt, ptr);
   const uint32_t workload = static_cast<uint32_t>(descriptor.workload);
   COPY_BUF(buf, workload, ptr);
-  COPY_BUF(buf, descriptor.ycsb.state, ptr);
-  COPY_BUF(buf, descriptor.ycsb.next_record_id, ptr);
-  COPY_BUF(buf, descriptor.pps.txn_type, ptr);
-  COPY_BUF(buf, descriptor.pps.state, ptr);
-  COPY_BUF(buf, descriptor.pps.part_key, ptr);
-  COPY_BUF(buf, descriptor.pps.supplier_key, ptr);
-  COPY_BUF(buf, descriptor.pps.product_key, ptr);
-  COPY_BUF(buf, descriptor.pps.scan_index, ptr);
-  COPY_BUF(buf, descriptor.pps.part_index, ptr);
-  COPY_BUF(buf, descriptor.pps.program_index, ptr);
-  size_t pps_size = descriptor.pps.part_keys.size();
-  COPY_BUF(buf, pps_size, ptr);
-  for (size_t i = 0; i < pps_size; ++i) {
-    COPY_BUF(buf, descriptor.pps.part_keys[i], ptr);
+  if (descriptor.workload == LifeWorkloadKind::Ycsb) {
+    COPY_BUF(buf, descriptor.ycsb.state, ptr);
+    COPY_BUF(buf, descriptor.ycsb.next_record_id, ptr);
+  } else if (descriptor.workload == LifeWorkloadKind::Pps) {
+    COPY_BUF(buf, descriptor.pps.txn_type, ptr);
+    COPY_BUF(buf, descriptor.pps.state, ptr);
+    COPY_BUF(buf, descriptor.pps.part_key, ptr);
+    COPY_BUF(buf, descriptor.pps.supplier_key, ptr);
+    COPY_BUF(buf, descriptor.pps.product_key, ptr);
+    COPY_BUF(buf, descriptor.pps.scan_index, ptr);
+    COPY_BUF(buf, descriptor.pps.part_index, ptr);
+    COPY_BUF(buf, descriptor.pps.program_index, ptr);
+    size_t pps_size = descriptor.pps.part_keys.size();
+    COPY_BUF(buf, pps_size, ptr);
+    for (size_t i = 0; i < pps_size; ++i) {
+      COPY_BUF(buf, descriptor.pps.part_keys[i], ptr);
+    }
+  } else if (descriptor.workload == LifeWorkloadKind::Tpcc) {
+    COPY_BUF(buf, descriptor.tpcc.txn_type, ptr);
+    COPY_BUF(buf, descriptor.tpcc.state, ptr);
+    COPY_BUF(buf, descriptor.tpcc.program_index, ptr);
+    COPY_BUF(buf, descriptor.tpcc.w_id, ptr);
+    COPY_BUF(buf, descriptor.tpcc.d_id, ptr);
+    COPY_BUF(buf, descriptor.tpcc.c_id, ptr);
+    COPY_BUF(buf, descriptor.tpcc.d_w_id, ptr);
+    COPY_BUF(buf, descriptor.tpcc.c_w_id, ptr);
+    COPY_BUF(buf, descriptor.tpcc.c_d_id, ptr);
+    COPY_BUF(buf, descriptor.tpcc.h_amount_bits, ptr);
+    COPY_BUF(buf, descriptor.tpcc.by_last_name, ptr);
+    memcpy(&buf[ptr], descriptor.tpcc.c_last, sizeof(descriptor.tpcc.c_last));
+    ptr += sizeof(descriptor.tpcc.c_last);
+    COPY_BUF(buf, descriptor.tpcc.remote, ptr);
+    COPY_BUF(buf, descriptor.tpcc.ol_cnt, ptr);
+    COPY_BUF(buf, descriptor.tpcc.o_entry_d, ptr);
+    COPY_BUF(buf, descriptor.tpcc.o_id, ptr);
+    COPY_BUF(buf, descriptor.tpcc.item_index, ptr);
+    COPY_BUF(buf, descriptor.tpcc.stock_quantity, ptr);
+    COPY_BUF(buf, descriptor.tpcc.scratch_bits, ptr);
+    COPY_BUF(buf, descriptor.tpcc.materialized, ptr);
+    const size_t tpcc_size = descriptor.tpcc.items.size();
+    COPY_BUF(buf, tpcc_size, ptr);
+    for (size_t i = 0; i < tpcc_size; ++i) {
+      COPY_BUF(buf, descriptor.tpcc.items[i].item_id, ptr);
+      COPY_BUF(buf, descriptor.tpcc.items[i].supply_w_id, ptr);
+      COPY_BUF(buf, descriptor.tpcc.items[i].quantity, ptr);
+    }
   }
 
   size_t size = descriptor.history.size();
@@ -254,10 +299,12 @@ void life_write_descriptor(char *buf, uint64_t &ptr,
   for (size_t i = 0; i < descriptor.history.size(); ++i)
     life_write_history_entry(buf, ptr, descriptor.history[i]);
 
-  size = descriptor.ycsb.requests.size();
-  COPY_BUF(buf, size, ptr);
-  for (size_t i = 0; i < descriptor.ycsb.requests.size(); ++i)
-    life_write_ycsb_request(buf, ptr, descriptor.ycsb.requests[i]);
+  if (descriptor.workload == LifeWorkloadKind::Ycsb) {
+    size = include_requests ? descriptor.ycsb.requests.size() : 0;
+    COPY_BUF(buf, size, ptr);
+    for (size_t i = 0; i < size; ++i)
+      life_write_ycsb_request(buf, ptr, descriptor.ycsb.requests[i]);
+  }
 }
 
 void life_read_descriptor(char *buf, uint64_t &ptr,
@@ -270,21 +317,54 @@ void life_read_descriptor(char *buf, uint64_t &ptr,
   uint32_t workload;
   COPY_VAL(workload, buf, ptr);
   descriptor.workload = static_cast<LifeWorkloadKind>(workload);
-  COPY_VAL(descriptor.ycsb.state, buf, ptr);
-  COPY_VAL(descriptor.ycsb.next_record_id, buf, ptr);
-  COPY_VAL(descriptor.pps.txn_type, buf, ptr);
-  COPY_VAL(descriptor.pps.state, buf, ptr);
-  COPY_VAL(descriptor.pps.part_key, buf, ptr);
-  COPY_VAL(descriptor.pps.supplier_key, buf, ptr);
-  COPY_VAL(descriptor.pps.product_key, buf, ptr);
-  COPY_VAL(descriptor.pps.scan_index, buf, ptr);
-  COPY_VAL(descriptor.pps.part_index, buf, ptr);
-  COPY_VAL(descriptor.pps.program_index, buf, ptr);
-  size_t pps_size;
-  COPY_VAL(pps_size, buf, ptr);
-  descriptor.pps.part_keys.resize(pps_size);
-  for (size_t i = 0; i < pps_size; ++i) {
-    COPY_VAL(descriptor.pps.part_keys[i], buf, ptr);
+  if (descriptor.workload == LifeWorkloadKind::Ycsb) {
+    COPY_VAL(descriptor.ycsb.state, buf, ptr);
+    COPY_VAL(descriptor.ycsb.next_record_id, buf, ptr);
+  } else if (descriptor.workload == LifeWorkloadKind::Pps) {
+    COPY_VAL(descriptor.pps.txn_type, buf, ptr);
+    COPY_VAL(descriptor.pps.state, buf, ptr);
+    COPY_VAL(descriptor.pps.part_key, buf, ptr);
+    COPY_VAL(descriptor.pps.supplier_key, buf, ptr);
+    COPY_VAL(descriptor.pps.product_key, buf, ptr);
+    COPY_VAL(descriptor.pps.scan_index, buf, ptr);
+    COPY_VAL(descriptor.pps.part_index, buf, ptr);
+    COPY_VAL(descriptor.pps.program_index, buf, ptr);
+    size_t pps_size;
+    COPY_VAL(pps_size, buf, ptr);
+    descriptor.pps.part_keys.resize(pps_size);
+    for (size_t i = 0; i < pps_size; ++i) {
+      COPY_VAL(descriptor.pps.part_keys[i], buf, ptr);
+    }
+  } else if (descriptor.workload == LifeWorkloadKind::Tpcc) {
+    COPY_VAL(descriptor.tpcc.txn_type, buf, ptr);
+    COPY_VAL(descriptor.tpcc.state, buf, ptr);
+    COPY_VAL(descriptor.tpcc.program_index, buf, ptr);
+    COPY_VAL(descriptor.tpcc.w_id, buf, ptr);
+    COPY_VAL(descriptor.tpcc.d_id, buf, ptr);
+    COPY_VAL(descriptor.tpcc.c_id, buf, ptr);
+    COPY_VAL(descriptor.tpcc.d_w_id, buf, ptr);
+    COPY_VAL(descriptor.tpcc.c_w_id, buf, ptr);
+    COPY_VAL(descriptor.tpcc.c_d_id, buf, ptr);
+    COPY_VAL(descriptor.tpcc.h_amount_bits, buf, ptr);
+    COPY_VAL(descriptor.tpcc.by_last_name, buf, ptr);
+    memcpy(descriptor.tpcc.c_last, &buf[ptr], sizeof(descriptor.tpcc.c_last));
+    ptr += sizeof(descriptor.tpcc.c_last);
+    COPY_VAL(descriptor.tpcc.remote, buf, ptr);
+    COPY_VAL(descriptor.tpcc.ol_cnt, buf, ptr);
+    COPY_VAL(descriptor.tpcc.o_entry_d, buf, ptr);
+    COPY_VAL(descriptor.tpcc.o_id, buf, ptr);
+    COPY_VAL(descriptor.tpcc.item_index, buf, ptr);
+    COPY_VAL(descriptor.tpcc.stock_quantity, buf, ptr);
+    COPY_VAL(descriptor.tpcc.scratch_bits, buf, ptr);
+    COPY_VAL(descriptor.tpcc.materialized, buf, ptr);
+    size_t tpcc_size;
+    COPY_VAL(tpcc_size, buf, ptr);
+    descriptor.tpcc.items.resize(tpcc_size);
+    for (size_t i = 0; i < tpcc_size; ++i) {
+      COPY_VAL(descriptor.tpcc.items[i].item_id, buf, ptr);
+      COPY_VAL(descriptor.tpcc.items[i].supply_w_id, buf, ptr);
+      COPY_VAL(descriptor.tpcc.items[i].quantity, buf, ptr);
+    }
   }
 
   size_t size;
@@ -293,28 +373,19 @@ void life_read_descriptor(char *buf, uint64_t &ptr,
   for (size_t i = 0; i < size; ++i)
     life_read_history_entry(buf, ptr, descriptor.history[i]);
 
-  COPY_VAL(size, buf, ptr);
-  descriptor.ycsb.requests.resize(size);
-  for (size_t i = 0; i < size; ++i)
-    life_read_ycsb_request(buf, ptr, descriptor.ycsb.requests[i]);
-  descriptor.history.reserve(descriptor.ycsb.requests.size());
-  descriptor.touched_objects.reserve(descriptor.ycsb.requests.size());
+  if (descriptor.workload == LifeWorkloadKind::Ycsb) {
+    COPY_VAL(size, buf, ptr);
+    descriptor.ycsb.requests.resize(size);
+    for (size_t i = 0; i < size; ++i)
+      life_read_ycsb_request(buf, ptr, descriptor.ycsb.requests[i]);
+    descriptor.history.reserve(descriptor.ycsb.requests.size());
+    descriptor.touched_objects.reserve(descriptor.ycsb.requests.size());
+  }
 }
 
 uint64_t life_result_size(const LifeExecuteResult &result) {
   return sizeof(uint32_t) + life_response_size(result.response) +
          life_descriptor_size(result.transaction) + sizeof(uint64_t);
-}
-
-uint64_t life_execute_success_result_size(const LifeExecuteResult &result) {
-  uint64_t size = sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) +
-                  sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) * 2 +
-                  sizeof(uint64_t) * 6 + sizeof(size_t) +
-                  sizeof(uint64_t) * result.transaction.pps.part_keys.size() +
-                  sizeof(uint64_t);
-  for (size_t i = 0; i < result.transaction.history.size(); ++i)
-    size += life_history_entry_size(result.transaction.history[i]);
-  return size;
 }
 
 void life_write_result(char *buf, uint64_t &ptr,
@@ -1522,9 +1593,14 @@ void LifeExecuteMessage::copy_to_buf(char *buf) {
 }
 
 uint64_t LifeExecuteResponseMessage::get_size() {
-  const uint64_t result_size = result.code == LifeResultCode::Success
-                                   ? life_execute_success_result_size(result)
-                                   : life_result_size(result);
+  uint64_t result_size;
+  if (result.code == LifeResultCode::Success) {
+    result_size = sizeof(uint32_t) + sizeof(uint8_t) +
+                  life_descriptor_size(result.transaction, false) +
+                  sizeof(uint64_t);
+  } else {
+    result_size = life_result_size(result);
+  }
   return Message::mget_size() + sizeof(wait_id) + sizeof(history_base_size) +
          sizeof(prepared) + result_size;
 }
@@ -1543,41 +1619,7 @@ void LifeExecuteResponseMessage::copy_from_buf(char *buf) {
   COPY_VAL(wait_id, buf, ptr);
   COPY_VAL(history_base_size, buf, ptr);
   COPY_VAL(prepared, buf, ptr);
-  uint32_t code;
-  COPY_VAL(code, buf, ptr);
-  result = LifeExecuteResult();
-  result.code = static_cast<LifeResultCode>(code);
-  if (result.code == LifeResultCode::Success) {
-    COPY_VAL(result.observed_attempt, buf, ptr);
-    uint32_t workload;
-    COPY_VAL(workload, buf, ptr);
-    result.transaction.workload = static_cast<LifeWorkloadKind>(workload);
-    COPY_VAL(result.transaction.ycsb.state, buf, ptr);
-    COPY_VAL(result.transaction.ycsb.next_record_id, buf, ptr);
-    COPY_VAL(result.transaction.pps.txn_type, buf, ptr);
-    COPY_VAL(result.transaction.pps.state, buf, ptr);
-    COPY_VAL(result.transaction.pps.part_key, buf, ptr);
-    COPY_VAL(result.transaction.pps.supplier_key, buf, ptr);
-    COPY_VAL(result.transaction.pps.product_key, buf, ptr);
-    COPY_VAL(result.transaction.pps.scan_index, buf, ptr);
-    COPY_VAL(result.transaction.pps.part_index, buf, ptr);
-    COPY_VAL(result.transaction.pps.program_index, buf, ptr);
-    size_t pps_size;
-    COPY_VAL(pps_size, buf, ptr);
-    result.transaction.pps.part_keys.resize(pps_size);
-    for (size_t i = 0; i < pps_size; ++i) {
-      COPY_VAL(result.transaction.pps.part_keys[i], buf, ptr);
-    }
-    uint64_t delta_size;
-    COPY_VAL(delta_size, buf, ptr);
-    result.transaction.history.resize(delta_size);
-    for (uint64_t i = 0; i < delta_size; ++i)
-      life_read_history_entry(buf, ptr, result.transaction.history[i]);
-  } else {
-    life_read_response(buf, ptr, result.response);
-    life_read_descriptor(buf, ptr, result.transaction);
-    COPY_VAL(result.observed_attempt, buf, ptr);
-  }
+  life_read_result(buf, ptr, result);
   assert(ptr == get_size());
 }
 
@@ -1588,36 +1630,15 @@ void LifeExecuteResponseMessage::copy_to_buf(char *buf) {
   COPY_BUF(buf, wait_id, ptr);
   COPY_BUF(buf, history_base_size, ptr);
   COPY_BUF(buf, prepared, ptr);
-  const uint32_t code = static_cast<uint32_t>(result.code);
-  COPY_BUF(buf, code, ptr);
   if (result.code == LifeResultCode::Success) {
+    const uint32_t code = static_cast<uint32_t>(result.code);
+    COPY_BUF(buf, code, ptr);
+    LifeResponse empty_response;
+    life_write_response(buf, ptr, empty_response);
+    life_write_descriptor(buf, ptr, result.transaction, false);
     COPY_BUF(buf, result.observed_attempt, ptr);
-    const uint32_t workload =
-        static_cast<uint32_t>(result.transaction.workload);
-    COPY_BUF(buf, workload, ptr);
-    COPY_BUF(buf, result.transaction.ycsb.state, ptr);
-    COPY_BUF(buf, result.transaction.ycsb.next_record_id, ptr);
-    COPY_BUF(buf, result.transaction.pps.txn_type, ptr);
-    COPY_BUF(buf, result.transaction.pps.state, ptr);
-    COPY_BUF(buf, result.transaction.pps.part_key, ptr);
-    COPY_BUF(buf, result.transaction.pps.supplier_key, ptr);
-    COPY_BUF(buf, result.transaction.pps.product_key, ptr);
-    COPY_BUF(buf, result.transaction.pps.scan_index, ptr);
-    COPY_BUF(buf, result.transaction.pps.part_index, ptr);
-    COPY_BUF(buf, result.transaction.pps.program_index, ptr);
-    const size_t pps_size = result.transaction.pps.part_keys.size();
-    COPY_BUF(buf, pps_size, ptr);
-    for (size_t i = 0; i < pps_size; ++i) {
-      COPY_BUF(buf, result.transaction.pps.part_keys[i], ptr);
-    }
-    const uint64_t delta_size = result.transaction.history.size();
-    COPY_BUF(buf, delta_size, ptr);
-    for (uint64_t i = 0; i < delta_size; ++i)
-      life_write_history_entry(buf, ptr, result.transaction.history[i]);
   } else {
-    life_write_response(buf, ptr, result.response);
-    life_write_descriptor(buf, ptr, result.transaction);
-    COPY_BUF(buf, result.observed_attempt, ptr);
+    life_write_result(buf, ptr, result);
   }
   assert(ptr == get_size());
 }

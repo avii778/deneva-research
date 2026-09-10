@@ -60,6 +60,7 @@ plot = True;
 clear = False;
 _timedate = [];
 exps = []
+skew_threshold = None
 for arg in sys.argv[1:]:
     if last_arg == "-n":
         exp_cnt = int(arg)
@@ -70,6 +71,13 @@ for arg in sys.argv[1:]:
             result_dir = normalize_result_dir(arg)
         except ValueError as exc:
             sys.exit(str(exc))
+    elif last_arg == "--skew-threshold":
+        try:
+            skew_threshold = float(arg)
+        except ValueError:
+            sys.exit("--skew-threshold must be a number")
+        if skew_threshold < 0:
+            sys.exit("--skew-threshold must be non-negative")
     elif arg == "-clear":
         clear = True
     elif arg == "-s":
@@ -80,22 +88,29 @@ for arg in sys.argv[1:]:
         plot = False
     elif arg == "-u":
         use_tmp = True
-    elif arg == "-n" or arg == "-tdate" or arg == "-r" or arg == "--results-dir":
+    elif (arg == "-n" or arg == "-tdate" or arg == "-r" or
+          arg == "--results-dir" or arg == "--skew-threshold"):
         blah = True
     elif arg == "-d":
         drop = True
     elif arg == "-help" or arg == "-h":
         sys.exit(
             "Usage: {} [-r RESULTS_DIR] [-np no plot] "
-            "[-clear clear all pickle files] [-tdate [date-time]] EXPERIMENT ..."
+            "[-clear clear all pickle files] [-tdate [date-time]] "
+            "[--skew-threshold MAX] EXPERIMENT ..."
             .format(sys.argv[0])
         )
     else:
         exps.append(arg)
     last_arg = arg
 
-if last_arg == "-r" or last_arg == "--results-dir":
-    sys.exit("{} requires a results directory".format(last_arg))
+if (last_arg == "-r" or last_arg == "--results-dir" or
+        last_arg == "--skew-threshold"):
+    sys.exit("{} requires a value".format(last_arg))
+
+if skew_threshold is not None:
+    import paper_plots
+    paper_plots.YCSB_SKEW_THRESHOLD = skew_threshold
 
 test_dir = ""
 

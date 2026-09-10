@@ -3,6 +3,9 @@
 #include "../storage/row.h"
 #include "../storage/table.h"
 #include "life_types.h"
+#if WORKLOAD == TPCC
+#include "tpcc_const.h"
+#endif
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -75,7 +78,7 @@ Row_life::touched_object(const LifeTxnDescriptor &tx) const {
            tx.touched_objects.begin();
        it != tx.touched_objects.end(); ++it) {
     if ((it->manager != NULL && it->manager == this) ||
-        it->object == object_id()) {
+        life_same_physical_object(it->object, object_id())) {
       return &*it;
     }
   }
@@ -102,7 +105,7 @@ Row_life::object_history_entry(const LifeTxnDescriptor &tx,
 
   for (std::vector<LifeHistoryEntry>::const_iterator it = tx.history.begin();
        it != tx.history.end(); ++it) {
-    if (it->operation.object != object_id())
+    if (!life_same_physical_object(it->operation.object, object_id()))
       continue;
     if (object_index == 0)
       return &*it;
@@ -245,7 +248,8 @@ bool Row_life::apply_operation(const LifeOperation &operation, uint8_t *state,
   Catalog *schema = _row->get_schema();
   const uint64_t field_count = _row->get_field_cnt();
 
-  if (operation.object != object_id() || operation.field_id >= field_count ||
+  if (!life_same_physical_object(operation.object, object_id()) ||
+      operation.field_id >= field_count ||
       state == NULL || state_size != _row->get_tuple_size()) {
     std::fprintf(stderr,
                  "LIFE invalid operation: table=%lu key=%lu row=%lu "
@@ -253,7 +257,7 @@ bool Row_life::apply_operation(const LifeOperation &operation, uint8_t *state,
                  "tuple_size=%lu\n",
                  operation.object.table_id, operation.object.primary_key,
                  operation.object.row_id, operation.field_id, field_count,
-                 operation.object == object_id(),
+                 life_same_physical_object(operation.object, object_id()),
                  static_cast<unsigned long>(state_size),
                  static_cast<unsigned long>(_row->get_tuple_size()));
     return false;
@@ -303,6 +307,129 @@ bool Row_life::apply_operation(const LifeOperation &operation, uint8_t *state,
     return true;
   }
 
+#if WORKLOAD == TPCC
+  if (operation.kind == LifeOperationKind::TpccPaymentYtd) {
+    if (operation.value_size != sizeof(double) ||
+        operation.argument.size() != sizeof(double) ||
+        field_size < sizeof(double))
+      return false;
+
+    double current;
+    double amount;
+    std::memcpy(&current, state + field_offset, sizeof(current));
+    std::memcpy(&amount, operation.argument.data(), sizeof(amount));
+    current += amount;
+    std::memcpy(state + field_offset, &current, sizeof(current));
+    return true;
+  }
+
+  if (operation.kind == LifeOperationKind::TpccPaymentCustomer) {
+    if (operation.field_id != C_BALANCE ||
+        operation.argument.size() != sizeof(double) ||
+        C_PAYMENT_CNT >= field_count)
+      return false;
+    const uint64_t balance_offset = schema->get_field_index(C_BALANCE);
+    const uint64_t ytd_offset = schema->get_field_index(C_YTD_PAYMENT);
+    const uint64_t count_offset = schema->get_field_index(C_PAYMENT_CNT);
+    if (schema->get_field_size(C_BALANCE) < sizeof(double) ||
+        schema->get_field_size(C_YTD_PAYMENT) < sizeof(double) ||
+        schema->get_field_size(C_PAYMENT_CNT) < sizeof(uint64_t) ||
+        balance_offset + sizeof(double) > state_size ||
+        ytd_offset + sizeof(double) > state_size ||
+        count_offset + sizeof(uint64_t) > state_size)
+      return false;
+
+    double amount;
+    double balance;
+    double ytd_payment;
+    uint64_t payment_count;
+    std::memcpy(&amount, operation.argument.data(), sizeof(amount));
+    std::memcpy(&balance, state + balance_offset, sizeof(balance));
+    std::memcpy(&ytd_payment, state + ytd_offset, sizeof(ytd_payment));
+    std::memcpy(&payment_count, state + count_offset, sizeof(payment_count));
+    balance -= amount;
+    ytd_payment += amount;
+    ++payment_count;
+    std::memcpy(state + balance_offset, &balance, sizeof(balance));
+    std::memcpy(state + ytd_offset, &ytd_payment, sizeof(ytd_payment));
+    std::memcpy(state + count_offset, &payment_count, sizeof(payment_count));
+    return true;
+  }
+
+  if (operation.kind == LifeOperationKind::TpccNextOrderId) {
+    if (operation.field_id != D_NEXT_O_ID ||
+        operation.argument.size() != sizeof(uint64_t) ||
+        field_size < sizeof(uint64_t))
+      return false;
+    uint64_t next_order_id;
+    std::memcpy(&next_order_id, state + field_offset, sizeof(next_order_id));
+    ++next_order_id;
+    std::memcpy(state + field_offset, &next_order_id, sizeof(next_order_id));
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&next_order_id);
+    response.value.assign(bytes, bytes + sizeof(next_order_id));
+    return true;
+  }
+
+  if (operation.kind == LifeOperationKind::TpccUpdateStock) {
+    if (operation.field_id != S_QUANTITY ||
+        operation.argument.size() != sizeof(uint64_t) ||
+        S_REMOTE_CNT >= field_count)
+      return false;
+    const uint64_t quantity_offset = schema->get_field_index(S_QUANTITY);
+    const uint64_t remote_count_offset = schema->get_field_index(S_REMOTE_CNT);
+    if (schema->get_field_size(S_QUANTITY) < sizeof(uint64_t) ||
+        schema->get_field_size(S_REMOTE_CNT) < sizeof(uint64_t) ||
+        quantity_offset + sizeof(uint64_t) > state_size ||
+        remote_count_offset + sizeof(uint64_t) > state_size)
+      return false;
+#if !TPCC_SMALL
+    if (S_ORDER_CNT >= field_count)
+      return false;
+    const uint64_t ytd_offset = schema->get_field_index(S_YTD);
+    const uint64_t order_count_offset = schema->get_field_index(S_ORDER_CNT);
+    if (schema->get_field_size(S_YTD) < sizeof(uint64_t) ||
+        schema->get_field_size(S_ORDER_CNT) < sizeof(uint64_t) ||
+        ytd_offset + sizeof(uint64_t) > state_size ||
+        order_count_offset + sizeof(uint64_t) > state_size)
+      return false;
+#endif
+
+    uint64_t packed;
+    uint64_t stock_quantity;
+    uint64_t remote_count;
+    std::memcpy(&packed, operation.argument.data(), sizeof(packed));
+    const bool remote = (packed >> 63) != 0;
+    const uint64_t ordered_quantity = packed & ~(uint64_t(1) << 63);
+    std::memcpy(&stock_quantity, state + quantity_offset,
+                sizeof(stock_quantity));
+    stock_quantity = stock_quantity > ordered_quantity + 10
+                         ? stock_quantity - ordered_quantity
+                         : stock_quantity - ordered_quantity + 91;
+    std::memcpy(state + quantity_offset, &stock_quantity,
+                sizeof(stock_quantity));
+#if !TPCC_SMALL
+    uint64_t ytd;
+    uint64_t order_count;
+    std::memcpy(&ytd, state + ytd_offset, sizeof(ytd));
+    std::memcpy(&order_count, state + order_count_offset,
+                sizeof(order_count));
+    ytd += ordered_quantity;
+    ++order_count;
+    std::memcpy(state + ytd_offset, &ytd, sizeof(ytd));
+    std::memcpy(state + order_count_offset, &order_count,
+                sizeof(order_count));
+#endif
+    if (remote) {
+      std::memcpy(&remote_count, state + remote_count_offset,
+                  sizeof(remote_count));
+      ++remote_count;
+      std::memcpy(state + remote_count_offset, &remote_count,
+                  sizeof(remote_count));
+    }
+    return true;
+  }
+#endif
+
   return false;
 }
 
@@ -327,7 +454,7 @@ bool Row_life::replay_history(const LifeTxnDescriptor &tx,
 
   for (std::vector<LifeHistoryEntry>::const_iterator it = tx.history.begin();
        it != tx.history.end(); ++it) {
-    if (it->operation.object != object_id())
+    if (!life_same_physical_object(it->operation.object, object_id()))
       continue;
     LifeResponse replayed_response;
     if (!apply_operation(it->operation, state, state_size, replayed_response) ||
@@ -339,72 +466,69 @@ bool Row_life::replay_history(const LifeTxnDescriptor &tx,
 
 bool Row_life::validate_committed_operation(
     const LifeOperation &operation) const {
-  Catalog *schema = _row->get_schema();
-  const uint64_t tuple_size = _row->get_tuple_size();
-  const uint64_t field_count = _row->get_field_cnt();
-
-  if (operation.object != object_id() || operation.field_id >= field_count) {
-    return false;
+  if (operation.kind == LifeOperationKind::ReadField ||
+      operation.kind == LifeOperationKind::WriteField ||
+      operation.kind == LifeOperationKind::AddInt64) {
+    if (!life_same_physical_object(operation.object, object_id()) ||
+        operation.field_id >= _row->get_field_cnt())
+      return false;
+    Catalog *schema = _row->get_schema();
+    const uint64_t offset = schema->get_field_index(operation.field_id);
+    const uint64_t tuple_size = _row->get_tuple_size();
+    if (operation.value_size == 0 ||
+        operation.value_size > LIFE_INLINE_VALUE_CAPACITY ||
+        operation.value_size > schema->get_field_size(operation.field_id) ||
+        offset > tuple_size || operation.value_size > tuple_size - offset)
+      return false;
+    if (operation.kind == LifeOperationKind::ReadField)
+      return operation.argument.empty();
+    if (operation.kind == LifeOperationKind::WriteField)
+      return operation.argument.size() == operation.value_size;
+    return operation.value_size == sizeof(int64_t) &&
+           operation.argument.size() == sizeof(int64_t);
   }
 
-  const uint64_t field_offset = schema->get_field_index(operation.field_id);
-  const uint64_t field_size = schema->get_field_size(operation.field_id);
-  if (operation.value_size == 0 ||
-      operation.value_size > LIFE_INLINE_VALUE_CAPACITY ||
-      operation.value_size > field_size || field_offset > tuple_size ||
-      operation.value_size > tuple_size - field_offset)
+  const uint64_t tuple_size = _row->get_tuple_size();
+  if (tuple_size > MAX_TUPLE_SIZE)
     return false;
-
-  if (operation.kind == LifeOperationKind::ReadField)
-    return operation.argument.empty();
-
-  if (operation.kind == LifeOperationKind::WriteField)
-    return operation.argument.size() == operation.value_size;
-  return operation.kind == LifeOperationKind::AddInt64 &&
-         operation.value_size == sizeof(int64_t) &&
-         operation.argument.size() == sizeof(int64_t);
+  uint8_t state[MAX_TUPLE_SIZE];
+  std::memcpy(state, _row->get_data(), tuple_size);
+  LifeResponse ignored;
+  return apply_operation(operation, state, tuple_size, ignored);
 }
 
 bool Row_life::evaluate_committed_operation(const LifeOperation &operation,
                                             LifeResponse &response) const {
   response.value.clear();
-  if (!validate_committed_operation(operation))
-    return false;
-
-  if (operation.kind == LifeOperationKind::WriteField ||
-      operation.kind == LifeOperationKind::AddInt64)
+  // Single-field operations need no speculative tuple copy. TPCC operations
+  // below can read and update several fields while producing a response.
+  if (operation.kind == LifeOperationKind::ReadField ||
+      operation.kind == LifeOperationKind::WriteField ||
+      operation.kind == LifeOperationKind::AddInt64) {
+    if (!validate_committed_operation(operation))
+      return false;
+    if (operation.kind == LifeOperationKind::ReadField) {
+      const uint64_t offset =
+          _row->get_schema()->get_field_index(operation.field_id);
+      const uint8_t *field =
+          reinterpret_cast<const uint8_t *>(_row->get_data()) + offset;
+      response.value.assign(field, field + operation.value_size);
+    }
     return true;
-
-  const uint64_t field_offset =
-      _row->get_schema()->get_field_index(operation.field_id);
-  const uint8_t *field =
-      reinterpret_cast<const uint8_t *>(_row->get_data()) + field_offset;
-  response.value.assign(field, field + operation.value_size);
-  return true;
+  }
+  const uint64_t tuple_size = _row->get_tuple_size();
+  if (tuple_size > MAX_TUPLE_SIZE)
+    return false;
+  uint8_t state[MAX_TUPLE_SIZE];
+  std::memcpy(state, _row->get_data(), tuple_size);
+  return apply_operation(operation, state, tuple_size, response);
 }
 
 bool Row_life::apply_committed_operation(const LifeOperation &operation) {
-  if (!validate_committed_operation(operation))
-    return false;
-
-  if (operation.kind == LifeOperationKind::ReadField)
-    return true;
-
-  const uint64_t field_offset =
-      _row->get_schema()->get_field_index(operation.field_id);
-  if (operation.kind == LifeOperationKind::WriteField) {
-    std::memcpy(_row->get_data() + field_offset, operation.argument.data(),
-                operation.value_size);
-    return true;
-  }
-
-  uint64_t current;
-  int64_t delta;
-  std::memcpy(&current, _row->get_data() + field_offset, sizeof(current));
-  std::memcpy(&delta, operation.argument.data(), sizeof(delta));
-  current += static_cast<uint64_t>(delta);
-  std::memcpy(_row->get_data() + field_offset, &current, sizeof(current));
-  return true;
+  LifeResponse ignored;
+  return apply_operation(
+      operation, reinterpret_cast<uint8_t *>(_row->get_data()),
+      _row->get_tuple_size(), ignored);
 }
 
 LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
@@ -423,7 +547,7 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 
   LifeLatchGuard guard(&latch);
 
-  if (operation.object != object_id())
+  if (!life_same_physical_object(operation.object, object_id()))
     return make_result(LifeResultCode::InvalidOperation);
 
   const LifeProcessRecord *context = context_record();
@@ -453,7 +577,7 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   } else {
     for (std::vector<LifeHistoryEntry>::const_iterator it = tx.history.begin();
          it != tx.history.end(); ++it) {
-      if (it->operation.object == object_id())
+      if (life_same_physical_object(it->operation.object, object_id()))
         ++tx_object_history_size;
     }
   }
@@ -462,6 +586,10 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   const bool local_has_newer_attempt =
       same_process_txn_time && tx.tid.attempt < local_tid.attempt;
   const bool same_process_txn_attempt = tx.tid == local_tid;
+  const size_t tx_history_size = tx.history.size();
+  const size_t local_history_size =
+      local != NULL && local->transaction ? local->transaction->history.size()
+                                          : 0;
   size_t local_object_history_size = 0;
   if (local != NULL && local->transaction) {
     const LifeHistoryIndices *local_object_history_indices =
@@ -472,33 +600,19 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
       for (std::vector<LifeHistoryEntry>::const_iterator it =
                local->transaction->history.begin();
            it != local->transaction->history.end(); ++it) {
-        if (it->operation.object == object_id())
+        if (life_same_physical_object(it->operation.object, object_id()))
           ++local_object_history_size;
       }
     }
   }
 
-  if (tx.tid.time < local_tid.time) {
-    return make_result(LifeResultCode::Committed);
-  }
-
-  if (same_process_txn_time && local_status == LifeTxnStatus::Committed) {
-    LifeExecuteResult result = make_result(LifeResultCode::Committed);
-    if (local != NULL && local->transaction) {
-      const LifeTxnDescriptorPtr committed = local->transaction;
-      guard.unlock();
-      result.transaction = *committed;
-    }
-    return result;
-  }
-
   const bool must_defer =
       context_status == LifeTxnStatus::Prepared || blocking_tid < tx.tid ||
       tx.tid.time < local_tid.time || local_has_newer_attempt ||
-      (same_process_txn_attempt && (local_status == LifeTxnStatus::Aborted ||
-                                    local_status == LifeTxnStatus::Committed ||
-                                    tx_object_history_size <
-                                        local_object_history_size));
+      (same_process_txn_time && local_status == LifeTxnStatus::Committed) ||
+      (same_process_txn_attempt &&
+       (local_status == LifeTxnStatus::Aborted ||
+        tx_history_size < local_history_size));
 
   if (must_defer) {
 
@@ -554,6 +668,20 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
       return result;
     }
 
+    if (tx.tid.time < local_tid.time) {
+      return make_result(LifeResultCode::Committed);
+    }
+
+    if (same_process_txn_time && local_status == LifeTxnStatus::Committed) {
+      LifeExecuteResult result = make_result(LifeResultCode::Committed);
+      if (local != NULL && local->transaction) {
+        const LifeTxnDescriptorPtr committed = local->transaction;
+        guard.unlock();
+        result.transaction = *committed;
+      }
+      return result;
+    }
+
     if (local_has_newer_attempt ||
         (same_process_txn_attempt && local_status == LifeTxnStatus::Aborted)) {
       LifeExecuteResult result = make_result(LifeResultCode::Retry);
@@ -561,7 +689,7 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
       return result;
     }
 
-    if (tx_object_history_size < local_object_history_size) {
+    if (tx_history_size < local_history_size) {
       assert(local != NULL && local->transaction);
       const LifeHistoryEntry *stored_entry =
           object_history_entry(*local->transaction, tx_object_history_size);
@@ -712,7 +840,8 @@ void Row_life::commit(const LifeTxnDescriptor &tx) {
 
   LifeHistoryIndices history_indices;
   for (size_t i = 0; i < tx.history.size(); ++i) {
-    if (tx.history[i].operation.object == object_id())
+    if (life_same_physical_object(tx.history[i].operation.object,
+                                  object_id()))
       history_indices.push_back(i);
   }
   commit(shared, history_indices);

@@ -339,6 +339,7 @@ def latency(xval,vval,summary,summary_cl,
         logscalex=False,
         x_divisor=1,
         legend=False,
+        milliseconds=False,
 #        legend=True,
         ):
     global plot_cnt
@@ -457,6 +458,13 @@ def latency(xval,vval,summary,summary_cl,
                 continue
             stats = get_summary_stats(stats,summary[cfgs],summary_cl[cfgs],x,v,cc)
 
+    if milliseconds:
+        for latency_data in (ccl50, ccl99, fscl50, fscl99,
+                             lscl50, lscl99, sacl50, sacl99):
+            for series in latency_data:
+                latency_data[series] = [value * 1000
+                                        for value in latency_data[series]]
+
     pp = pprint.PrettyPrinter()
     pp.pprint(ccl50)
     pp.pprint(ccl99)
@@ -483,9 +491,11 @@ def latency(xval,vval,summary,summary_cl,
     print("Created plot {} {}".format(name,_title))
     if logscalex:
         _xlab = _xlab + " (Log Scale)"
-    _ylab = 'Count-weighted node latency statistic (s)'
+    latency_unit = 'ms' if milliseconds else 's'
+    _ylab = 'Count-weighted node latency statistic ({})'.format(latency_unit)
     if logscale:
-        _ylab = 'Count-weighted node latency statistic\n(s, Log Scale)'
+        _ylab = ('Count-weighted node latency statistic\n'
+                 '({}, Log Scale)').format(latency_unit)
     print(_xval)
     
     draw_line(name+'ccl50',ccl50,_xval,ylab=_ylab,xlab=_xlab,title=_title,bbox=bbox,ncol=2,ltitle=vname,ylimit=ylimit,logscale=logscale,logscalex=logscalex,legend=legend,base=base)

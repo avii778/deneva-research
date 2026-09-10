@@ -34,6 +34,10 @@ RC Workload::init_schema(const char * schema_file) {
 	string line;
   uint32_t id = 0;
 	ifstream fin(schema_file);
+  if (!fin.is_open()) {
+    fprintf(stderr, "Could not open schema file: %s\n", schema_file);
+    exit(EXIT_FAILURE);
+  }
     Catalog * schema;
     while (getline(fin, line)) {
 		if (line.compare(0, 6, "TABLE=") == 0) {
@@ -193,6 +197,5 @@ void Workload::index_insert_nonunique(INDEX * index, uint64_t key, row_t * row, 
   assert(index);
   assert( index->index_insert_nonunique(key, m_item, pid) == RCOK );
 }
-
 
 

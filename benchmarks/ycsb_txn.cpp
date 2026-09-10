@@ -64,7 +64,7 @@ make_life_finish_message_descriptor(const LifeTxnDescriptor &descriptor,
   for (std::vector<LifeHistoryEntry>::const_iterator it =
            descriptor.history.begin();
        it != descriptor.history.end(); ++it) {
-    if (GET_NODE_ID(it->operation.object.partition_id) == node_id)
+    if (GET_NODE_ID(life_routing_partition(it->operation.object)) == node_id)
       life_append_history(message_descriptor, *it);
   }
   return message_descriptor;
@@ -391,7 +391,7 @@ bool YCSBTxnManager::try_life_transactions(
     }
 
     LifeOperation pending_operation = life_current_operation(ctx);
-    const uint64_t part_id = pending_operation.object.partition_id;
+    const uint64_t part_id = life_routing_partition(pending_operation.object);
     if (GET_NODE_ID(part_id) != g_node_id) {
 #if LIFE_DEBUG_COUNTERS
       if (has_life_wait_stack(ctx, 1, GET_NODE_ID(part_id),
@@ -491,13 +491,15 @@ YCSBTxnManager::execute_life_operation(LifeTxnDescriptor &descriptor,
 RC YCSBTxnManager::send_life_execute(const LifeTxnDescriptor &descriptor,
                                      const LifeOperation &operation,
                                      uint64_t wait_id) {
-  uint64_t dest_node_id = GET_NODE_ID(operation.object.partition_id);
+  uint64_t dest_node_id =
+      GET_NODE_ID(life_routing_partition(operation.object));
   assert(dest_node_id != g_node_id);
   const uint64_t stop_record_id =
       life_remote_batch_stop(descriptor, dest_node_id);
   assert(stop_record_id > life_program_position(descriptor));
   if (query != NULL)
-    query->partitions_touched.add_unique(operation.object.partition_id);
+    query->partitions_touched.add_unique(
+        life_routing_partition(operation.object));
 
   LifeExecuteMessage *msg =
       (LifeExecuteMessage *)Message::create_message(RLIFE_EXECUTE);
@@ -519,7 +521,8 @@ RC YCSBTxnManager::send_life_execute(const LifeTxnDescriptor &descriptor,
       owns_descriptor &&
       ((descriptor.workload == LifeWorkloadKind::Ycsb &&
         stop_record_id == descriptor.ycsb.requests.size()) ||
-       descriptor.workload == LifeWorkloadKind::Pps);
+       descriptor.workload == LifeWorkloadKind::Pps ||
+       descriptor.workload == LifeWorkloadKind::Tpcc);
   LIFE_DBG_INC(life_dbg_execute_sent);
   msg_queue.enqueue(get_thd_id(), msg, dest_node_id);
   return WAIT_REM;
@@ -571,7 +574,7 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
                  static_cast<unsigned long>(descriptor.history.size()));
   }
   assert(requested_operation.object == operation.object);
-  assert(GET_NODE_ID(operation.object.partition_id) == g_node_id);
+  assert(GET_NODE_ID(life_routing_partition(operation.object)) == g_node_id);
 
   immediate_result = LifeExecuteResult();
   immediate_result.code = LifeResultCode::InvalidOperation;
@@ -586,7 +589,7 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
     }
     LifeOperation local_operation =
         life_current_operation(response_descriptor);
-    const uint64_t part_id = local_operation.object.partition_id;
+    const uint64_t part_id = life_routing_partition(local_operation.object);
     if (GET_NODE_ID(part_id) != g_node_id) {
       // A PPS scan can end on this node and expose a part whose owner is a
       // different node. Return the reconciled program state immediately so
@@ -597,7 +600,7 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
     }
 
     immediate_result =
-        execute_life_remote(response_descriptor, local_operation);
+        execute_life_operation(response_descriptor, local_operation);
 
     if (immediate_result.code != LifeResultCode::Success)
       break;
@@ -628,9 +631,6 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
       }
     }
   }
-
-  if (immediate_result.code == LifeResultCode::Retry)
-    rollback_life_descriptor(response_descriptor);
 
   if (!life_program_present(immediate_result.transaction))
     immediate_result.transaction = response_descriptor;
@@ -665,7 +665,7 @@ YCSBTxnManager::prepare_life_remote(const LifeTxnDescriptor &descriptor) {
 
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects->begin();
        it != objects->end(); ++it) {
-    if (GET_NODE_ID(it->object.partition_id) != g_node_id)
+    if (GET_NODE_ID(life_routing_partition(it->object)) != g_node_id)
       continue;
     found_local_object = true;
 
@@ -688,6 +688,9 @@ YCSBTxnManager::prepare_life_remote(const LifeTxnDescriptor &descriptor) {
     response.code = result.code;
     return response;
   }
+
+  if (prepared_object)
+    life_stage_inserts(descriptor);
 
   // A duplicate prepare can arrive after the original finish released its
   // remote transaction manager. Report an all-committed result distinctly so
@@ -718,7 +721,7 @@ YCSBTxnManager::finish_life_remote(const LifeTxnDescriptor &descriptor,
   LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(descriptor);
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects->begin();
        it != objects->end(); ++it) {
-    if (GET_NODE_ID(it->object.partition_id) != g_node_id)
+    if (GET_NODE_ID(life_routing_partition(it->object)) != g_node_id)
       continue;
 
     Row_life *manager = it->manager;
@@ -731,6 +734,11 @@ YCSBTxnManager::finish_life_remote(const LifeTxnDescriptor &descriptor,
     else
       manager->rollback(descriptor);
   }
+
+  if (decision == Commit)
+    life_publish_staged_inserts(descriptor);
+  else
+    life_discard_staged_inserts(descriptor);
 
   LifeExecuteResult response;
   response.code = LifeResultCode::Success;
@@ -803,16 +811,15 @@ RC YCSBTxnManager::apply_life_finalize_response(
         result.transaction.tid.time == txn->life_tid.time;
     if (has_saved_stack && !txns.empty()) {
       // Finalization messages omit the workload program (YCSB requests and
-      // PPS-discovered keys). Use the returned history to undo row state, but
-      // reset the complete program retained on the coordinator stack as
-      // required by Algorithm 2's ResetTransaction.
-      LifeTxnDescriptor rollback = result.transaction;
-      rollback_life_descriptor(rollback);
+      // PPS-discovered keys). Retain that program from the coordinator stack,
+      // but adopt the reset transaction identity returned by the owner.
       LifeTxnDescriptor retry = txns.back();
-      retry.tid.attempt =
-          std::max(std::max(retry.tid.attempt,
-                            result.transaction.tid.attempt),
-                   result.observed_attempt) + 1;
+      // The finalize owner has already performed Algorithm 2's
+      // ResetTransaction before returning Retry.  Install that reset attempt
+      // directly; incrementing it here would reset the same failed attempt a
+      // second time (a -> a+1 at the owner -> a+2 at the requester).
+      assert(result.transaction.tid.attempt > retry.tid.attempt);
+      retry.tid.attempt = result.transaction.tid.attempt;
       retry.history.clear();
       retry.touched_objects.clear();
       life_reset_program(retry);
@@ -1232,12 +1239,7 @@ RC YCSBTxnManager::apply_life_execute_response(const LifeExecuteResult &result,
     if (retry.pid == txn->life_pid &&
         retry.tid.time == txn->life_tid.time)
       reset_life_piggyback_prepare();
-    rollback_life_descriptor(retry);
-    retry.tid.attempt =
-        std::max(retry.tid.attempt, result.observed_attempt) + 1;
-    retry.history.clear();
-    retry.touched_objects.clear();
-    life_reset_program(retry);
+    reset_life_descriptor(retry, result.observed_attempt);
     txns.back() = retry;
     return try_life_transactions(txns) ? continue_life_after_stack() : WAIT_REM;
   } break;
@@ -1276,6 +1278,7 @@ RC YCSBTxnManager::apply_life_prepare_response(const LifeExecuteResult &result,
 
   if (life_prepare_failed) {
     rollback_life_descriptor(life_pending_finalize);
+    life_discard_staged_inserts(life_pending_finalize);
     send_life_finish_messages(life_pending_finalize, life_pending_remote_nodes,
                               Abort);
     return complete_life_finish();
@@ -1286,7 +1289,7 @@ RC YCSBTxnManager::apply_life_prepare_response(const LifeExecuteResult &result,
   for (std::vector<LifeFinalizeObject>::const_iterator it =
            life_pending_objects.begin();
        it != life_pending_objects.end(); ++it) {
-    if (GET_NODE_ID(it->object.partition_id) != g_node_id)
+    if (GET_NODE_ID(life_routing_partition(it->object)) != g_node_id)
       continue;
 
     Row_life *manager = it->manager;
@@ -1295,6 +1298,8 @@ RC YCSBTxnManager::apply_life_prepare_response(const LifeExecuteResult &result,
     assert(manager != NULL);
     manager->commit(frozen, it->history_indices);
   }
+
+  life_publish_staged_inserts(life_pending_finalize);
 
   send_life_finish_messages(life_pending_finalize, life_pending_remote_nodes,
                             Commit);
@@ -1404,7 +1409,7 @@ void YCSBTxnManager::rollback_life_descriptor(
 
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects->begin();
        it != objects->end(); ++it) {
-    if (GET_NODE_ID(it->object.partition_id) != g_node_id)
+    if (GET_NODE_ID(life_routing_partition(it->object)) != g_node_id)
       continue;
 
     Row_life *manager = it->manager;
@@ -1441,7 +1446,8 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
   prepare_nodes.reserve(g_node_cnt);
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
        it != objects.end(); ++it) {
-    const uint64_t node_id = GET_NODE_ID(it->object.partition_id);
+    const uint64_t node_id =
+        GET_NODE_ID(life_routing_partition(it->object));
     if (node_id != g_node_id) {
       add_unique_life_node(remote_nodes, node_id);
       if (!has_life_piggyback_prepare(descriptor, node_id))
@@ -1450,9 +1456,11 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
   }
 
   uint64_t observed_attempt = descriptor.tid.attempt;
+  bool prepared_local_object = false;
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
        it != objects.end(); ++it) {
-    const uint64_t node_id = GET_NODE_ID(it->object.partition_id);
+    const uint64_t node_id =
+        GET_NODE_ID(life_routing_partition(it->object));
     if (node_id != g_node_id)
       continue;
 
@@ -1461,25 +1469,29 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
       manager = lookup_life_row(it->object)->manager;
     assert(manager != NULL);
     const LifeExecuteResult result = manager->prepare(frozen);
-    if (result.code == LifeResultCode::Success ||
-        result.code == LifeResultCode::Committed) {
+    if (result.code == LifeResultCode::Success) {
+      prepared_local_object = true;
+      continue;
+    }
+    if (result.code == LifeResultCode::Committed) {
       continue;
     }
 
     if (result.code == LifeResultCode::Retry)
       observed_attempt = result.observed_attempt;
 
+    LifeTxnDescriptor abort_descriptor = descriptor;
+    abort_descriptor.touched_objects = objects;
+    rollback_and_reset_life_descriptor(descriptor, observed_attempt);
     if (!remote_nodes.empty()) {
-      LifeTxnDescriptor abort_descriptor = descriptor;
-      abort_descriptor.touched_objects = objects;
-      rollback_life_descriptor(abort_descriptor);
       send_life_finish_messages(abort_descriptor, life_pending_remote_nodes,
                                 Abort);
     }
-
-    reset_life_descriptor(descriptor, observed_attempt);
     return false;
   }
+
+  if (prepared_local_object)
+    life_stage_inserts(descriptor);
 
   if (!prepare_nodes.empty()) {
     life_finalize_waiting = true;
@@ -1496,7 +1508,7 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
 
   for (std::vector<LifeFinalizeObject>::const_iterator it = objects.begin();
        it != objects.end(); ++it) {
-    if (GET_NODE_ID(it->object.partition_id) != g_node_id)
+    if (GET_NODE_ID(life_routing_partition(it->object)) != g_node_id)
       continue;
 
     Row_life *manager = it->manager;
@@ -1505,6 +1517,8 @@ bool YCSBTxnManager::finalize_life_descriptor(LifeTxnDescriptor &descriptor) {
     assert(manager != NULL);
     manager->commit(frozen, it->history_indices);
   }
+
+  life_publish_staged_inserts(descriptor);
 
   // Piggyback preparation suppresses only the prepare round trip. Finish is
   // still required to publish commit and release each durable remote manager.
@@ -1518,12 +1532,18 @@ void YCSBTxnManager::reset_life_descriptor(LifeTxnDescriptor &descriptor,
   if (descriptor.pid == txn->life_pid &&
       descriptor.tid.time == txn->life_tid.time)
     reset_life_piggyback_prepare();
-  rollback_life_descriptor(descriptor);
   descriptor.tid.attempt =
       std::max(descriptor.tid.attempt, observed_attempt) + 1;
   descriptor.history.clear();
   descriptor.touched_objects.clear();
   life_reset_program(descriptor);
+}
+
+void YCSBTxnManager::rollback_and_reset_life_descriptor(
+    LifeTxnDescriptor &descriptor, uint64_t observed_attempt) {
+  rollback_life_descriptor(descriptor);
+  life_discard_staged_inserts(descriptor);
+  reset_life_descriptor(descriptor, observed_attempt);
 }
 
 void YCSBTxnManager::append_life_success(LifeTxnDescriptor &descriptor,
@@ -1597,6 +1617,14 @@ void YCSBTxnManager::life_copy_remote_program(
   destination.ycsb.state = source.ycsb.state;
   destination.ycsb.next_record_id = source.ycsb.next_record_id;
 }
+
+void YCSBTxnManager::life_stage_inserts(const LifeTxnDescriptor &) {}
+
+void YCSBTxnManager::life_publish_staged_inserts(
+    const LifeTxnDescriptor &) {}
+
+void YCSBTxnManager::life_discard_staged_inserts(
+    const LifeTxnDescriptor &) {}
 
 RC YCSBTxnManager::continue_life_after_stack() {
   if (query == NULL)

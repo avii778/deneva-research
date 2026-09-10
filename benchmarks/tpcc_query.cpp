@@ -218,8 +218,11 @@ BaseQuery * TPCCQueryGenerator::gen_new_order(uint64_t home_partition) {
   // TODO TPCC rollback
 	//rbk = URand(1, 100) == 1 ? true : false;
 	query->rbk = false;
+	query->remote = false;
 	query->ol_cnt = URand(5, g_max_items_per_txn);
 	query->o_entry_d = 2013;
+	query->ol_amount = 0;
+	query->o_id = 0;
 
   partitions_accessed.insert(wh_to_part(query->w_id));
 
@@ -250,6 +253,8 @@ BaseQuery * TPCCQueryGenerator::gen_new_order(uint64_t home_partition) {
         while( partitions_accessed.count(wh_to_part(item->ol_supply_w_id = URand(1, g_num_wh))) == 0) {}
       }
     }
+		if (item->ol_supply_w_id != query->w_id)
+			query->remote = true;
 
     query->items.add(item);
   }

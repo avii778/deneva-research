@@ -450,13 +450,15 @@ def ycsb_skew():
 def ycsb_writes():
     wl = "YCSB"
     nnodes = [16]
-    algos = YCSB_ALGOS
+    algos = YCSB_LIFE_ALGOS
     base_table_size = 2097152 * 8
     txn_write_perc = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
     tup_write_perc = [0.5]
     load = [10000]
     tcnt = [4]
-    skew = [0.6]
+    skew = [0.3]
+    part_per_txn = [2]
+    strict_ppt = [1]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",
@@ -467,11 +469,33 @@ def ycsb_writes():
         "MAX_TXN_IN_FLIGHT",
         "ZIPF_THETA",
         "THREAD_CNT",
+        "PART_PER_TXN",
+        "STRICT_PPT",
     ]
     exp = [
-        [wl, n, algo, base_table_size * n, tup_wr_perc, txn_wr_perc, ld, sk, thr]
-        for thr, txn_wr_perc, tup_wr_perc, ld, n, sk, algo in itertools.product(
-            tcnt, txn_write_perc, tup_write_perc, load, nnodes, skew, algos
+        [
+            wl,
+            n,
+            algo,
+            base_table_size * n,
+            tup_wr_perc,
+            txn_wr_perc,
+            ld,
+            sk,
+            thr,
+            ppt,
+            sppt,
+        ]
+        for sppt, ppt, thr, txn_wr_perc, tup_wr_perc, ld, n, sk, algo in itertools.product(
+            strict_ppt,
+            part_per_txn,
+            tcnt,
+            txn_write_perc,
+            tup_write_perc,
+            load,
+            nnodes,
+            skew,
+            algos,
         )
     ]
     return fmt, exp
@@ -637,11 +661,11 @@ def ycsb_partitions_distr():
 
 def tpcc_scaling():
     wl = "TPCC"
-    nnodes = [1, 2, 4, 8, 16, 32, 64]
-    nalgos = ["NO_WAIT", "WAIT_DIE", "MAAT", "MVCC", "TIMESTAMP", "CALVIN"]
+    nnodes = NORMAL
+    nalgos = ["LIFE", "WAIT_DIE", "CALVIN"]
     npercpay = [0.0, 1.0]
     wh = 128
-    load = [10000]
+    load = [1000]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",
