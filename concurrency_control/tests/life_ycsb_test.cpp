@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <thread>
 
 mem_alloc mem_allocator;
 bool volatile warmup_done = false;
@@ -272,7 +273,8 @@ void test_execute_stale_history_refresh_and_help() {
 
   owner.ycsb.requests[0].key = 999;
   const LifeTxnDescriptor contender = descriptor(2, 20, 1, YCSB_0, 0);
-  const LifeExecuteResult help = life_row.execute(contender, read);
+  const LifeExecuteResult help = life_row.execute(
+      contender, operation(row, LifeOperationKind::WriteField, 84));
   assert(help.code == LifeResultCode::Help);
   assert(help.transaction == stored);
 
@@ -354,7 +356,7 @@ void test_execute_rejects_globally_stale_descriptor() {
   assert(rejected.code == LifeResultCode::InvalidOperation);
 
   const LifeTxnDescriptor contender = descriptor(2, 20, 1, YCSB_0, 0);
-  const LifeExecuteResult help = life_row.execute(contender, read);
+  const LifeExecuteResult help = life_row.execute(contender, write);
   assert(help.code == LifeResultCode::Help);
   assert(help.transaction == newest);
 
@@ -406,8 +408,12 @@ void test_prepared_holder_precedes_committed_duplicate() {
   assert(life_row.prepare(holder).code == LifeResultCode::Success);
 
   const LifeExecuteResult duplicate = life_row.execute(committed, read);
+#if life_fairness
   assert(duplicate.code == LifeResultCode::Finalize);
   assert(duplicate.transaction == holder);
+#else
+  assert(duplicate.code == LifeResultCode::Committed);
+#endif
 
   std::free(row.data);
   delete[] schema._columns;
@@ -453,7 +459,7 @@ void test_rollback_runs_inline_help() {
 
   LifeTxnDescriptor contender = descriptor(2, 20, 1, YCSB_0, 0);
   const LifeOperation contender_read =
-      operation(row, LifeOperationKind::ReadField, 0);
+      operation(row, LifeOperationKind::WriteField, 84);
   const LifeExecuteResult finalize =
       life_row.execute(contender, contender_read);
   assert(finalize.code == LifeResultCode::Finalize);
@@ -471,7 +477,7 @@ void test_rollback_runs_inline_help() {
 #else
   LifeHistoryEntry contender_entry;
   contender_entry.operation = contender_read;
-  contender_entry.response = first.response;
+  contender_entry.response = LifeResponse();
   LifeTxnDescriptor helped = contender;
   helped.history.push_back(contender_entry);
   assert(help.transaction == helped);
@@ -1086,6 +1092,58 @@ void test_tpcc_payment_ytd_rmw() {
   delete[] schema._columns;
 }
 
+#if !life_fairness
+void test_tpcc_shared_reads_then_payment() {
+  Catalog schema;
+  init_uniform_schema(schema, 30, W_YTD + 1);
+  table_t table;
+  table.init(&schema);
+  row_t row;
+  row.init(&table, 0, 0);
+  row.set_primary_key(1);
+  double ytd = 30000.0;
+  std::memcpy(row.data + schema.get_field_index(W_YTD), &ytd, sizeof(ytd));
+  Row_life manager;
+  manager.init(&row);
+  LifeOperation read = tpcc_operation(row, LifeOperationKind::ReadField, W_YTD, 0);
+  read.argument.clear();
+  LifeTxnDescriptor readers[] = {
+      descriptor(1, 100, 1, YCSB_0, 0),
+      descriptor(2, 200, 1, YCSB_0, 0)};
+  for (size_t i = 0; i < 2; ++i) {
+    LifeExecuteResult result = manager.execute(readers[i], read);
+    assert(result.code == LifeResultCode::Success);
+    double observed;
+    std::memcpy(&observed, result.response.value.data(), sizeof(observed));
+    assert(observed == 30000.0);
+    LifeHistoryEntry entry;
+    entry.operation = read;
+    entry.response = result.response;
+    life_append_history(readers[i], entry);
+    assert(manager.prepare(readers[i]).code == LifeResultCode::Success);
+  }
+  const double amount = 125.5;
+  uint64_t bits;
+  std::memcpy(&bits, &amount, sizeof(bits));
+  LifeOperation payment = tpcc_operation(
+      row, LifeOperationKind::TpccPaymentYtd, W_YTD, bits);
+  LifeTxnDescriptor writer = descriptor(3, 50, 1, YCSB_0, 0);
+  assert(manager.execute(writer, payment).code == LifeResultCode::Finalize);
+  manager.commit(readers[0]);
+  assert(manager.execute(writer, payment).code == LifeResultCode::Finalize);
+  manager.commit(readers[1]);
+  // Inline execution is speculative: committed data is still unchanged.
+  std::memcpy(&ytd, row.data + schema.get_field_index(W_YTD), sizeof(ytd));
+  assert(ytd == 30000.0);
+  execute_and_commit(manager, writer, payment);
+  manager.commit(writer); // Duplicate finish must not apply payment twice.
+  std::memcpy(&ytd, row.data + schema.get_field_index(W_YTD), sizeof(ytd));
+  assert(ytd == 30125.5);
+  std::free(row.data);
+  delete[] schema._columns;
+}
+#endif
+
 void test_tpcc_customer_payment_rmw() {
   Catalog schema;
   init_uniform_schema(schema, 31, C_PAYMENT_CNT + 1);
@@ -1214,7 +1272,172 @@ void test_tpcc_stock_rmw_branches_and_remote_count() {
 
 } // namespace
 
+#if !life_fairness
+namespace {
+struct SharedRowFixture {
+  Catalog schema;
+  table_t table;
+  row_t row;
+  Row_life manager;
+  SharedRowFixture() {
+    schema.table_name = "MAIN_TABLE";
+    schema.table_id = 3;
+    schema.field_cnt = 1;
+    schema.tuple_size = sizeof(uint64_t);
+    schema._columns = new Column[1];
+    schema._columns[0].id = 0;
+    schema._columns[0].size = sizeof(uint64_t);
+    schema._columns[0].index = 0;
+    table.init(&schema);
+    row.init(&table, 4, 0);
+    row.set_primary_key(7);
+    manager.init(&row);
+  }
+  ~SharedRowFixture() {
+    std::free(row.data);
+    delete[] schema._columns;
+  }
+  LifeOperation read() { return operation(row, LifeOperationKind::ReadField, 0); }
+  LifeOperation write() { return operation(row, LifeOperationKind::WriteField, 84); }
+  LifeExecuteResult execute(LifeTxnDescriptor &tx, const LifeOperation &op) {
+    LifeExecuteResult result = manager.execute(tx, op);
+    if (result.code == LifeResultCode::Success) {
+      LifeHistoryEntry entry;
+      entry.operation = op;
+      entry.response = result.response;
+      life_append_history(tx, entry);
+    }
+    return result;
+  }
+};
+
+void test_shared_reader_admission_and_upgrade() {
+  SharedRowFixture f;
+  LifeTxnDescriptor young = descriptor(1, 30, 1, YCSB_0, 0);
+  LifeTxnDescriptor old = descriptor(2, 10, 1, YCSB_0, 0);
+  LifeTxnDescriptor writer = descriptor(3, 20, 1, YCSB_0, 0);
+  assert(f.execute(young, f.read()).code == LifeResultCode::Success);
+  assert(f.execute(old, f.read()).code == LifeResultCode::Success);
+  assert(f.manager.execute(young, f.write()).code == LifeResultCode::Help);
+  // The first holder is a potential victim, but the second blocks admission.
+  assert(f.execute(writer, f.write()).code == LifeResultCode::Help);
+  assert(f.manager.prepare(young).code == LifeResultCode::Success);
+  f.manager.rollback(young);
+  LifeOperation invalid = f.write();
+  invalid.field_id = 99;
+  LifeTxnDescriptor oldest = descriptor(4, 5, 1, YCSB_0, 0);
+  assert(f.execute(oldest, invalid).code == LifeResultCode::InvalidOperation);
+  assert(f.execute(old, f.write()).code == LifeResultCode::Success);
+  assert(f.execute(old, f.read()).code == LifeResultCode::Success);
+  uint64_t value = 0;
+  std::memcpy(&value, old.history.back().response.value.data(), sizeof(value));
+  assert(value == 84);
+  assert(f.execute(writer, f.read()).code == LifeResultCode::Help);
+  assert(f.manager.prepare(old).code == LifeResultCode::Success);
+  f.manager.commit(old);
+  assert(f.execute(writer, f.read()).code == LifeResultCode::Success);
+}
+
+void test_shared_selective_abort_and_stale_cleanup() {
+  SharedRowFixture f;
+  LifeTxnDescriptor a = descriptor(1, 20, 1, YCSB_0, 0);
+  LifeTxnDescriptor b = descriptor(2, 30, 1, YCSB_0, 0);
+  LifeTxnDescriptor writer = descriptor(3, 10, 1, YCSB_0, 0);
+  assert(f.execute(a, f.read()).code == LifeResultCode::Success);
+  assert(f.execute(b, f.read()).code == LifeResultCode::Success);
+  assert(f.execute(writer, f.write()).code == LifeResultCode::Success);
+  assert(f.manager.prepare(a).code == LifeResultCode::Retry);
+  assert(f.manager.prepare(b).code == LifeResultCode::Retry);
+  LifeTxnDescriptor stale = writer;
+  f.manager.rollback(writer);
+  writer = descriptor(3, 10, 2, YCSB_0, 0);
+  assert(f.execute(writer, f.write()).code == LifeResultCode::Success);
+  f.manager.rollback(stale);
+  f.manager.help(stale);
+  f.manager.commit(stale);
+  assert(f.execute(a, f.read()).code == LifeResultCode::Retry);
+  LifeTxnDescriptor other = descriptor(4, 40, 1, YCSB_0, 0);
+  assert(f.execute(other, f.read()).code == LifeResultCode::Help);
+  assert(f.manager.prepare(writer).code == LifeResultCode::Success);
+  f.manager.commit(writer);
+  assert(f.manager.execute(stale, f.write()).code == LifeResultCode::Committed);
+}
+
+void test_concurrent_prepared_readers_and_inline_writer() {
+  SharedRowFixture f;
+  LifeTxnDescriptor a = descriptor(1, 20, 1, YCSB_0, 0);
+  LifeTxnDescriptor b = descriptor(2, 30, 1, YCSB_0, 0);
+  auto reader = [&f](LifeTxnDescriptor &tx) {
+    assert(f.execute(tx, f.read()).code == LifeResultCode::Success);
+    assert(f.manager.prepare(tx).code == LifeResultCode::Success);
+  };
+  std::thread first(reader, std::ref(a));
+  std::thread second(reader, std::ref(b));
+  first.join();
+  second.join();
+  LifeTxnDescriptor c = descriptor(4, 40, 1, YCSB_0, 0);
+  assert(f.execute(c, f.read()).code == LifeResultCode::Success);
+  assert(f.manager.prepare(c).code == LifeResultCode::Success);
+  f.manager.commit(c);
+  LifeTxnDescriptor writer = descriptor(3, 10, 1, YCSB_0, 0);
+  assert(f.manager.execute(writer, f.write()).code == LifeResultCode::Finalize);
+  f.manager.commit(a); // Inline replay must encounter the remaining reader.
+  assert(f.manager.execute(writer, f.write()).code == LifeResultCode::Finalize);
+  f.manager.commit(b); // Inline replay can now admit the writer.
+  assert(f.execute(writer, f.write()).code == LifeResultCode::Success);
+  assert(writer.history.size() == 1);
+  assert(f.manager.prepare(writer).code == LifeResultCode::Success);
+  f.manager.commit(writer);
+  uint64_t value = 0;
+  std::memcpy(&value, f.row.data, sizeof(value));
+  assert(value == 84);
+}
+
+void test_shared_stale_checks_precede_holder_conflicts() {
+  SharedRowFixture f;
+  LifeTxnDescriptor reader = descriptor(1, 20, 1, YCSB_0, 0);
+  const LifeTxnDescriptor before_read = reader;
+  assert(f.execute(reader, f.read()).code == LifeResultCode::Success);
+  const LifeExecuteResult replay = f.manager.execute(before_read, f.read());
+  assert(replay.code == LifeResultCode::Success);
+  assert(replay.response == reader.history.back().response);
+
+  LifeTxnDescriptor writer = descriptor(2, 10, 1, YCSB_0, 0);
+  assert(f.execute(writer, f.write()).code == LifeResultCode::Success);
+  assert(f.manager.prepare(writer).code == LifeResultCode::Success);
+  // The reader was wounded. A stale request must retry before it can help
+  // another holder, even when that holder is prepared.
+  assert(f.manager.execute(reader, f.read()).code == LifeResultCode::Retry);
+  ++reader.tid.attempt;
+  reader.history.clear();
+  reader.touched_objects.clear();
+  assert(f.manager.execute(reader, f.read()).code == LifeResultCode::Finalize);
+  f.manager.commit(writer);
+  assert(f.execute(reader, f.read()).code == LifeResultCode::Success);
+  assert(f.manager.prepare(reader).code == LifeResultCode::Success);
+  f.manager.commit(reader);
+
+  LifeTxnDescriptor next = descriptor(1, 30, 1, YCSB_0, 0);
+  assert(f.execute(next, f.write()).code == LifeResultCode::Success);
+  f.manager.rollback(reader);
+  f.manager.help(reader);
+  f.manager.commit(reader);
+  assert(f.manager.execute(reader, f.read()).code == LifeResultCode::Committed);
+  LifeTxnDescriptor contender = descriptor(3, 40, 1, YCSB_0, 0);
+  assert(f.manager.execute(contender, f.read()).code == LifeResultCode::Help);
+  f.manager.rollback(next);
+  assert(f.execute(contender, f.read()).code == LifeResultCode::Success);
+}
+} // namespace
+#endif
+
 int main() {
+#if !life_fairness
+  test_shared_reader_admission_and_upgrade();
+  test_shared_selective_abort_and_stale_cleanup();
+  test_concurrent_prepared_readers_and_inline_writer();
+  test_shared_stale_checks_precede_holder_conflicts();
+#endif
   static_assert(sizeof(LifeBytes) <= 16,
                 "LIFE values must remain inline and compact");
   test_snapshot_is_owned();
@@ -1239,6 +1462,9 @@ int main() {
   test_prepared_rows_share_one_frozen_descriptor();
   test_local_row_cache_and_incremental_grouping();
 #if WORKLOAD == TPCC
+#if !life_fairness
+  test_tpcc_shared_reads_then_payment();
+#endif
   test_tpcc_payment_ytd_rmw();
   test_tpcc_customer_payment_rmw();
   test_tpcc_next_order_id_rmw_returns_new_value();

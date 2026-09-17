@@ -665,7 +665,7 @@ def tpcc_scaling():
     nalgos = ["LIFE", "WAIT_DIE", "CALVIN"]
     npercpay = [0.0, 1.0]
     wh = 128
-    load = [1000]
+    load = [100]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",

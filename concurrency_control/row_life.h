@@ -33,11 +33,14 @@ public:
 private:
   struct ProcessSlot {
     ProcessSlot()
-        : pid(), record(), heap_index(std::numeric_limits<size_t>::max()) {}
+        : pid(), record(), heap_index(std::numeric_limits<size_t>::max()),
+          holder_index(std::numeric_limits<size_t>::max()), exclusive(false) {}
 
     LifeProcessId pid;
     LifeProcessRecord record;
     size_t heap_index;
+    size_t holder_index;
+    bool exclusive;
   };
 
   typedef std::unordered_map<LifeProcessId, ProcessSlot, LifeProcessIdHash>
@@ -64,6 +67,10 @@ private:
   void priority_sift_up(size_t index);
   void priority_sift_down(size_t index);
   void priority_swap(size_t lhs, size_t rhs);
+  bool holder_conflicts(const ProcessSlot &slot,
+                        const LifeTxnDescriptor &tx, bool exclusive) const;
+  bool release_holder(const LifeTxnDescriptor &tx);
+  void remove_holder(ProcessSlot *slot);
   LifeExecuteResult make_result(LifeResultCode code) const;
   LifeObjectId object_id() const;
   bool apply_operation(const LifeOperation &operation,
@@ -82,6 +89,7 @@ private:
   LifeOptional<LifeProcessId> active_process;
   std::unique_ptr<ProcessSlots> processes;
   std::vector<ProcessSlot *> priority_heap;
+  std::vector<ProcessSlot *> holders;
   std::unique_ptr<LifeInlineOperation> inline_operation;
 };
 

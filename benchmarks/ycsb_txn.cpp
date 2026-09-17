@@ -349,6 +349,10 @@ RC YCSBTxnManager::complete_life_home_transaction() {
 bool YCSBTxnManager::try_life_transactions(
     std::vector<LifeTxnDescriptor> &txns) {
   while (!txns.empty()) {
+    // Local helping/retries can run indefinitely without returning to the
+    // worker loop. Leave unfinished work uncommitted when the benchmark ends.
+    if (simulation->is_done())
+      return false;
     LifeTxnDescriptor &ctx = txns.back();
     life_reconcile_descriptor(ctx);
 
@@ -946,17 +950,9 @@ bool YCSBTxnManager::take_life_wait_stack_by_descriptor(
     if (it->remote_key != descriptor.tid.time)
       continue;
 
-    bool found = false;
-    for (std::vector<LifeTxnDescriptor>::const_iterator ctx = it->stack.begin();
-         ctx != it->stack.end(); ++ctx) {
-      if (ctx->pid == descriptor.pid && ctx->tid.time == descriptor.tid.time) {
-        found = true;
-        break;
-      }
-    }
-    if (!found)
-      continue;
-
+    // remote_key names the globally unique transaction being finalized.
+    // A Finalize conflict saves the waiter's stack, which need not contain
+    // the prepared blocker at all.
     txns.swap(it->stack);
     life_wait_stacks->erase(it);
     return true;
@@ -1335,10 +1331,16 @@ RC YCSBTxnManager::complete_life_finish() {
     reset_pending_life_finalize();
 
     if (has_saved_stack && !txns.empty()) {
-      if (committed) {
+      const bool top_is_finished = txns.back().pid == finished.pid &&
+                                  txns.back().tid.time == finished.tid.time;
+      if (committed && top_is_finished) {
         txns.pop_back();
-      } else {
+      } else if (!committed && top_is_finished) {
         txns.back() = finished;
+      } else if (!committed && finished.tid.time < txns.back().tid.time) {
+        // Match the synchronous Finalize branch: help an older retry, but
+        // retain the operation that encountered this prepared blocker.
+        txns.push_back(finished);
       }
       if (!txns.empty())
         return try_life_transactions(txns) ? continue_life_after_stack()
@@ -1532,8 +1534,11 @@ void YCSBTxnManager::reset_life_descriptor(LifeTxnDescriptor &descriptor,
   if (descriptor.pid == txn->life_pid &&
       descriptor.tid.time == txn->life_tid.time)
     reset_life_piggyback_prepare();
+  // A stale helper must join an already newer attempt, not supersede it.
+  // Advancing observed_attempt again lets concurrent helpers invalidate one
+  // another indefinitely. Only advance when our own attempt needs a retry.
   descriptor.tid.attempt =
-      std::max(descriptor.tid.attempt, observed_attempt) + 1;
+      std::max(descriptor.tid.attempt + 1, observed_attempt);
   descriptor.history.clear();
   descriptor.touched_objects.clear();
   life_reset_program(descriptor);
