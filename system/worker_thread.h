@@ -40,7 +40,10 @@ public:
     RC process_rqry_rsp(Message * msg);
     RC process_rqry(Message * msg);
     RC process_rqry_cont(Message * msg);
-    RC process_life_execute(Message *msg);
+    RC process_life_execute(Message *msg, uint64_t history_base_size = UINT64_MAX);
+#if LIFE_WAIT_QUEUE
+    RC process_life_resume(Message *msg);
+#endif
     RC process_life_execute_rsp(Message *msg);
     RC process_life_prepare(Message *msg);
     RC process_life_prepare_rsp(Message *msg);
@@ -53,6 +56,15 @@ public:
     RC process_rprepare(Message * msg);
     RC process_rpass(Message * msg);
     RC process_rtxn(Message * msg);
+#if CC_ALG == HDCC
+    RC process_hdcc_req_valid(Message *msg);
+    RC process_hdcc_valid(Message *msg);
+#endif
+#if CC_ALG == ARIA
+    RC process_aria_control(Message *msg);
+    RC process_aria_start(Message *msg);
+    void aria_complete();
+#endif
     RC process_calvin_rtxn(Message * msg);
     RC process_rtxn_cont(Message * msg);
     RC process_log_msg(Message * msg);

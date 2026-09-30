@@ -81,7 +81,10 @@ Query_thd::get_next_query() {
 	return query;
 }
 
-void BaseQuery::init() { 
+void BaseQuery::init() {
+#if CC_ALG == HDCC
+  hdcc_calvin = false;
+#endif
   DEBUG_M("BaseQuery::init array partitions\n");
   partitions.init(g_part_cnt);
   DEBUG_M("BaseQuery::init array partitions_touched\n");

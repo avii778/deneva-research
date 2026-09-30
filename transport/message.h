@@ -21,6 +21,7 @@
 #include "helper.h"
 #include "logger.h"
 #include "array.h"
+#include "life_wait_context.h"
 #if WORKLOAD == YCSB
 #include "ycsb_ollp.h"
 #endif
@@ -42,6 +43,9 @@ public:
   static std::vector<Message*> * create_messages(char * buf); 
   static void release_message(Message * msg); 
   RemReqType rtype;
+#if CC_ALG == HDCC
+  int algo = SILO;
+#endif
   uint64_t txn_id;
   uint64_t batch_id;
   uint64_t return_node_id;
@@ -78,6 +82,49 @@ public:
   virtual void release() = 0;
 };
 
+#if CC_ALG == ARIA
+class AriaControlMessage : public Message {
+public:
+  unsigned stage = 0;
+  bool sequencer = false, response = false, advance = false;
+  bool raw = false, war = false;
+  RC rc = RCOK;
+  uint64_t get_size();
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *txn);
+  void copy_to_txn(TxnManager *) {}
+  void init() {}
+  void release() {}
+};
+#endif
+
+#if CC_ALG == HDCC
+class HdccValidationMessage : public Message {
+public:
+  uint64_t max_calvin_tid = 0, max_calvin_bid = 0;
+  RC rc = RCOK;
+  uint64_t get_size();
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *txn);
+  void copy_to_txn(TxnManager *txn);
+  void init() {}
+  void release() {}
+};
+class HdccConflictMessage : public Message {
+public:
+  std::vector<uint8_t> conflict_statics;
+  uint64_t get_size();
+  void copy_from_buf(char *buf);
+  void copy_to_buf(char *buf);
+  void copy_from_txn(TxnManager *) {}
+  void copy_to_txn(TxnManager *) {}
+  void init() {}
+  void release() {}
+};
+#endif
+
 // Message types
 class InitDoneMessage : public Message {
 public:
@@ -106,7 +153,7 @@ public:
   //uint64_t txn_id;
   //uint64_t batch_id;
   bool readonly;
-#if CC_ALG == MAAT
+#if CC_ALG == MAAT || CC_ALG == SILO
   uint64_t commit_timestamp;
 #endif
 };
@@ -176,6 +223,9 @@ public:
   void release();
 
   RC rc;
+#if CC_ALG == SILO
+  uint64_t max_tid;
+#endif
 #if CC_ALG == MAAT
   uint64_t lower;
   uint64_t upper;
@@ -183,7 +233,7 @@ public:
 
   // For Calvin PPS: part keys from secondary lookup for sequencer response
   Array<uint64_t> part_keys;
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   std::vector<YCSBReconRecord> ycsb_recon_records;
 #endif
 };
@@ -201,6 +251,19 @@ public:
   uint64_t pid;
   RC rc;
   uint64_t txn_id;
+};
+
+// Scheduler-only message. Its state must never be sent over the network.
+class LifeResumeMessage : public Message {
+public:
+  std::shared_ptr<LifeQueuedWait> wait;
+  void copy_from_buf(char *) { assert(false); }
+  void copy_to_buf(char *) { assert(false); }
+  void copy_from_txn(TxnManager *) { assert(false); }
+  void copy_to_txn(TxnManager *) { assert(false); }
+  uint64_t get_size() { assert(false); return 0; }
+  void init() {}
+  void release() { wait.reset(); }
 };
 
 class LifeExecuteMessage : public Message {
@@ -396,7 +459,7 @@ public:
 
   uint64_t pid;
   uint64_t ts;
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
   uint64_t batch_id;
   uint64_t txn_id;
 #endif
@@ -417,7 +480,7 @@ public:
   void release(); 
 
   Array<ycsb_request*> requests;
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   std::vector<YCSBReconRecord> recon_records;
   bool recon;
 #endif

@@ -32,6 +32,9 @@ void QWorkQueue::init() {
   seq_queue = new boost::lockfree::queue<work_queue_entry* > (0);
 #if CC_ALG == LIFE
   life_old_dequeue_streak = new uint32_t[g_thread_cnt]();
+#if LIFE_WAIT_QUEUE
+  life_wait_prefer_protocol.reset(new uint8_t[g_thread_cnt]());
+#endif
 #endif
   // LIFE continuations deliberately share this queue. The transaction-table
   // ready claim, rather than queue affinity, serializes each durable manager.
@@ -89,7 +92,7 @@ Message * QWorkQueue::sequencer_dequeue(uint64_t thd_id) {
 }
 
 void QWorkQueue::sched_enqueue(uint64_t thd_id, Message * msg) {
-  assert(CC_ALG == CALVIN);
+  assert(CC_ALG == CALVIN || CC_ALG == HDCC);
   assert(msg);
   assert(ISSERVERN(msg->return_node_id));
   uint64_t starttime = get_sys_clock();
@@ -114,7 +117,7 @@ void QWorkQueue::sched_enqueue(uint64_t thd_id, Message * msg) {
 Message * QWorkQueue::sched_dequeue(uint64_t thd_id) {
   uint64_t starttime = get_sys_clock();
 
-  assert(CC_ALG == CALVIN);
+  assert(CC_ALG == CALVIN || CC_ALG == HDCC);
   Message * msg = NULL;
   work_queue_entry * entry = NULL;
 
@@ -191,6 +194,88 @@ void QWorkQueue::enqueue(uint64_t thd_id, Message * msg,bool busy) {
   INC_STATS(thd_id,work_queue_enq_cnt,1);
 }
 
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+void QWorkQueue::life_wait_enqueue(uintptr_t row, uint64_t token, Message *msg,
+                                   bool completion_raced) {
+  life_wait_admitted.fetch_add(1, std::memory_order_relaxed);
+  life_wait_queue.push(row, token, std::unique_ptr<Message>(msg), life_wait_now_ns(),
+                       completion_raced);
+}
+
+void QWorkQueue::life_wait_wake(uintptr_t row) {
+  life_wait_queue.wake(row, life_wait_now_ns());
+}
+
+void QWorkQueue::life_wait_cancel(uintptr_t row, uint64_t token) {
+  life_wait_queue.cancel(row, token);
+}
+
+void QWorkQueue::life_wait_clear() { life_wait_queue.clear(); }
+
+void QWorkQueue::life_wait_result(bool finalize) {
+  (finalize ? life_wait_finalize : life_wait_help).fetch_add(
+      1, std::memory_order_relaxed);
+}
+
+namespace {
+void life_counter_max(std::atomic<uint64_t> &counter, uint64_t value) {
+  uint64_t previous = counter.load(std::memory_order_relaxed);
+  while (previous < value && !counter.compare_exchange_weak(
+      previous, value, std::memory_order_relaxed)) {}
+}
+}
+
+void QWorkQueue::life_wait_resumed(LifeResultCode result, bool completion,
+                                  uint64_t dispatch_ns, uint64_t ready_ns) {
+  ResumeCounts &counts = life_resume_counts[completion ? 1 : 0];
+  counts.outcomes[static_cast<unsigned>(result)].fetch_add(1, std::memory_order_relaxed);
+  counts.dispatch_ns.fetch_add(dispatch_ns, std::memory_order_relaxed);
+  counts.ready_ns.fetch_add(ready_ns, std::memory_order_relaxed);
+}
+
+void QWorkQueue::life_prepared_release(uint64_t ns) {
+  life_prepared_releases.fetch_add(1, std::memory_order_relaxed);
+  life_prepared_ns.fetch_add(ns, std::memory_order_relaxed);
+  life_counter_max(life_prepared_max_ns, ns);
+}
+
+void QWorkQueue::life_cleanup_scan(uint64_t scanned, uint64_t reset) {
+  life_cleanup_calls.fetch_add(1, std::memory_order_relaxed);
+  life_cleanup_scanned.fetch_add(scanned, std::memory_order_relaxed);
+  life_cleanup_reset.fetch_add(reset, std::memory_order_relaxed);
+  life_counter_max(life_cleanup_max_scan, scanned);
+}
+
+void QWorkQueue::life_wait_print() {
+  printf("LIFE_WAIT_QUEUE admitted=%lu released=%lu wait_ns=%lu help=%lu finalize=%lu\n",
+         life_wait_admitted.load(), life_wait_released.load(),
+         life_wait_ns.load(), life_wait_help.load(), life_wait_finalize.load());
+  const auto s = life_wait_queue.snapshot();
+  printf("LIFE_WAIT_DIAG admitted=%lu duplicates=%lu canceled=%lu pending=%lu "
+         "peak_pending=%lu peak_row_depth=%lu depth_sum=%lu wake_calls=%lu "
+         "wake_empty=%lu wake_coalesced=%lu registration_races=%lu "
+         "cancel_preserved_wake=%lu timer_releases=%lu wake_releases=%lu "
+         "ready_delay_ns=%lu max_ready_delay_ns=%lu\n",
+         s.admitted, s.duplicates, s.canceled, s.pending, s.peak_pending,
+         s.peak_row_depth, s.depth_sum, s.wake_calls, s.wake_empty,
+         s.wake_coalesced, s.registration_races, s.cancel_preserved_wake,
+         s.timer_releases, s.wake_releases, s.ready_delay_ns, s.max_ready_delay_ns);
+  for (unsigned i = 0; i < 2; ++i) {
+    const auto &c = life_resume_counts[i];
+    printf("LIFE_WAIT_RESUME source=%s success=%lu finalize=%lu committed=%lu "
+           "help=%lu retry=%lu invalid=%lu deferred=%lu dispatch_ns=%lu ready_ns=%lu\n",
+           i ? "completion" : "timer", c.outcomes[0].load(), c.outcomes[1].load(),
+           c.outcomes[2].load(), c.outcomes[3].load(), c.outcomes[4].load(),
+           c.outcomes[5].load(), c.outcomes[6].load(), c.dispatch_ns.load(), c.ready_ns.load());
+  }
+  printf("LIFE_ROW_DIAG prepared_releases=%lu prepared_ns=%lu prepared_max_ns=%lu "
+         "cleanup_calls=%lu cleanup_scanned=%lu cleanup_reset=%lu cleanup_max_scan=%lu\n",
+         life_prepared_releases.load(), life_prepared_ns.load(), life_prepared_max_ns.load(),
+         life_cleanup_calls.load(), life_cleanup_scanned.load(), life_cleanup_reset.load(),
+         life_cleanup_max_scan.load());
+}
+#endif
+
 Message * QWorkQueue::dequeue(uint64_t thd_id) {
   uint64_t starttime = get_sys_clock();
   assert(ISSERVER || ISREPLICA);
@@ -207,7 +292,31 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
   const bool prefer_new =
       life_should_try_admission(life_old_dequeue_streak[thd_id]);
   if (prefer_new)
-    valid = new_txn_queue->pop(entry);
+    valid = (CC_ALG != ARIA && new_txn_queue->pop(entry));
+#endif
+#if LIFE_WAIT_QUEUE
+  // Alternate ready waiters with protocol traffic so a busy timer queue
+  // cannot starve the finish messages that clear its conflicts.
+  if (!valid && life_wait_prefer_protocol[thd_id])
+    valid = work_queue->pop(entry);
+  if (!valid) {
+    LifeWaitQueue<std::unique_ptr<Message> >::Release release;
+    const uint64_t now = life_wait_now_ns();
+    std::unique_ptr<Message> resumed = life_wait_queue.pop(now, &release);
+    if (resumed) {
+      auto &wait = static_cast<LifeResumeMessage *>(resumed.get())->wait;
+      wait->released_at = now;
+      wait->ready_at = release.ready_at;
+      wait->completion_wake = release.completion;
+      life_wait_released.fetch_add(1, std::memory_order_relaxed);
+      life_wait_ns.fetch_add(life_wait_now_ns() -
+          static_cast<LifeResumeMessage *>(resumed.get())->wait->enqueued_at,
+          std::memory_order_relaxed);
+      life_record_dequeue(life_old_dequeue_streak[thd_id], false);
+      life_wait_prefer_protocol[thd_id] = 1;
+      return resumed.release();
+    }
+  }
 #endif
   if (!valid)
     valid = work_queue->pop(entry);
@@ -224,7 +333,7 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
       }
     }
 #else
-    valid = new_txn_queue->pop(entry);
+    valid = (CC_ALG != ARIA && new_txn_queue->pop(entry));
 #endif
   }
   INC_STATS(thd_id,mtx[14],get_sys_clock() - mtx_wait_starttime);
@@ -235,6 +344,10 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
 #if CC_ALG == LIFE
     life_record_dequeue(life_old_dequeue_streak[thd_id],
                         msg->rtype == CL_QRY);
+#if LIFE_WAIT_QUEUE
+    if (msg->rtype != CL_QRY)
+      life_wait_prefer_protocol[thd_id] = msg->rtype == RLIFE_RESUME;
+#endif
 #endif
     //printf("%ld WQdequeue %ld\n",thd_id,entry->txn_id);
     uint64_t queue_time = get_sys_clock() - entry->starttime;
@@ -274,3 +387,13 @@ Message * QWorkQueue::dequeue(uint64_t thd_id) {
 #endif
   return msg;
 }
+
+#if CC_ALG == ARIA
+Message *QWorkQueue::aria_dequeue_client() {
+  work_queue_entry *entry = NULL;
+  if (!new_txn_queue->pop(entry)) return NULL;
+  Message *msg = entry->msg;
+  mem_allocator.free(entry, sizeof(*entry));
+  return msg;
+}
+#endif

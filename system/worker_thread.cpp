@@ -18,6 +18,7 @@
 #include "manager.h"
 #include "thread.h"
 #include "worker_thread.h"
+#include "aria_sequencer.h"
 #include "txn.h"
 #include "wl.h"
 #include "query.h"
@@ -94,12 +95,22 @@ void WorkerThread::setup() {
 }
 
 void WorkerThread::process(Message * msg) {
+  // Calvin's sequencer may retire a shared query as soon as we ACK it.
+  const RemReqType processed_type = msg->get_rtype();
+  const uint64_t processed_id __attribute__((unused)) = msg->get_txn_id();
   RC rc __attribute__ ((unused));
 
   DEBUG("%ld Processing %ld %d\n",get_thd_id(),msg->get_txn_id(),msg->get_rtype());
   assert(msg->get_rtype() == CL_QRY || msg->get_txn_id() != UINT64_MAX);
   uint64_t starttime = get_sys_clock();
 		switch(msg->get_rtype()) {
+#if CC_ALG == HDCC
+      case HDCC_REQ_VALID: rc = process_hdcc_req_valid(msg); break;
+      case HDCC_VALID: rc = process_hdcc_valid(msg); break;
+#endif
+#if CC_ALG == ARIA
+      case ARIA_CONTROL: rc = process_aria_control(msg); break;
+#endif
 			case RPASS:
         //rc = process_rpass(msg);
 				break;
@@ -119,6 +130,11 @@ void WorkerThread::process(Message * msg) {
         rc = process_rqry_rsp(msg);
 				break;
 #if CC_ALG == LIFE
+#if LIFE_WAIT_QUEUE
+      case RLIFE_RESUME:
+        rc = process_life_resume(msg);
+        break;
+#endif
       case RLIFE_EXECUTE:
         rc = process_life_execute(msg);
         break;
@@ -161,10 +177,17 @@ void WorkerThread::process(Message * msg) {
 				break;
       case CL_QRY:
 			case RTXN:
-#if CC_ALG == CALVIN
+#if CC_ALG == CALVIN || CC_ALG == HDCC
+#if CC_ALG == HDCC
+        if (msg->algo == SILO) rc = process_rtxn(msg); else
+#endif
         rc = process_calvin_rtxn(msg);
 #else
+#if CC_ALG == ARIA
+        rc = process_aria_start(msg);
+#else
         rc = process_rtxn(msg);
+#endif
 #endif
 				break;
 			case LOG_FLUSHED:
@@ -185,12 +208,15 @@ void WorkerThread::process(Message * msg) {
   uint64_t timespan = get_sys_clock() - starttime;
   INC_STATS(get_thd_id(),worker_process_cnt,1);
   INC_STATS(get_thd_id(),worker_process_time,timespan);
-  INC_STATS(get_thd_id(),worker_process_cnt_by_type[msg->rtype],1);
-  INC_STATS(get_thd_id(),worker_process_time_by_type[msg->rtype],timespan);
-  DEBUG("%ld EndProcessing %d %ld\n",get_thd_id(),msg->get_rtype(),msg->get_txn_id());
+  INC_STATS(get_thd_id(),worker_process_cnt_by_type[processed_type],1);
+  INC_STATS(get_thd_id(),worker_process_time_by_type[processed_type],timespan);
+  DEBUG("%ld EndProcessing %d %ld\n",get_thd_id(),processed_type,processed_id);
 }
 
 void WorkerThread::check_if_done(RC rc) {
+#if CC_ALG == ARIA
+  return;
+#endif
   if(txn_man->waiting_for_response())
     return;
   if(rc == Commit)
@@ -201,6 +227,13 @@ void WorkerThread::check_if_done(RC rc) {
 
 void WorkerThread::release_txn_man() {
 #if CC_ALG == LIFE
+#if LIFE_WAIT_QUEUE
+  LifeTxnManager *life = static_cast<LifeTxnManager *>(txn_man);
+  if (!IS_LOCAL(txn_man->get_txn_id()) && life->has_life_queued_waits()) {
+    life->life_release_when_idle = true;
+    return;
+  }
+#endif
   // LifeTxnManager is the shared coordinator base for every LIFE workload.
   ((LifeTxnManager *)txn_man)->clear_life_active();
 #endif
@@ -211,7 +244,7 @@ void WorkerThread::release_txn_man() {
 void WorkerThread::calvin_wrapup() {
   const RC outcome = txn_man->get_rc();
   txn_man->release_locks(outcome);
-#if WORKLOAD == YCSB && CALVIN_PRE_LOCK
+#if WORKLOAD == YCSB && CALVIN_PRE_LOCK && CC_ALG == CALVIN
   // WRITE_DONE is a cluster-wide barrier, so reaching wrapup means every
   // server has finished this same scheduled transaction. Release the local
   // admission turn only after releasing its database token; each scheduler
@@ -278,7 +311,7 @@ void WorkerThread::abort() {
 }
 
 TxnManager * WorkerThread::get_transaction_manager(Message * msg) {
-#if CC_ALG == CALVIN
+#if CC_ALG == CALVIN || CC_ALG == HDCC || CC_ALG == ARIA
   TxnManager * local_txn_man = txn_table.get_transaction_manager(get_thd_id(),msg->get_txn_id(),msg->get_batch_id());
 #else
   TxnManager * local_txn_man = txn_table.get_transaction_manager(get_thd_id(),msg->get_txn_id(),0);
@@ -312,7 +345,27 @@ RC WorkerThread::run() {
     }
     //uint64_t starttime = get_sys_clock();
 
-    if(msg->rtype != CL_QRY || CC_ALG == CALVIN) {
+    if(msg->rtype != CL_QRY || CC_ALG == CALVIN
+#if CC_ALG == HDCC
+       || msg->algo == CALVIN
+#endif
+    ) {
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+      if (msg->rtype == RLIFE_RESUME) {
+        LifeResumeMessage *resume = static_cast<LifeResumeMessage *>(msg);
+        if (resume->wait->canceled.load()) {
+          Message::release_message(msg);
+          continue;
+        }
+        bool missing = false;
+        txn_man = txn_table.get_transaction_manager(
+            get_thd_id(), msg->get_txn_id(), 0, false, &missing);
+        if (missing) {
+          Message::release_message(msg);
+          continue;
+        }
+      } else
+#endif
       txn_man = get_transaction_manager(msg);
 #if CC_ALG == LIFE
       if (txn_man == NULL) {
@@ -370,6 +423,10 @@ RC WorkerThread::run() {
       txn_man->register_thread(this);
     }
 
+#if CC_ALG == HDCC
+    const bool worker_owns_message = msg->algo != CALVIN ||
+        (msg->rtype != CL_QRY && msg->rtype != RTXN);
+#endif
     process(msg);
 
     ready_starttime = get_sys_clock();
@@ -382,6 +439,9 @@ RC WorkerThread::run() {
     // delete message
     ready_starttime = get_sys_clock();
 #if CC_ALG != CALVIN
+#if CC_ALG == HDCC
+    if (worker_owns_message)
+#endif
     Message::release_message(msg);
 #endif
     INC_STATS(get_thd_id(),worker_release_msg_time,get_sys_clock() - ready_starttime);
@@ -397,20 +457,25 @@ RC WorkerThread::process_rfin(Message * msg) {
   assert(CC_ALG != CALVIN);
 
   M_ASSERT_V(!IS_LOCAL(msg->get_txn_id()),"RFIN local: %ld %ld/%d\n",msg->get_txn_id(),msg->get_txn_id()%g_node_cnt,g_node_id);
-#if CC_ALG == MAAT
+#if CC_ALG == MAAT || CC_ALG == SILO
   txn_man->set_commit_timestamp(((FinishMessage*)msg)->commit_timestamp);
 #endif
 
   if(((FinishMessage*)msg)->rc == Abort) {
     txn_man->abort();
+#if CC_ALG == ARIA
+    msg_queue.enqueue(get_thd_id(), Message::create_message(txn_man, RACK_FIN), GET_NODE_ID(msg->get_txn_id()));
+    release_txn_man();
+    return Abort;
+#endif
     txn_man->reset();
     txn_man->reset_query();
     msg_queue.enqueue(get_thd_id(),Message::create_message(txn_man,RACK_FIN),GET_NODE_ID(msg->get_txn_id()));
     return Abort;
   } 
   txn_man->commit();
-  //if(!txn_man->query->readonly() || CC_ALG == OCC)
-  if(!((FinishMessage*)msg)->readonly || CC_ALG == MAAT || CC_ALG == OCC)
+  //if(!txn_man->query->readonly() || CC_ALG == OCC || CC_ALG == SILO || CC_ALG == ARIA || CC_ALG == HDCC)
+  if(!((FinishMessage*)msg)->readonly || CC_ALG == MAAT || CC_ALG == OCC || CC_ALG == SILO || CC_ALG == ARIA || CC_ALG == HDCC)
     msg_queue.enqueue(get_thd_id(),Message::create_message(txn_man,RACK_FIN),GET_NODE_ID(msg->get_txn_id()));
   release_txn_man();
 
@@ -439,12 +504,17 @@ RC WorkerThread::process_rack_prep(Message * msg) {
     time_table.set_state(get_thd_id(),msg->get_txn_id(),MAAT_ABORTED);
   }
 #endif
+#if CC_ALG == SILO
+  txn_man->find_tid_silo(((AckMessage *)msg)->max_tid);
+#endif
   if(responses_left > 0) 
     return WAIT;
 
   // Done waiting 
   if(txn_man->get_rc() == RCOK) {
+#if CC_ALG != HDCC
     rc  = txn_man->validate();
+#endif
   }
   if(rc == Abort || txn_man->get_rc() == Abort) {
     txn_man->txn->rc = Abort;
@@ -461,6 +531,11 @@ RC WorkerThread::process_rack_prep(Message * msg) {
 }
 
 RC WorkerThread::process_rack_rfin(Message * msg) {
+#if CC_ALG == ARIA
+  assert(txn_man->aria_responses > 0);
+  if (--txn_man->aria_responses == 0) aria_complete();
+  return RCOK;
+#endif
   DEBUG("RFIN_ACK %ld\n",msg->get_txn_id());
 
   RC rc = RCOK;
@@ -540,13 +615,17 @@ RC WorkerThread::process_rqry_cont(Message * msg) {
 }
 
 #if CC_ALG == LIFE
-RC WorkerThread::process_life_execute(Message *msg) {
+RC WorkerThread::process_life_execute(Message *msg, uint64_t history_base_size) {
   DEBUG("RLIFE_EXECUTE %ld\n", msg->get_txn_id());
   assert(CC_ALG == LIFE);
   LIFE_DBG_INC(life_dbg_execute_recv);
 
   ((LifeTxnManager *)txn_man)->mark_life_active();
   LifeExecuteMessage *life_msg = (LifeExecuteMessage *)msg;
+#if LIFE_WAIT_QUEUE
+  if (static_cast<LifeTxnManager *>(txn_man)->has_life_queued_remote(*life_msg))
+    return WAIT_REM;
+#endif
   LifeExecuteResponseMessage *response =
       (LifeExecuteResponseMessage *)Message::create_message(RLIFE_EXECUTE_RSP);
   response->txn_id = msg->get_txn_id();
@@ -558,8 +637,26 @@ RC WorkerThread::process_life_execute(Message *msg) {
                                life_msg->stop_record_id,
                                life_msg->prepare_after_execute,
                                response->result, response->prepared);
-  response->history_base_size = life_msg->descriptor.history.size();
+  response->history_base_size = history_base_size == UINT64_MAX
+      ? life_msg->descriptor.history.size() : history_base_size;
+#if LIFE_WAIT_QUEUE
+  if (response->result.code == LifeResultCode::Deferred) {
+    life_txn->queue_life_remote(*life_msg, response->result,
+                               response->history_base_size);
+    Message::release_message(response);
+    return life_note_wait_start(txn_man, WAIT_REM);
+  }
+#endif
   const LifeResultCode result_code = response->result.code;
+#if LIFE_WAIT_QUEUE
+  // Resumed execution can establish new row state after an earlier finish.
+  // Keep that state alive for the requester's next finish, just as on the
+  // ordinary execute path.
+  if (result_code == LifeResultCode::Success ||
+      result_code == LifeResultCode::Finalize ||
+      (result_code == LifeResultCode::Help && !LIFE_ROLLBACK_BEFORE_HELP))
+    life_txn->life_release_when_idle = false;
+#endif
   if (response->result.code == LifeResultCode::Success) {
     std::vector<LifeHistoryEntry> &history =
         response->result.transaction.history;
@@ -583,11 +680,41 @@ RC WorkerThread::process_life_execute(Message *msg) {
   // will not run the normal prepare/finish path for this remote manager. Release
   // immediately so stale or invalid messages cannot leave orphaned entries.
   if (!IS_LOCAL(msg->get_txn_id()) &&
-      (result_code == LifeResultCode::Committed ||
+      (
+#if LIFE_ROLLBACK_BEFORE_HELP
+       // serve_life_execute has released this batch before returning Help.
+       result_code == LifeResultCode::Help ||
+#endif
+       result_code == LifeResultCode::Committed ||
        result_code == LifeResultCode::InvalidOperation))
     release_txn_man();
   return RCOK;
 }
+
+#if LIFE_WAIT_QUEUE
+RC WorkerThread::process_life_resume(Message *msg) {
+  const auto wait = static_cast<LifeResumeMessage *>(msg)->wait;
+  LifeTxnManager *life = static_cast<LifeTxnManager *>(txn_man);
+  if (!life->claim_life_wait(wait))
+    return RCOK;
+  txn_man->txn_stats.local_wait_time += life_wait_now_ns() - wait->enqueued_at;
+  RC rc;
+  if (wait->remote) {
+    rc = process_life_execute(wait->remote.get(), wait->history_base_size);
+  } else {
+    rc = life->resume_life_wait(wait);
+    check_if_done(rc);
+  }
+  if (txn_man) {
+    life->clear_life_resume_permit();
+    life_note_wait_start(txn_man, rc);
+    if (!IS_LOCAL(msg->get_txn_id()) && !life->has_life_queued_waits() &&
+        (life->life_release_when_idle || (!wait->remote && rc != WAIT_REM)))
+      release_txn_man();
+  }
+  return rc;
+}
+#endif
 
 RC WorkerThread::process_life_execute_rsp(Message *msg) {
   DEBUG("RLIFE_EXECUTE_RSP %ld\n", msg->get_txn_id());
@@ -782,7 +909,11 @@ RC WorkerThread::process_rprepare(Message * msg) {
     // Validate transaction
     rc  = txn_man->validate();
     txn_man->set_rc(rc);
+#if CC_ALG == HDCC
+    msg_queue.enqueue(get_thd_id(),Message::create_message(txn_man,HDCC_REQ_VALID),msg->return_node_id);
+#else
     msg_queue.enqueue(get_thd_id(),Message::create_message(txn_man,RACK_PREP),msg->return_node_id);
+#endif
     // Clean up as soon as abort is possible
     if(rc == Abort) {
       txn_man->abort();
@@ -795,6 +926,9 @@ uint64_t WorkerThread::get_next_txn_id() {
   uint64_t txn_id = ( get_node_id() + get_thd_id() * g_node_cnt) 
 							+ (g_thread_cnt * g_node_cnt * _thd_txn_id);
   ++_thd_txn_id;
+#if CC_ALG == HDCC
+  txn_id += (uint64_t(1) << 48) * g_node_cnt;
+#endif
   return txn_id;
 }
 
@@ -909,7 +1043,7 @@ RC WorkerThread::process_log_flushed(Message * msg) {
 RC WorkerThread::process_rfwd(Message * msg) {
   DEBUG("RFWD (%ld,%ld)\n",msg->get_txn_id(),msg->get_batch_id());
   txn_man->txn_stats.remote_wait_time += get_sys_clock() - txn_man->txn_stats.wait_starttime;
-  assert(CC_ALG == CALVIN);
+  assert(CC_ALG == CALVIN || CC_ALG == HDCC);
   ForwardMessage *forward = (ForwardMessage *)msg;
   int responses_left = txn_man->received_calvin_response(
       forward->calvin_phase, forward->rc);

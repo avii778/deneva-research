@@ -17,6 +17,11 @@
 #ifndef _HELPER_H_
 #define _HELPER_H_
 
+#ifndef COMPILER_BARRIER
+#define COMPILER_BARRIER asm volatile("" ::: "memory");
+#endif
+#define PAUSE_SILO asm volatile("pause" ::: "memory");
+
 #include <cstdlib>
 #include <iostream>
 #include <stdint.h>

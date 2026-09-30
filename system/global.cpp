@@ -30,6 +30,10 @@
 #include "txn_table.h"
 #include "client_txn.h"
 #include "sequencer.h"
+#include "cc_selector.h"
+#if CC_ALG == HDCC
+CCSelector cc_selector;
+#endif
 #include "logger.h"
 #include "maat.h"
 
@@ -103,7 +107,7 @@ UInt32 g_thread_cnt = PART_CNT/NODE_CNT;
 UInt32 g_thread_cnt = THREAD_CNT;
 #endif
 UInt32 g_rem_thread_cnt = REM_THREAD_CNT;
-#if CC_ALG == CALVIN || CC_ALG == LIFE
+#if CC_ALG == CALVIN || CC_ALG == LIFE || CC_ALG == ARIA
 UInt32 g_abort_thread_cnt = 0;
 #else
 UInt32 g_abort_thread_cnt = 1;
@@ -114,9 +118,11 @@ UInt32 g_logger_thread_cnt = 1;
 UInt32 g_logger_thread_cnt = 0;
 #endif
 UInt32 g_send_thread_cnt = SEND_THREAD_CNT;
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
 // sequencer + scheduler thread
 UInt32 g_total_thread_cnt = g_thread_cnt + g_rem_thread_cnt + g_send_thread_cnt + g_abort_thread_cnt + g_logger_thread_cnt + 2;
+#elif CC_ALG == ARIA
+UInt32 g_total_thread_cnt = g_thread_cnt + g_rem_thread_cnt + g_send_thread_cnt + g_abort_thread_cnt + g_logger_thread_cnt + 1;
 #else
 UInt32 g_total_thread_cnt = g_thread_cnt + g_rem_thread_cnt + g_send_thread_cnt + g_abort_thread_cnt + g_logger_thread_cnt;
 #endif

@@ -20,6 +20,8 @@
 #include "pps.h"
 #include "thread.h"
 #include "worker_thread.h"
+#include "aria_sequencer.h"
+#include "cc_selector.h"
 #include "calvin_thread.h"
 #include "abort_thread.h"
 #include "io_thread.h"
@@ -49,7 +51,7 @@ InputThread * input_thds;
 OutputThread * output_thds;
 AbortThread * abort_thds;
 LogThread * log_thds;
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
 CalvinLockThread * calvin_lock_thds;
 CalvinSequencerThread * calvin_seq_thds;
 #endif
@@ -161,10 +163,13 @@ int main(int argc, char* argv[])
   fflush(stdout);
   txn_table.init();
   printf("Done\n");
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
   printf("Initializing sequencer... ");
   fflush(stdout);
   seq_man.init(m_wl);
+#if CC_ALG == HDCC
+  cc_selector.init();
+#endif
   printf("Done\n");
 #endif
 #if CC_ALG == MAAT
@@ -201,8 +206,10 @@ int main(int argc, char* argv[])
 #if LOGGING
     all_thd_cnt += 1; // logger thread
 #endif
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
     all_thd_cnt += 2; // sequencer + scheduler thread
+#elif CC_ALG == ARIA
+    all_thd_cnt += 1;
 #endif
     assert(all_thd_cnt == g_this_total_thread_cnt);
 	
@@ -216,7 +223,7 @@ int main(int argc, char* argv[])
     output_thds = new OutputThread[sthd_cnt];
     abort_thds = g_abort_thread_cnt > 0 ? new AbortThread[g_abort_thread_cnt] : NULL;
     log_thds = new LogThread[1];
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
     calvin_lock_thds = new CalvinLockThread[1];
     calvin_seq_thds = new CalvinSequencerThread[1];
 #endif
@@ -290,7 +297,7 @@ int main(int argc, char* argv[])
   }
 #endif
 
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
 #if SET_AFFINITY
 		CPU_ZERO(&cpus);
     CPU_SET(cpu_cnt, &cpus);
@@ -312,8 +319,18 @@ int main(int argc, char* argv[])
 #endif
 
 
+#if CC_ALG == ARIA
+  AriaSequencerThread aria_thread;
+  aria_thread.init(id, g_node_id, m_wl);
+  pthread_create(&p_thds[id++], NULL, run_thread, &aria_thread);
+#endif
 	for (uint64_t i = 0; i < all_thd_cnt ; i++) 
 		pthread_join(p_thds[i], NULL);
+
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  txn_table.cancel_life_waits();
+  work_queue.life_wait_print();
+#endif
 
 	endtime = get_server_clock();
   fflush(stdout);

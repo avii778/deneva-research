@@ -22,6 +22,13 @@
 #include "helper.h"
 #include <queue>
 #include <boost/lockfree/queue.hpp>
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+#include "life_wait_queue.h"
+#include "message.h"
+#include <memory>
+#include <atomic>
+static_assert(LIFE_WAIT_QUEUE_US > 0, "LIFE_WAIT_QUEUE_US must be positive");
+#endif
 //#include "message.h"
 
 class BaseQuery;
@@ -73,8 +80,24 @@ struct CompareWQEntry {
 class QWorkQueue {
 public:
   void init();
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  void life_wait_enqueue(uintptr_t row, uint64_t token, Message *msg,
+                         bool completion_raced = false);
+  void life_wait_cancel(uintptr_t row, uint64_t token);
+  void life_wait_wake(uintptr_t row);
+  void life_wait_clear();
+  void life_wait_print();
+  void life_wait_result(bool finalize);
+  void life_wait_resumed(LifeResultCode result, bool completion,
+                         uint64_t dispatch_ns, uint64_t ready_ns);
+  void life_prepared_release(uint64_t ns);
+  void life_cleanup_scan(uint64_t scanned, uint64_t reset);
+#endif
   void enqueue(uint64_t thd_id,Message * msg,bool busy); 
   Message * dequeue(uint64_t thd_id);
+#if CC_ALG == ARIA
+  Message * aria_dequeue_client();
+#endif
   void sched_enqueue(uint64_t thd_id, Message * msg); 
   Message * sched_dequeue(uint64_t thd_id); 
   void sequencer_enqueue(uint64_t thd_id, Message * msg); 
@@ -90,6 +113,21 @@ public:
   //uint64_t get_new_wq_cnt() {return new_query_queue.size();}
 
 private:
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  LifeWaitQueue<std::unique_ptr<Message> > life_wait_queue{
+      uint64_t(LIFE_WAIT_QUEUE_US) * 1000};
+  std::atomic<uint64_t> life_wait_admitted{0}, life_wait_released{0},
+      life_wait_ns{0}, life_wait_help{0}, life_wait_finalize{0};
+  struct ResumeCounts {
+    ResumeCounts() { for (auto &value : outcomes) value.store(0); }
+    std::atomic<uint64_t> outcomes[7];
+    std::atomic<uint64_t> dispatch_ns{0}, ready_ns{0};
+  } life_resume_counts[2]; // timer, completion
+  std::atomic<uint64_t> life_prepared_releases{0}, life_prepared_ns{0},
+      life_prepared_max_ns{0}, life_cleanup_calls{0}, life_cleanup_scanned{0},
+      life_cleanup_reset{0}, life_cleanup_max_scan{0};
+  std::unique_ptr<uint8_t[]> life_wait_prefer_protocol;
+#endif
   boost::lockfree::queue<work_queue_entry* > * work_queue;
 #if CC_ALG == LIFE
   // Continuation traffic can keep the shared queue permanently non-empty.

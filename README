@@ -116,3 +116,9 @@ dbms benchmark has the following parameters in the config file. Parameters with 
 	MAX_PPS_PRODUCT_KEY :  number of products in the products table
 	MAX_PPS_SUPPLIER_KEY :  number of suppliers in the suppliers table
 	MAX_PPS_PARTS_PER : number of parts per product or supplier
+
+Imported Silo, Aria and HDCC algorithms
+------------------------------------
+Select SILO, ARIA or HDCC with CC_ALG for YCSB or TPCC Payment/NewOrder.
+See docs/hdcc-integration.md for source provenance, settings, scope and validation.
+Run python3 scripts/validate_imported_cc.py for isolated builds and smoke tests.

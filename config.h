@@ -117,6 +117,12 @@
 #define ABORT_PENALTY 10 * 1000000UL          // in ns.
 #define ABORT_PENALTY_MAX 5 * 100 * 1000000UL // in ns.
 #define LIFE_HELP_WAIT_US 0
+// Suspend Help/Finalize conflicts per row instead of sleeping a worker.
+// Queue mode takes precedence over LIFE_HELP_WAIT_US; interval is in us.
+#define LIFE_WAIT_QUEUE false
+#define LIFE_WAIT_QUEUE_US 10
+// Release the blocked attempt before Help; Finalize keeps its current state.
+#define LIFE_ROLLBACK_BEFORE_HELP false
 // true: indexed PHeap fairness; false: original single-holder LIFE policy.
 #define life_fairness false
 #define BACKOFF true
@@ -326,6 +332,31 @@ enum PPSTxnType {
 #define MAAT 11
 #define WDL 12
 #define LIFE 13
+#define SILO 27
+#define HDCC 29
+#define ARIA 31
+
+// Imported HDCC baseline algorithms.
+#define ATOMIC_WORD false
+#define HDCC_SHARD_SIZE 100000
+#define HDCC_LOWER_BOUND 19000
+#define HDCC_UPPER_BOUND 150000
+#define HDCC_CONFLICT_INTERVAL_NS 1000000000UL
+#define HDCC_PRORATE_RATIO 0.0
+#define EXTREME_MODE false
+#define ARIA_BATCH_SIZE 1000
+#define ARIA_BATCH_TIME_NS 1000000UL
+#define SILO_PRE_ABORT true
+#define SILO_VALIDATION_NO_WAIT true
+#if CC_ALG == HDCC && EXTREME_MODE
+#error "HDCC EXTREME_MODE is not included in this port"
+#endif
+#if CC_ALG == SILO && ATOMIC_WORD
+#error "This Silo port uses mutex-protected snapshots; ATOMIC_WORD is unsupported"
+#endif
+#if (CC_ALG == SILO || CC_ALG == ARIA || CC_ALG == HDCC) && WORKLOAD != YCSB && WORKLOAD != TPCC
+#error "The imported algorithms support YCSB and TPCC Payment/NewOrder"
+#endif
 // TIMESTAMP allocation method.
 #define TS_MUTEX 1
 #define TS_CAS 2

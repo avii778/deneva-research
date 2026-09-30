@@ -18,8 +18,9 @@
 #define _SEQUENCER_H_
 
 #include "global.h"
+#include <mutex>
 #include "query.h"
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
 #include "ycsb_ollp.h"
 #endif
 #include <boost/lockfree/queue.hpp>
@@ -40,7 +41,7 @@ typedef struct qlite_entry {
 	uint32_t participant_cnt;
 	uint32_t abort_cnt;
   bool attempt_failed;
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   std::vector<YCSBReconRecord> *ycsb_recon_records;
 #endif
   Message * msg;
@@ -60,6 +61,10 @@ typedef struct qlite_ll_entry {
 
 class Sequencer {
  public:
+#if CC_ALG == HDCC
+  bool checkDependency(uint64_t batch, uint64_t id);
+  std::recursive_mutex hdcc_mutex;
+#endif
 	void init(Workload * wl);	
 	void process_ack(Message * msg, uint64_t thd_id);
 	void process_txn(Message * msg,uint64_t thd_id, uint64_t early_start, uint64_t last_start, uint64_t wait_time, uint32_t abort_cnt);

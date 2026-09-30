@@ -630,6 +630,9 @@ void test_higher_attempt_reuses_heap_node_and_rejects_stale_commit() {
   assert(after_stale_commit.transaction == retry);
 
   assert(life_row.prepare(retry).code == LifeResultCode::Success);
+  // A delayed rollback from before helping must preserve the new context.
+  life_row.rollback(first);
+  assert(life_row.execute(contender, read).code == LifeResultCode::Finalize);
   life_row.commit(retry);
   assert(life_row.execute(contender, read).code == LifeResultCode::Success);
 
@@ -1393,6 +1396,78 @@ void test_concurrent_prepared_readers_and_inline_writer() {
   assert(value == 84);
 }
 
+void test_targeted_descriptor_retirement_preserves_order_and_tombstones() {
+  SharedRowFixture f;
+  LifeTxnDescriptor txs[] = {
+      descriptor(1, 10, 1, YCSB_0, 0), descriptor(2, 30, 1, YCSB_0, 0),
+      descriptor(3, 50, 1, YCSB_0, 0)};
+  std::weak_ptr<const LifeTxnDescriptor> retained[3];
+  for (auto &tx : txs)
+    assert(f.execute(tx, f.read()).code == LifeResultCode::Success);
+  // Commit in reverse timestamp order: retirement cannot assume FIFO order.
+  for (int i = 2; i >= 0; --i) {
+    LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(txs[i]);
+    retained[i] = frozen;
+    assert(f.manager.prepare(frozen).code == LifeResultCode::Success);
+    f.manager.commit(frozen, std::vector<size_t>(1, 0));
+    f.manager.commit(frozen, std::vector<size_t>(1, 0)); // No duplicate membership.
+  }
+  for (const auto &weak : retained) assert(!weak.expired());
+  auto equal = descriptor(4, 30, 1, YCSB_0, 0);
+  assert(f.execute(equal, f.read()).code == LifeResultCode::Success);
+  assert(retained[0].expired());
+  assert(!retained[1].expired() && !retained[2].expired());
+  const auto duplicate = f.manager.execute(txs[0], f.read());
+  assert(duplicate.code == LifeResultCode::Committed);
+  assert(duplicate.transaction.history.empty()); // Tombstone survived cleanup.
+  f.manager.commit(txs[0]);
+  f.manager.rollback(txs[0]);
+  assert(retained[0].expired()); // Stale completion cannot restore ownership.
+  auto older = descriptor(5, 1, 1, YCSB_0, 0);
+  assert(f.execute(older, f.read()).code == LifeResultCode::Success);
+  assert(!retained[1].expired() && !retained[2].expired());
+
+  // Recycle a process slot that still owns a committed descriptor.
+  auto recycled = descriptor(2, 40, 1, YCSB_0, 0);
+  assert(f.execute(recycled, f.read()).code == LifeResultCode::Success);
+  assert(retained[1].expired() && !retained[2].expired());
+  assert(f.manager.execute(txs[1], f.read()).code == LifeResultCode::Committed);
+  LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(recycled);
+  std::weak_ptr<const LifeTxnDescriptor> recycled_retained = frozen;
+  assert(f.manager.prepare(frozen).code == LifeResultCode::Success);
+  f.manager.commit(frozen, std::vector<size_t>(1, 0));
+  frozen.reset();
+  auto later = descriptor(6, 60, 1, YCSB_0, 0);
+  assert(f.execute(later, f.read()).code == LifeResultCode::Success);
+  assert(retained[2].expired() && recycled_retained.expired());
+  assert(f.manager.execute(recycled, f.read()).code == LifeResultCode::Committed);
+}
+
+void test_targeted_retirement_survives_process_map_rehash() {
+  SharedRowFixture f;
+  auto tx = descriptor(1, 10000, 1, YCSB_0, 0);
+  assert(f.execute(tx, f.read()).code == LifeResultCode::Success);
+  LifeTxnDescriptorPtr frozen = std::make_shared<LifeTxnDescriptor>(tx);
+  std::weak_ptr<const LifeTxnDescriptor> retained = frozen;
+  assert(f.manager.prepare(frozen).code == LifeResultCode::Success);
+  f.manager.commit(frozen, std::vector<size_t>(1, 0));
+  frozen.reset();
+  // Older compatible readers grow/rehash the map while the descriptor remains
+  // retained. Aborting them must not add them to committed retirement work.
+  for (uint32_t i = 0; i < 1024; ++i) {
+    auto visitor = descriptor(100 + i, 100 + i, 1, YCSB_0, 0);
+    assert(f.execute(visitor, f.read()).code == LifeResultCode::Success);
+    f.manager.rollback(visitor);
+  }
+  assert(!retained.expired());
+  auto next = descriptor(2, 20000, 1, YCSB_0, 0);
+  assert(f.execute(next, f.read()).code == LifeResultCode::Success);
+  assert(retained.expired());
+  assert(f.manager.execute(tx, f.read()).code == LifeResultCode::Committed);
+  f.manager.commit(tx);
+  assert(f.manager.prepare(next).code == LifeResultCode::Success);
+}
+
 void test_shared_stale_checks_precede_holder_conflicts() {
   SharedRowFixture f;
   LifeTxnDescriptor reader = descriptor(1, 20, 1, YCSB_0, 0);
@@ -1437,6 +1512,8 @@ int main() {
   test_shared_selective_abort_and_stale_cleanup();
   test_concurrent_prepared_readers_and_inline_writer();
   test_shared_stale_checks_precede_holder_conflicts();
+  test_targeted_descriptor_retirement_preserves_order_and_tombstones();
+  test_targeted_retirement_survives_process_map_rehash();
 #endif
   static_assert(sizeof(LifeBytes) <= 16,
                 "LIFE values must remain inline and compact");

@@ -484,17 +484,22 @@ enum class LifeResultCode {
   Committed,
   Help,
   Retry,
-  InvalidOperation
+  InvalidOperation,
+  // Local scheduler result only; never serialized onto the network.
+  Deferred
 };
 
 struct LifeExecuteResult {
   LifeExecuteResult()
       : code(LifeResultCode::InvalidOperation), response(), transaction(),
-        observed_attempt(0) {}
+        observed_attempt(0), deferred_row(NULL), deferred_generation(0) {}
   LifeResultCode code;
   LifeResponse response;
   LifeTxnDescriptor transaction;
   uint64_t observed_attempt;
+  Row_life *deferred_row;
+  // Local-only release generation captured under the conflicting row's latch.
+  uint64_t deferred_generation;
 };
 
 template <typename T> struct LifeOptional {

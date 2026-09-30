@@ -47,8 +47,8 @@ void InputThread::setup() {
       } else {
         assert(ISSERVER || ISREPLICA);
         //printf("Received Msg %d from node %ld\n",msg->rtype,msg->return_node_id);
-#if CC_ALG == CALVIN
-      if(msg->rtype == CALVIN_ACK ||(msg->rtype == CL_QRY && ISCLIENTN(msg->get_return_id()))) {
+#if CC_ALG == CALVIN || CC_ALG == HDCC
+      if(msg->rtype == CALVIN_ACK || msg->rtype == HDCC_CONFLICT ||(msg->rtype == CL_QRY && ISCLIENTN(msg->get_return_id()))) {
         work_queue.sequencer_enqueue(get_thd_id(),msg);
         msgs->erase(msgs->begin());
         continue;
@@ -60,7 +60,15 @@ void InputThread::setup() {
         continue;
       }
 #endif
-        work_queue.enqueue(get_thd_id(),msg,false);
+  #if CC_ALG == ARIA
+      if (msg->rtype == ARIA_CONTROL &&
+          static_cast<AriaControlMessage *>(msg)->sequencer) {
+        work_queue.sequencer_enqueue(get_thd_id(), msg);
+        msgs->erase(msgs->begin());
+        continue;
+      }
+#endif
+      work_queue.enqueue(get_thd_id(),msg,false);
       }
       msgs->erase(msgs->begin());
     }
@@ -158,8 +166,8 @@ RC InputThread::server_recv_loop() {
         msgs->erase(msgs->begin());
         continue;
       }
-#if CC_ALG == CALVIN
-      if(msg->rtype == CALVIN_ACK ||(msg->rtype == CL_QRY && ISCLIENTN(msg->get_return_id()))) {
+#if CC_ALG == CALVIN || CC_ALG == HDCC
+      if(msg->rtype == CALVIN_ACK || msg->rtype == HDCC_CONFLICT ||(msg->rtype == CL_QRY && ISCLIENTN(msg->get_return_id()))) {
         work_queue.sequencer_enqueue(get_thd_id(),msg);
         msgs->erase(msgs->begin());
         continue;
@@ -167,6 +175,14 @@ RC InputThread::server_recv_loop() {
       if( msg->rtype == RDONE || msg->rtype == CL_QRY) {
         assert(ISSERVERN(msg->get_return_id()));
         work_queue.sched_enqueue(get_thd_id(),msg);
+        msgs->erase(msgs->begin());
+        continue;
+      }
+#endif
+#if CC_ALG == ARIA
+      if (msg->rtype == ARIA_CONTROL &&
+          static_cast<AriaControlMessage *>(msg)->sequencer) {
+        work_queue.sequencer_enqueue(get_thd_id(), msg);
         msgs->erase(msgs->begin());
         continue;
       }

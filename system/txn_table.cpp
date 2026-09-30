@@ -122,7 +122,7 @@ void TxnTable::dump() {
 
 bool TxnTable::is_matching_txn_node(txn_node_t t_node, uint64_t txn_id, uint64_t batch_id){
   assert(t_node);
-#if CC_ALG == CALVIN
+#if CC_ALG == CALVIN || CC_ALG == HDCC || CC_ALG == ARIA
     return (t_node->txn_man->get_txn_id() == txn_id && t_node->txn_man->get_batch_id() == batch_id); 
 #else
     return (t_node->txn_man->get_txn_id() == txn_id); 
@@ -138,7 +138,19 @@ void TxnTable::update_min_ts(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id,
   ATOM_CAS(pool[pool_id]->modify,true,false);
 }
 
-TxnManager * TxnTable::get_transaction_manager(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id){
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+void TxnTable::cancel_life_waits() {
+  for (uint64_t i = 0; i < pool_size; ++i)
+    for (txn_node_t node = pool[i]->head; node; node = node->next)
+      static_cast<LifeTxnManager *>(node->txn_man)->cancel_life_waits();
+  work_queue.life_wait_clear();
+}
+#endif
+
+TxnManager * TxnTable::get_transaction_manager(uint64_t thd_id, uint64_t txn_id,
+                                              uint64_t batch_id, bool create,
+                                              bool *missing){
+  if (missing) *missing = false;
   DEBUG("TxnTable::get_txn_manager %ld / %ld\n",txn_id,pool_size);
   uint64_t starttime = get_sys_clock();
   uint64_t pool_id = txn_id % pool_size;
@@ -162,6 +174,11 @@ TxnManager * TxnTable::get_transaction_manager(uint64_t thd_id, uint64_t txn_id,
   INC_STATS(thd_id,mtx[20],get_sys_clock()-prof_starttime);
 
 
+  if (!txn_man && !create) {
+    if (missing) *missing = true;
+    ATOM_CAS(pool[pool_id]->modify,true,false);
+    return NULL;
+  }
   if(!txn_man) {
     prof_starttime = get_sys_clock();
 
@@ -227,6 +244,11 @@ void TxnTable::restart_txn(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id){
 #if CC_ALG == CALVIN
       work_queue.enqueue(thd_id,Message::create_message(t_node->txn_man,RTXN),false);
 #else
+#if CC_ALG == HDCC
+      if (t_node->txn_man->algo == CALVIN)
+        work_queue.enqueue(thd_id, Message::create_message(t_node->txn_man, RTXN), false);
+      else
+#endif
       if(IS_LOCAL(txn_id))
         work_queue.enqueue(thd_id,Message::create_message(t_node->txn_man,RTXN_CONT),false);
       else

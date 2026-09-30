@@ -34,6 +34,9 @@ SHORTNAMES = {
     "PRIORITY": "",
     "ABORT_PENALTY": "PENALTY",
     "LIFE_HELP_WAIT_US": "LWAIT",
+    "LIFE_WAIT_QUEUE": "LWQ",
+    "LIFE_WAIT_QUEUE_US": "LWQUS",
+    "LIFE_ROLLBACK_BEFORE_HELP": "LRBH",
     "STRICT_PPT": "SPPT",
     "NETWORK_DELAY": "NDLY",
     "NETWORK_DELAY_TEST": "NDT",
@@ -64,9 +67,9 @@ fmt_title = [
     "NUM_WH",
 ]
 YCSB_ALGOS = ["NO_WAIT", "WAIT_DIE", "MVCC", "MAAT", "CALVIN", "TIMESTAMP", "LIFE"]
-YCSB_SINGLE_NODE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
-YCSB_LIFE_ALGOS = ["WAIT_DIE", "LIFE", "CALVIN"]
-TESTING = ["LIFE"]
+YCSB_SINGLE_NODE_ALGOS = ["WAIT_DIE", "LIFE", "OCC", "HDCC", "ARIA", "SILO"]
+YCSB_LIFE_ALGOS = ["WAIT_DIE", "LIFE", "OCC", "HDCC", "ARIA", "SILO"]
+TESTING = ["HDCC", "ARIA", "SILO"]
 TESTN = [16]
 NORMAL = [2, 4, 8, 16]
 
@@ -118,7 +121,7 @@ def ycsb_scaling():
     tup_write_perc = [0.5]
     tcnt = [4]
     load = [10000]
-    skew = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+    skew = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
     part_per_txn = [2]
     strict_ppt = [1]
     fmt = [
@@ -328,6 +331,8 @@ def life_wait_sweep():
         "NODE_CNT",
         "CC_ALG",
         "LIFE_HELP_WAIT_US",
+        "LIFE_WAIT_QUEUE",
+        "LIFE_WAIT_QUEUE_US",
         "SYNTH_TABLE_SIZE",
         "TUP_WRITE_PERC",
         "TXN_WRITE_PERC",
@@ -336,10 +341,67 @@ def life_wait_sweep():
         "THREAD_CNT",
     ]
     exp = [
-        [wl, n, algo, wait, base_table_size * n, tup_wr_perc, txn_wr_perc, ld, sk, thr]
+        [
+            wl,
+            n,
+            algo,
+            wait,
+            "false",
+            10,
+            base_table_size * n,
+            tup_wr_perc,
+            txn_wr_perc,
+            ld,
+            sk,
+            thr,
+        ]
         for thr, txn_wr_perc, tup_wr_perc, sk, ld, n, wait, algo in itertools.product(
             tcnt, txn_write_perc, tup_write_perc, skew, load, nnodes, waits, algos
         )
+    ]
+    return fmt, exp
+
+
+def life_wait_queue_sweep():
+    """Compare per-row queue intervals in microseconds with a no-queue baseline."""
+    nnodes = [4]
+    waits_us = [1, 2, 5, 10, 20, 50, 100, 250, 500, 1000]
+    queue_settings = [("false", 10)] + [("true", wait) for wait in waits_us]
+    base_table_size = 2097152 * 8
+    fmt = [
+        "WORKLOAD",
+        "NODE_CNT",
+        "CC_ALG",
+        "LIFE_HELP_WAIT_US",
+        "LIFE_WAIT_QUEUE",
+        "LIFE_WAIT_QUEUE_US",
+        "LIFE_ROLLBACK_BEFORE_HELP",
+        "life_fairness",
+        "SYNTH_TABLE_SIZE",
+        "TUP_WRITE_PERC",
+        "TXN_WRITE_PERC",
+        "MAX_TXN_IN_FLIGHT",
+        "ZIPF_THETA",
+        "THREAD_CNT",
+    ]
+    exp = [
+        [
+            "YCSB",
+            n,
+            "LIFE",
+            0,
+            enabled,
+            wait,
+            "false",
+            "false",
+            base_table_size * n,
+            0.5,
+            0.5,
+            10000,
+            0.4,
+            thread_count_for_algo("LIFE"),
+        ]
+        for n, (enabled, wait) in itertools.product(nnodes, queue_settings)
     ]
     return fmt, exp
 
@@ -661,11 +723,11 @@ def ycsb_partitions_distr():
 
 def tpcc_scaling():
     wl = "TPCC"
-    nnodes = NORMAL
-    nalgos = ["LIFE", "WAIT_DIE", "CALVIN"]
+    nnodes = [16]
+    nalgos = ["LIFE"]
     npercpay = [0.0, 1.0]
     wh = 128
-    load = [100]
+    load = [10000]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",
@@ -686,13 +748,33 @@ def tpcc_scaling():
     return fmt, exp
 
 
+def life_rollback_before_help_comparison(generator):
+    """Pair identical LIFE configurations with rollback before Help off/on."""
+    fmt, exp = generator()
+    algo_idx = fmt.index("CC_ALG")
+    return fmt + ["LIFE_ROLLBACK_BEFORE_HELP"], [
+        row + [enabled]
+        for row in exp
+        if row[algo_idx] == "LIFE"
+        for enabled in ["false", "true"]
+    ]
+
+
+def ycsb_scaling_life_rollback_comparison():
+    return life_rollback_before_help_comparison(ycsb_scaling)
+
+
+def tpcc_scaling_life_rollback_comparison():
+    return life_rollback_before_help_comparison(tpcc_scaling)
+
+
 def tpcc_scaling1():
     wl = "TPCC"
     nnodes = [1, 2, 4, 8, 16, 32, 64]
     nalgos = ["NO_WAIT", "WAIT_DIE", "MAAT", "MVCC", "TIMESTAMP", "CALVIN"]
     npercpay = [0.0, 1.0]
     wh = 128
-    load = [10000]
+    load = [100, 1000, 10000]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",
@@ -708,13 +790,82 @@ def tpcc_scaling1():
     return fmt, exp
 
 
+def tpcc_gradient():
+
+    wl = "TPCC"
+    nnodes = [1, 2, 4, 8, 16]
+    nalgos = ["CALVIN", "WAIT_DIE", "LIFE"]
+    npercpay = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    wh = 128
+    load = [100]
+    fmt = [
+        "WORKLOAD",
+        "NODE_CNT",
+        "CC_ALG",
+        "PERC_PAYMENT",
+        "NUM_WH",
+        "MAX_TXN_IN_FLIGHT",
+    ]
+
+    exp = [
+        [wl, n, cc, pp, wh * n, tif]
+        for tif, pp, n, cc in itertools.product(load, npercpay, nnodes, nalgos)
+    ]
+
+    return fmt, exp
+
+
+def tpcc_life_wait_queue_sweep():
+    """Check LIFE queue scaling at high concurrency with two proven intervals."""
+    nnodes = [16]
+    # Focus this short sweep on the payment-heavy LIFE/WAIT_DIE gap.
+    payments = [1.0]
+    # Both intervals previously reached about 119k txn/s at TIF=100.
+    waits_us = [500, 2000]
+    queue_settings = [("true", wait) for wait in waits_us]
+    fmt = [
+        "WORKLOAD",
+        "NODE_CNT",
+        "CC_ALG",
+        "PERC_PAYMENT",
+        "NUM_WH",
+        "MAX_TXN_IN_FLIGHT",
+        "THREAD_CNT",
+        "LIFE_HELP_WAIT_US",
+        "LIFE_WAIT_QUEUE",
+        "LIFE_WAIT_QUEUE_US",
+        "LIFE_ROLLBACK_BEFORE_HELP",
+        "life_fairness",
+    ]
+    exp = [
+        [
+            "TPCC",
+            n,
+            "LIFE",
+            payment,
+            128 * n,
+            10000,
+            thread_count_for_algo("LIFE"),
+            0,
+            enabled,
+            wait,
+            "false",
+            "false",
+        ]
+        for n, payment, (enabled, wait) in itertools.product(
+            nnodes, payments, queue_settings
+        )
+    ]
+    return fmt, exp
+
+
 def tpcc_scaling2():
     wl = "TPCC"
-    nnodes = [1, 2, 4, 8, 16, 32, 64]
-    nalgos = ["NO_WAIT", "WAIT_DIE", "MAAT", "MVCC", "TIMESTAMP", "CALVIN"]
+    nnodes = [16]
+    nalgos = ["WAIT_DIE", "CALVIN", "LIFE"]
     npercpay = [0.0, 1.0]
-    wh = 4
-    load = [10000]
+    wh = 128
+    load = [100, 1000, 10000]
     fmt = [
         "WORKLOAD",
         "NODE_CNT",
@@ -1001,7 +1152,53 @@ def wait_die_tcp_diag_16_long():
 # END PLOTS
 ##############################
 
+
+def hdcc_ycsb():
+    fmt = [
+        "WORKLOAD",
+        "CC_ALG",
+        "NODE_CNT",
+        "PART_CNT",
+        "PART_PER_TXN",
+        "SYNTH_TABLE_SIZE",
+        "MAX_TXN_IN_FLIGHT",
+        "ZIPF_THETA",
+        "TXN_WRITE_PERC",
+        "TUP_WRITE_PERC",
+    ]
+    return fmt, [
+        ["YCSB", cc, n, n, ppt, 100000 * n, 32, skew, 0.9, 0.5]
+        for cc, n, ppt, skew in itertools.product(
+            ["SILO", "ARIA", "HDCC"], [2], [1, 2], [0.0, 0.8]
+        )
+    ]
+
+
+def hdcc_tpcc():
+    fmt = [
+        "WORKLOAD",
+        "CC_ALG",
+        "NODE_CNT",
+        "PART_CNT",
+        "NUM_WH",
+        "MAX_TXN_IN_FLIGHT",
+        "PERC_PAYMENT",
+    ]
+    return fmt, [
+        ["TPCC", cc, 2, 2, 4, 32, payment]
+        for cc, payment in itertools.product(["SILO", "ARIA", "HDCC"], [0.0, 1.0])
+    ]
+
+
 experiment_map = {
+    "hdcc_ycsb": hdcc_ycsb,
+    "hdcc_tpcc": hdcc_tpcc,
+    "ycsb_scaling_life_rollback_comparison": with_algo_thread_counts(
+        ycsb_scaling_life_rollback_comparison
+    ),
+    "tpcc_scaling_life_rollback_comparison": with_algo_thread_counts(
+        tpcc_scaling_life_rollback_comparison
+    ),
     "pps_scaling": with_algo_thread_counts(pps_scaling),
     "ycsb_scaling": with_algo_thread_counts(ycsb_scaling),
     "ycsb_scaling_inflight": with_algo_thread_counts(ycsb_scaling),
@@ -1016,6 +1213,7 @@ experiment_map = {
     "ycsb_scaling_table_size": with_algo_thread_counts(ycsb_scaling),
     "ycsb_single_node": with_algo_thread_counts(ycsb_single_node),
     "life_wait_sweep": with_algo_thread_counts(life_wait_sweep),
+    "life_wait_queue_sweep": with_algo_thread_counts(life_wait_queue_sweep),
     "ycsb_single_node_plot": ycsb_single_node_plot,
     "ycsb_scaling_plot": ycsb_scaling_current_plot,
     "ycsb_scaling_inflight_plot": ycsb_scaling_inflight_plot,
@@ -1043,6 +1241,8 @@ experiment_map = {
     "ppr_ycsb_partitions_abort": with_algo_thread_counts(ycsb_partitions_abort),
     "ppr_ycsb_partitions_abort_plot": ppr_ycsb_partitions_abort_plot,
     "tpcc_scaling": with_algo_thread_counts(tpcc_scaling),
+    "tpcc_gradient": with_algo_thread_counts(tpcc_gradient),
+    "tpcc_life_wait_queue_sweep": with_algo_thread_counts(tpcc_life_wait_queue_sweep),
     "tpcc_scaling2": with_algo_thread_counts(tpcc_scaling2),
     "tpcc_scaling_whset": with_algo_thread_counts(tpcc_scaling_whset),
     "ycsb_skew_abort": with_algo_thread_counts(ycsb_skew_abort),
@@ -1138,6 +1338,15 @@ configs = {
     "ENVIRONMENT_EC2": "false",
     "YCSB_ABORT_MODE": "false",
     "CALVIN_PRE_LOCK": "false",
+    "ARIA_BATCH_SIZE": 1000,
+    "ARIA_BATCH_TIME_NS": "1000000UL",
+    "HDCC_SHARD_SIZE": 100000,
+    "HDCC_LOWER_BOUND": 19000,
+    "HDCC_UPPER_BOUND": 150000,
+    "HDCC_CONFLICT_INTERVAL_NS": "1000000000UL",
+    "HDCC_PRORATE_RATIO": 0.0,
+    "SILO_PRE_ABORT": "true",
+    "SILO_VALIDATION_NO_WAIT": "true",
     "life_fairness": "false",
     "LOAD_METHOD": "LOAD_MAX",
     "ISOLATION_LEVEL": "SERIALIZABLE",

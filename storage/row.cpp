@@ -24,6 +24,9 @@
 #include "row_maat.h"
 #include "row_mvcc.h"
 #include "row_occ.h"
+#include "row_silo.h"
+#include "row_aria.h"
+#include "row_hdcc.h"
 #include "row_ts.h"
 #include "table.h"
 #include "txn.h"
@@ -65,6 +68,12 @@ void row_t::init_manager(row_t *row) {
   manager = (Row_ts *)mem_allocator.align_alloc(sizeof(Row_ts));
 #elif CC_ALG == MVCC
   manager = (Row_mvcc *)mem_allocator.align_alloc(sizeof(Row_mvcc));
+#elif CC_ALG == HDCC
+  manager = (Row_hdcc *)mem_allocator.align_alloc(sizeof(Row_hdcc));
+#elif CC_ALG == ARIA
+  manager = new (mem_allocator.align_alloc(sizeof(Row_aria))) Row_aria();
+#elif CC_ALG == SILO
+  manager = new (mem_allocator.align_alloc(sizeof(Row_silo))) Row_silo();
 #elif CC_ALG == OCC
   manager = (Row_occ *)mem_allocator.align_alloc(sizeof(Row_occ));
 #elif CC_ALG == MAAT
@@ -190,7 +199,7 @@ void row_t::free_row() {
 
 RC row_t::get_lock(access_t type, TxnManager *txn) {
   RC rc = RCOK;
-#if CC_ALG == CALVIN
+#if CC_ALG == CALVIN || CC_ALG == HDCC
   lock_t lt = (type == RD || type == SCAN) ? LOCK_SH : LOCK_EX;
   rc = this->manager->lock_get(lt, txn);
 #endif
@@ -282,6 +291,39 @@ RC row_t::get_row(access_t type, TxnManager *txn, row_t *&row) {
     newr->init(this->get_table(), get_part_id());
     newr->copy(row);
     row = newr;
+  }
+  goto end;
+#elif CC_ALG == HDCC
+  if (txn->algo == CALVIN) {
+    manager->calvin_access(txn, type);
+    row = this;
+  } else {
+    row = (row_t *)mem_allocator.alloc(sizeof(row_t));
+    row->init(get_table(), get_part_id());
+    rc = manager->snapshot(txn, row);
+    if (rc != RCOK) {
+      row->free_row();
+      mem_allocator.free(row, sizeof(row_t));
+      row = NULL;
+    }
+  }
+  goto end;
+#elif CC_ALG == ARIA
+  row = (row_t *)mem_allocator.alloc(sizeof(row_t));
+  row->init(get_table(), get_part_id());
+  row->copy(this);
+  goto end;
+#elif CC_ALG == SILO
+  txn->cur_row = (row_t *)mem_allocator.alloc(sizeof(row_t));
+  txn->cur_row->init(get_table(), get_part_id());
+  rc = manager->access(txn, type == WR ? P_REQ : R_REQ, txn->cur_row);
+  if (rc == RCOK) {
+    row = txn->cur_row;
+  } else {
+    txn->cur_row->free_row();
+    mem_allocator.free(txn->cur_row, sizeof(row_t));
+    txn->cur_row = NULL;
+    row = NULL;
   }
   goto end;
 #elif CC_ALG == OCC
@@ -393,6 +435,13 @@ void row_t::return_row(RC rc, access_t type, TxnManager *txn, row_t *row) {
     RC rc = this->manager->access(txn, W_REQ, row);
     assert(rc == RCOK);
   }
+#elif CC_ALG == HDCC
+  if (txn->algo == CALVIN) manager->lock_release(txn);
+  else { row->free_row(); mem_allocator.free(row, sizeof(row_t)); }
+#elif CC_ALG == SILO || CC_ALG == ARIA
+  assert(row != NULL);
+  row->free_row();
+  mem_allocator.free(row, sizeof(row_t));
 #elif CC_ALG == OCC
   assert(row != NULL);
   if (type == WR)

@@ -16,6 +16,7 @@
 
 #include "global.h"
 #include "sequencer.h"
+#include "cc_selector.h"
 #include "ycsb_query.h"
 #include "tpcc_query.h"
 #include "pps_query.h"
@@ -42,6 +43,9 @@ void Sequencer::init(Workload * wl) {
 
 // Assumes 1 thread does sequencer work
 void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
+#if CC_ALG == HDCC
+  std::lock_guard<std::recursive_mutex> guard(hdcc_mutex);
+#endif
   qlite_ll * en = wl_head;
   while(en != NULL && en->epoch != msg->get_batch_id()) {
     en = en->next;
@@ -59,7 +63,7 @@ void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
   if (ack->rc == Abort)
     wait_list[id].attempt_failed = true;
 
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   YCSBClientQueryMessage *pending_ycsb =
       (YCSBClientQueryMessage *)wait_list[id].msg;
   if (pending_ycsb->recon) {
@@ -125,7 +129,7 @@ void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
       }
       else {
 #endif
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
       if (cl_msg->recon || wait_list[id].attempt_failed) {
           int abort_cnt = wait_list[id].abort_cnt;
           if (cl_msg->recon && !wait_list[id].attempt_failed) {
@@ -141,7 +145,7 @@ void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
               if (warmup_done)
                   INC_STATS_ARR(0, start_abort_commit_latency, timespan);
               cl_msg->recon_records.clear();
-#if CALVIN_PRE_LOCK
+#if CALVIN_PRE_LOCK || CC_ALG == HDCC
               // Database-wide locking removes the validation/recon retry
               // protocol. Retry an unrelated execution failure directly
               // under the same global-lock protocol.
@@ -240,7 +244,7 @@ void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
 #if WORKLOAD == PPS
       }
 #endif
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
       }
 #endif
 
@@ -261,7 +265,19 @@ void Sequencer::process_ack(Message * msg, uint64_t thd_id) {
 
 // Assumes 1 thread does sequencer work
 void Sequencer::process_txn( Message * msg,uint64_t thd_id, uint64_t early_start, uint64_t last_start, uint64_t wait_time, uint32_t abort_cnt) {
+#if CC_ALG == HDCC
+  std::lock_guard<std::recursive_mutex> guard(hdcc_mutex);
+#endif
 
+#if CC_ALG == HDCC
+    // Retries of deterministic transactions stay on their original protocol.
+    if (early_start == 0 && cc_selector.get_best_cc(msg) == SILO) {
+      msg->algo = SILO;
+      work_queue.enqueue(thd_id, msg, false);
+      return;
+    }
+    msg->algo = CALVIN;
+#endif
     uint64_t starttime = get_sys_clock();
     DEBUG("SEQ Processing msg\n");
     qlite_ll * en = wl_tail;
@@ -308,7 +324,7 @@ void Sequencer::process_txn( Message * msg,uint64_t thd_id, uint64_t early_start
     en->list[id].participant_cnt = participants.size();
     en->list[id].abort_cnt = abort_cnt;
     en->list[id].attempt_failed = false;
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
     YCSBClientQueryMessage *ycsb_msg = (YCSBClientQueryMessage *)msg;
     en->list[id].ycsb_recon_records =
         ycsb_msg->recon ? new std::vector<YCSBReconRecord>() : NULL;
@@ -322,7 +338,7 @@ void Sequencer::process_txn( Message * msg,uint64_t thd_id, uint64_t early_start
     msg->return_node_id = g_node_id;
     msg->lat_network_time = 0;
     msg->lat_other_time = 0;
-#if CC_ALG == CALVIN && WORKLOAD == PPS
+#if (CC_ALG == CALVIN || CC_ALG == HDCC) && WORKLOAD == PPS
     PPSClientQueryMessage* cl_msg = (PPSClientQueryMessage*) msg;
     if (cl_msg->txn_type == PPS_GETPARTBYSUPPLIER ||
             cl_msg->txn_type == PPS_GETPARTBYPRODUCT ||
@@ -341,10 +357,10 @@ void Sequencer::process_txn( Message * msg,uint64_t thd_id, uint64_t early_start
         cl_msg->recon = false;
         en->list[id].seq_startts = get_sys_clock();
     }
-#elif CC_ALG == CALVIN && WORKLOAD == YCSB
+#elif (CC_ALG == CALVIN || CC_ALG == HDCC) && WORKLOAD == YCSB
     YCSBClientQueryMessage *cl_msg = (YCSBClientQueryMessage *)msg;
     en->list[id].seq_startts =
-        cl_msg->recon ? get_sys_clock() : last_start;
+        (cl_msg->recon || last_start == 0) ? get_sys_clock() : last_start;
 #else
     en->list[id].seq_startts = get_sys_clock();
 #endif
@@ -358,9 +374,9 @@ void Sequencer::process_txn( Message * msg,uint64_t thd_id, uint64_t early_start
 
     // Add new txn to fill queue
     for(auto participant = participants.begin(); participant != participants.end(); participant++) {
-#if CC_ALG == CALVIN && WORKLOAD == PPS
+#if (CC_ALG == CALVIN || CC_ALG == HDCC) && WORKLOAD == PPS
       const bool recon = ((PPSClientQueryMessage *)msg)->recon;
-#elif CC_ALG == CALVIN && WORKLOAD == YCSB
+#elif (CC_ALG == CALVIN || CC_ALG == HDCC) && WORKLOAD == YCSB
       const bool recon = ((YCSBClientQueryMessage *)msg)->recon;
 #else
       const bool recon = false;
@@ -379,6 +395,9 @@ void Sequencer::process_txn( Message * msg,uint64_t thd_id, uint64_t early_start
 
 // Assumes 1 thread does sequencer work
 void Sequencer::send_next_batch(uint64_t thd_id) {
+#if CC_ALG == HDCC
+  std::lock_guard<std::recursive_mutex> guard(hdcc_mutex);
+#endif
   uint64_t prof_stat = get_sys_clock();
   qlite_ll * en = wl_tail;
   bool empty = true;
@@ -422,3 +441,18 @@ void Sequencer::send_next_batch(uint64_t thd_id) {
   INC_STATS(thd_id,seq_prep_time,get_sys_clock() - prof_stat);
   next_txn_id = 0;
 }
+
+#if CC_ALG == HDCC
+bool Sequencer::checkDependency(uint64_t batch, uint64_t id) {
+  std::lock_guard<std::recursive_mutex> guard(hdcc_mutex);
+  qlite_ll *en = wl_head;
+  if (!en || en->epoch > batch) return true;
+  if (en->epoch < batch) return false;
+  if (id % g_node_cnt < g_node_id) return true;
+  if (id % g_node_cnt > g_node_id) return false;
+  const uint64_t end = id / g_node_cnt;
+  for (uint64_t i = 0; i <= end && i < en->size; ++i)
+    if (en->list[i].server_ack_cnt != 0) return false;
+  return true;
+}
+#endif

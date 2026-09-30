@@ -1364,7 +1364,7 @@ LifeExecuteResult PPSTxnManager::execute_life_operation(
   operation = life_current_operation(descriptor);
   row_t *life_row = lookup_life_row(operation.object);
   operation.manager = life_row->manager;
-  return life_row->execute_life(descriptor, operation);
+  return execute_life_row(life_row->manager, descriptor, operation);
 }
 
 void PPSTxnManager::life_advance_program(LifeTxnDescriptor &descriptor,

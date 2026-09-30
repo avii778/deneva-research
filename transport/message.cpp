@@ -40,7 +40,7 @@ extern volatile uint64_t life_dbg_msg_bytes;
 
 namespace {
 
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
 uint64_t ycsb_recon_records_size(
     const std::vector<YCSBReconRecord> &records) {
   uint64_t size = sizeof(size_t);
@@ -390,6 +390,7 @@ uint64_t life_result_size(const LifeExecuteResult &result) {
 
 void life_write_result(char *buf, uint64_t &ptr,
                        const LifeExecuteResult &result) {
+  assert(result.code != LifeResultCode::Deferred);
   const uint32_t code = static_cast<uint32_t>(result.code);
   COPY_BUF(buf, code, ptr);
   life_write_response(buf, ptr, result.response);
@@ -494,6 +495,14 @@ Message * Message::create_message(uint64_t txn_id, uint64_t batch_id, RemReqType
 Message * Message::create_message(RemReqType rtype) {
   Message * msg;
   switch(rtype) {
+#if CC_ALG == HDCC
+    case HDCC_REQ_VALID:
+    case HDCC_VALID: msg = new HdccValidationMessage; break;
+    case HDCC_CONFLICT: msg = new HdccConflictMessage; break;
+#endif
+#if CC_ALG == ARIA
+    case ARIA_CONTROL: msg = new AriaControlMessage; break;
+#endif
     case INIT_DONE:
       msg = new InitDoneMessage;
       break;
@@ -545,6 +554,9 @@ Message * Message::create_message(RemReqType rtype) {
       break;
     case RLIFE_EXECUTE:
       msg = new LifeExecuteMessage;
+      break;
+    case RLIFE_RESUME:
+      msg = new LifeResumeMessage;
       break;
     case RLIFE_EXECUTE_RSP:
       msg = new LifeExecuteResponseMessage;
@@ -605,8 +617,11 @@ Message * Message::create_message(RemReqType rtype) {
 uint64_t Message::mget_size() {
   uint64_t size = 0;
   size += sizeof(RemReqType);
+#if CC_ALG == HDCC
+  size += sizeof(algo);
+#endif
   size += sizeof(uint64_t);
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC) || CC_ALG == ARIA
   size += sizeof(uint64_t);
 #endif
   // for stats, send message queue time
@@ -620,21 +635,31 @@ uint64_t Message::mget_size() {
 void Message::mcopy_from_txn(TxnManager * txn) {
   //rtype = query->rtype;
   txn_id = txn->get_txn_id();
-#if CC_ALG == CALVIN
+#if CC_ALG == HDCC
+  algo = txn->algo;
+#endif
+#if (CC_ALG == CALVIN || CC_ALG == HDCC) || CC_ALG == ARIA
   batch_id = txn->get_batch_id();
 #endif
 }
 
 void Message::mcopy_to_txn(TxnManager * txn) {
   txn->return_id = return_node_id;
+#if CC_ALG == HDCC
+  txn->algo = algo;
+  txn->query->hdcc_calvin = algo == CALVIN;
+#endif
 }
 
 
 void Message::mcopy_from_buf(char * buf) {
   uint64_t ptr = 0;
   COPY_VAL(rtype,buf,ptr);
+#if CC_ALG == HDCC
+  COPY_VAL(algo,buf,ptr);
+#endif
   COPY_VAL(txn_id,buf,ptr);
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC) || CC_ALG == ARIA
   COPY_VAL(batch_id,buf,ptr);
 #endif
   COPY_VAL(mq_time,buf,ptr);
@@ -657,8 +682,11 @@ void Message::mcopy_from_buf(char * buf) {
 void Message::mcopy_to_buf(char * buf) {
   uint64_t ptr = 0;
   COPY_BUF(buf,rtype,ptr);
+#if CC_ALG == HDCC
+  COPY_BUF(buf,algo,ptr);
+#endif
   COPY_BUF(buf,txn_id,ptr);
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC) || CC_ALG == ARIA
   COPY_BUF(buf,batch_id,ptr);
 #endif
   COPY_BUF(buf,mq_time,ptr);
@@ -680,6 +708,14 @@ void Message::mcopy_to_buf(char * buf) {
 
 void Message::release_message(Message * msg) {
   switch(msg->rtype) {
+#if CC_ALG == HDCC
+    case HDCC_REQ_VALID:
+    case HDCC_VALID:
+    case HDCC_CONFLICT: delete msg; break;
+#endif
+#if CC_ALG == ARIA
+    case ARIA_CONTROL: delete static_cast<AriaControlMessage *>(msg); break;
+#endif
     case INIT_DONE: {
       InitDoneMessage * m_msg = (InitDoneMessage*)msg;
       m_msg->release();
@@ -757,6 +793,10 @@ void Message::release_message(Message * msg) {
       delete m_msg;
       break;
                    }
+    case RLIFE_RESUME: {
+      delete static_cast<LifeResumeMessage *>(msg);
+      break;
+    }
     case RLIFE_EXECUTE: {
       LifeExecuteMessage *m_msg = (LifeExecuteMessage *)msg;
       m_msg->release();
@@ -910,7 +950,7 @@ void YCSBClientQueryMessage::release() {
   }
 */
   requests.release();
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   recon_records.clear();
 #endif
 }
@@ -919,7 +959,7 @@ uint64_t YCSBClientQueryMessage::get_size() {
   uint64_t size = ClientQueryMessage::get_size();
   size += sizeof(size_t);
   size += sizeof(ycsb_request) * requests.size();
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   size += sizeof(bool);
   size += ycsb_recon_records_size(recon_records);
 #endif
@@ -935,11 +975,11 @@ void YCSBClientQueryMessage::copy_from_query(BaseQuery * query) {
   }
 */
   requests.copy(((YCSBQuery*)(query))->requests);
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   // Database-wide pre-lock mode holds an exclusive token on every server, so
   // the first sequenced attempt can safely read and write without a separate
   // unlocked reconnaissance attempt.
-  recon = !CALVIN_PRE_LOCK;
+  recon = CC_ALG == CALVIN && !CALVIN_PRE_LOCK;
   recon_records.clear();
 #endif
 }
@@ -954,7 +994,7 @@ void YCSBClientQueryMessage::copy_from_txn(TxnManager * txn) {
   }
 */
   requests.copy(((YCSBQuery*)(txn->query))->requests);
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   YCSBQuery *ycsb_query = (YCSBQuery *)txn->query;
   recon = txn->isRecon();
   recon_records = ycsb_query->recon_records;
@@ -966,7 +1006,7 @@ void YCSBClientQueryMessage::copy_to_txn(TxnManager * txn) {
   ClientQueryMessage::copy_to_txn(txn);
   // Copies pointers to txn
   ((YCSBQuery*)(txn->query))->requests.append(requests);
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   YCSBQuery *ycsb_query = (YCSBQuery *)txn->query;
   ycsb_query->recon = recon;
   ycsb_query->recon_records = recon_records;
@@ -995,7 +1035,7 @@ void YCSBClientQueryMessage::copy_from_buf(char * buf) {
     assert(req->key < g_synth_table_size);
     requests.add(req);
   }
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   COPY_VAL(recon, buf, ptr);
   ycsb_read_recon_records(buf, ptr, recon_records);
 #endif
@@ -1015,7 +1055,7 @@ void YCSBClientQueryMessage::copy_to_buf(char * buf) {
     COPY_BUF(buf,*req,ptr);
     //DEBUG("3YCSBClientQuery %ld\n",ptr);
   }
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   COPY_BUF(buf, recon, ptr);
   ycsb_write_recon_records(buf, ptr, recon_records);
 #endif
@@ -1202,7 +1242,7 @@ uint64_t PPSClientQueryMessage::get_size() {
   size += sizeof(uint64_t)*3; 
   size += sizeof(size_t);
   size += sizeof(uint64_t) * part_keys.size();
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
   size += sizeof(bool);
 #endif
   return size;
@@ -1226,7 +1266,7 @@ void PPSClientQueryMessage::copy_from_query(BaseQuery * query) {
 void PPSClientQueryMessage::copy_from_txn(TxnManager * txn) {
   ClientQueryMessage::mcopy_from_txn(txn);
   copy_from_query(txn->query);
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
   recon = txn->isRecon();
 #endif
 }
@@ -1258,7 +1298,7 @@ void PPSClientQueryMessage::copy_to_txn(TxnManager * txn) {
   pps_query->supplier_key = supplier_key;
   pps_query->part_keys.append(part_keys);
 
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
   txn->recon = recon;
 #endif
 #if DEBUG_DISTR
@@ -1291,7 +1331,7 @@ void PPSClientQueryMessage::copy_from_buf(char * buf) {
     part_keys.add(item);
   }
 
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
   COPY_VAL(recon,buf,ptr);
 #endif
 
@@ -1323,7 +1363,7 @@ void PPSClientQueryMessage::copy_to_buf(char * buf) {
     COPY_BUF(buf,item,ptr);
   }
 
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
   COPY_BUF(buf,recon,ptr);
 #endif
 
@@ -1858,21 +1898,24 @@ void LifeFinishMessage::copy_to_buf(char *buf) {
 uint64_t AckMessage::get_size() {
   uint64_t size = Message::mget_size();
   size += sizeof(RC);
+#if CC_ALG == SILO
+  size += sizeof(max_tid);
+#endif
 #if CC_ALG == MAAT
   size += sizeof(uint64_t) * 2;
 #endif
-#if WORKLOAD == PPS && CC_ALG == CALVIN
+#if WORKLOAD == PPS && (CC_ALG == CALVIN || CC_ALG == HDCC)
   size += sizeof(size_t);
   size += sizeof(uint64_t) * part_keys.size();
 #endif
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   size += ycsb_recon_records_size(ycsb_recon_records);
 #endif
   return size;
 }
 
 void AckMessage::release() {
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   ycsb_recon_records.clear();
 #endif
 }
@@ -1881,15 +1924,18 @@ void AckMessage::copy_from_txn(TxnManager * txn) {
   Message::mcopy_from_txn(txn);
   //rc = query->rc;
   rc = txn->get_rc();
+#if CC_ALG == SILO
+  max_tid = txn->max_tid;
+#endif
 #if CC_ALG == MAAT
   lower = time_table.get_lower(txn->get_thd_id(),txn->get_txn_id());
   upper = time_table.get_upper(txn->get_thd_id(),txn->get_txn_id());
 #endif
-#if WORKLOAD == PPS && CC_ALG == CALVIN
+#if WORKLOAD == PPS && (CC_ALG == CALVIN || CC_ALG == HDCC)
   PPSQuery* pps_query = (PPSQuery*)(txn->query);
   part_keys.copy(pps_query->part_keys);
 #endif
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   if (txn->isRecon()) {
     YCSBQuery *ycsb_query = (YCSBQuery *)txn->query;
     ycsb_recon_records = ycsb_query->recon_records;
@@ -1902,12 +1948,12 @@ void AckMessage::copy_from_txn(TxnManager * txn) {
 void AckMessage::copy_to_txn(TxnManager * txn) {
   Message::mcopy_to_txn(txn);
   //query->rc = rc;
-#if WORKLOAD == PPS && CC_ALG == CALVIN
+#if WORKLOAD == PPS && (CC_ALG == CALVIN || CC_ALG == HDCC)
 
   PPSQuery* pps_query = (PPSQuery*)(txn->query);
   pps_query->part_keys.append(part_keys);
 #endif
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   ((YCSBQuery *)txn->query)->recon_records.insert(
       ((YCSBQuery *)txn->query)->recon_records.end(),
       ycsb_recon_records.begin(), ycsb_recon_records.end());
@@ -1918,11 +1964,14 @@ void AckMessage::copy_from_buf(char * buf) {
   Message::mcopy_from_buf(buf);
   uint64_t ptr = Message::mget_size();
   COPY_VAL(rc,buf,ptr);
+#if CC_ALG == SILO
+  COPY_VAL(max_tid,buf,ptr);
+#endif
 #if CC_ALG == MAAT
   COPY_VAL(lower,buf,ptr);
   COPY_VAL(upper,buf,ptr);
 #endif
-#if WORKLOAD == PPS && CC_ALG == CALVIN
+#if WORKLOAD == PPS && (CC_ALG == CALVIN || CC_ALG == HDCC)
 
   size_t size;
   COPY_VAL(size,buf,ptr);
@@ -1933,7 +1982,7 @@ void AckMessage::copy_from_buf(char * buf) {
     part_keys.add(item);
   }
 #endif
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   ycsb_read_recon_records(buf, ptr, ycsb_recon_records);
 #endif
  assert(ptr == get_size());
@@ -1943,11 +1992,14 @@ void AckMessage::copy_to_buf(char * buf) {
   Message::mcopy_to_buf(buf);
   uint64_t ptr = Message::mget_size();
   COPY_BUF(buf,rc,ptr);
+#if CC_ALG == SILO
+  COPY_BUF(buf,max_tid,ptr);
+#endif
 #if CC_ALG == MAAT
   COPY_BUF(buf,lower,ptr);
   COPY_BUF(buf,upper,ptr);
 #endif
-#if WORKLOAD == PPS && CC_ALG == CALVIN
+#if WORKLOAD == PPS && (CC_ALG == CALVIN || CC_ALG == HDCC)
 
   size_t size = part_keys.size();
   COPY_BUF(buf,size,ptr);
@@ -1956,7 +2008,7 @@ void AckMessage::copy_to_buf(char * buf) {
     COPY_BUF(buf,item,ptr);
   }
 #endif
-#if WORKLOAD == YCSB && CC_ALG == CALVIN
+#if WORKLOAD == YCSB && (CC_ALG == CALVIN || CC_ALG == HDCC)
   ycsb_write_recon_records(buf, ptr, ycsb_recon_records);
 #endif
  assert(ptr == get_size());
@@ -2007,7 +2059,7 @@ uint64_t FinishMessage::get_size() {
   size += sizeof(uint64_t); 
   size += sizeof(RC); 
   size += sizeof(bool); 
-#if CC_ALG == MAAT
+#if CC_ALG == MAAT || CC_ALG == SILO
   size += sizeof(uint64_t); 
 #endif
   return size;
@@ -2017,14 +2069,14 @@ void FinishMessage::copy_from_txn(TxnManager * txn) {
   Message::mcopy_from_txn(txn);
   rc = txn->get_rc();
   readonly = txn->query->readonly();
-#if CC_ALG == MAAT
+#if CC_ALG == MAAT || CC_ALG == SILO
   commit_timestamp = txn->get_commit_timestamp();
 #endif
 }
 
 void FinishMessage::copy_to_txn(TxnManager * txn) {
   Message::mcopy_to_txn(txn);
-#if CC_ALG == MAAT
+#if CC_ALG == MAAT || CC_ALG == SILO
   txn->commit_timestamp = commit_timestamp;
 #endif
 }
@@ -2035,7 +2087,7 @@ void FinishMessage::copy_from_buf(char * buf) {
   COPY_VAL(pid,buf,ptr);
   COPY_VAL(rc,buf,ptr);
   COPY_VAL(readonly,buf,ptr);
-#if CC_ALG == MAAT
+#if CC_ALG == MAAT || CC_ALG == SILO
   COPY_VAL(commit_timestamp,buf,ptr);
 #endif
  assert(ptr == get_size());
@@ -2047,7 +2099,7 @@ void FinishMessage::copy_to_buf(char * buf) {
   COPY_BUF(buf,pid,ptr);
   COPY_BUF(buf,rc,ptr);
   COPY_BUF(buf,readonly,ptr);
-#if CC_ALG == MAAT
+#if CC_ALG == MAAT || CC_ALG == SILO
   COPY_BUF(buf,commit_timestamp,ptr);
 #endif
  assert(ptr == get_size());

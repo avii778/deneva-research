@@ -110,6 +110,10 @@ extern AbortQueue abort_queue;
 extern MessageQueue msg_queue;
 extern Client_txn client_man;
 extern Sequencer seq_man;
+#if CC_ALG == HDCC
+class CCSelector;
+extern CCSelector cc_selector;
+#endif
 extern Logger logger;
 extern TimeTable time_table;
 
@@ -270,6 +274,9 @@ enum RemReqType {
   RLIFE_HELP_APPLY,
   RLIFE_FINALIZE,
   RLIFE_FINALIZE_RSP,
+  RLIFE_RESUME,
+  ARIA_CONTROL,
+  HDCC_REQ_VALID, HDCC_VALID, HDCC_CONFLICT,
   NO_MSG
 };
 

@@ -1,6 +1,7 @@
 #ifndef ROW_LIFE_H
 #define ROW_LIFE_H
 
+#include "config.h"
 #include "life_types.h"
 #include <limits>
 #include <pthread.h>
@@ -9,6 +10,7 @@
 
 class Catalog;
 class row_t;
+class Message;
 
 class Row_life {
 public:
@@ -16,6 +18,11 @@ public:
 
   LifeExecuteResult execute(const LifeTxnDescriptor &tx,
                             const LifeOperation &operation);
+
+  // A released waiter bypasses the delay for exactly this execution.
+  LifeExecuteResult execute(const LifeTxnDescriptor &tx,
+                            const LifeOperation &operation,
+                            bool allow_help_wait);
 
   LifeExecuteResult prepare(const LifeTxnDescriptor &tx);
   LifeExecuteResult prepare(const LifeTxnDescriptorPtr &tx);
@@ -29,6 +36,9 @@ public:
   void rollback(const LifeTxnDescriptor &tx);
 
   void help(const LifeTxnDescriptor &tx);
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  void enqueue_wait(uint64_t generation, uint64_t token, Message *msg);
+#endif
 
 private:
   struct ProcessSlot {
@@ -41,14 +51,16 @@ private:
     size_t heap_index;
     size_t holder_index;
     bool exclusive;
+#if !life_fairness
+    size_t retained_index = std::numeric_limits<size_t>::max();
+#endif
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+    uint64_t prepared_at = 0;
+#endif
   };
 
   typedef std::unordered_map<LifeProcessId, ProcessSlot, LifeProcessIdHash>
       ProcessSlots;
-
-  LifeExecuteResult execute(const LifeTxnDescriptor &tx,
-                            const LifeOperation &operation,
-                            bool allow_help_wait);
 
   const LifeTxnDescriptor::TouchedObject *
   touched_object(const LifeTxnDescriptor &tx) const;
@@ -71,6 +83,10 @@ private:
                         const LifeTxnDescriptor &tx, bool exclusive) const;
   bool release_holder(const LifeTxnDescriptor &tx);
   void remove_holder(ProcessSlot *slot);
+#if !life_fairness
+  void forget_retained_descriptor(ProcessSlot *slot);
+  void retire_committed_descriptors(const LifeTxnId &before);
+#endif
   LifeExecuteResult make_result(LifeResultCode code) const;
   LifeObjectId object_id() const;
   bool apply_operation(const LifeOperation &operation,
@@ -85,11 +101,20 @@ private:
   bool apply_committed_operation(const LifeOperation &operation);
 
   pthread_mutex_t latch;
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  uint64_t release_generation;
+  void notify_release(const LifeProcessId &pid);
+#endif
   row_t *_row;
   LifeOptional<LifeProcessId> active_process;
   std::unique_ptr<ProcessSlots> processes;
   std::vector<ProcessSlot *> priority_heap;
   std::vector<ProcessSlot *> holders;
+#if !life_fairness
+  // Only committed records still owning a descriptor. Map entries themselves
+  // remain as terminal tombstones; unordered_map rehash preserves slot pointers.
+  std::vector<ProcessSlot *> retained_descriptors;
+#endif
   std::unique_ptr<LifeInlineOperation> inline_operation;
 };
 

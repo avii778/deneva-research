@@ -59,8 +59,13 @@ typedef pool_node * pool_node_t;
 
 class TxnTable {
 public:
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  void cancel_life_waits(); // Called after all workers have joined.
+#endif
   void init();
-  TxnManager* get_transaction_manager(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id);
+  TxnManager* get_transaction_manager(uint64_t thd_id, uint64_t txn_id,
+                                     uint64_t batch_id, bool create = true,
+                                     bool *missing = NULL);
   void dump();
   void restart_txn(uint64_t thd_id, uint64_t txn_id,uint64_t batch_id);
   void release_transaction_manager(uint64_t thd_id, uint64_t txn_id, uint64_t batch_id);

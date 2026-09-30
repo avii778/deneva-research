@@ -33,6 +33,9 @@ public:
     virtual void print() = 0;
     virtual void init();
     uint64_t waiting_time;
+#if CC_ALG == HDCC
+    bool hdcc_calvin = false;
+#endif
     void clear();
     void release();
     virtual bool isReconQuery() {return false;}

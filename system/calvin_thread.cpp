@@ -15,6 +15,7 @@
 */
 
 #include "global.h"
+#include "cc_selector.h"
 #include "manager.h"
 #include "thread.h"
 #include "calvin_thread.h"
@@ -49,7 +50,7 @@ RC CalvinLockThread::run() {
     while(!simulation->is_done()) {
         txn_man = NULL;
 
-#if WORKLOAD == YCSB && CALVIN_PRE_LOCK
+#if WORKLOAD == YCSB && CALVIN_PRE_LOCK && CC_ALG == CALVIN
         // The scheduler queues already define Calvin's cluster-wide order
         // (epoch, sequencer/source, then source-local FIFO). Admit only the
         // head transaction on each server. No later transaction may enter a
@@ -61,7 +62,7 @@ RC CalvinLockThread::run() {
         Message * msg = work_queue.sched_dequeue(_thd_id);
 
         if(!msg) {
-#if WORKLOAD == YCSB && CALVIN_PRE_LOCK
+#if WORKLOAD == YCSB && CALVIN_PRE_LOCK && CC_ALG == CALVIN
             ycsb_wl->release_calvin_global_turn();
 #endif
             if(idle_starttime == 0)
@@ -98,7 +99,7 @@ RC CalvinLockThread::run() {
             rc = txn_man->acquire_locks();
         }
 
-#if WORKLOAD == YCSB && CALVIN_PRE_LOCK
+#if WORKLOAD == YCSB && CALVIN_PRE_LOCK && CC_ALG == CALVIN
         // Single admission means the database token must be immediately
         // available. Waiting here would reintroduce independent local token
         // queue ordering.
@@ -128,6 +129,9 @@ bool CalvinSequencerThread::is_batch_ready() {
 }
 
 RC CalvinSequencerThread::run() {
+#if CC_ALG == HDCC
+    uint64_t last_conflict_update = get_sys_clock();
+#endif
     tsetup();
 
     Message * msg;
@@ -138,6 +142,14 @@ RC CalvinSequencerThread::run() {
 
         prof_starttime = get_sys_clock();
 
+#if CC_ALG == HDCC
+        if (get_sys_clock() - last_conflict_update >= HDCC_CONFLICT_INTERVAL_NS) {
+          cc_selector.update_ccselector();
+          for (uint64_t node = 0; node < g_node_cnt; ++node)
+            if (node != g_node_id) msg_queue.enqueue(_thd_id, cc_selector.pack_msg(), node);
+          last_conflict_update = get_sys_clock();
+        }
+#endif
         if(is_batch_ready()) {
           simulation->advance_seq_epoch();
           //last_batchtime = get_wall_clock();
@@ -163,6 +175,12 @@ RC CalvinSequencerThread::run() {
         }
 
         switch (msg->get_rtype()) {
+#if CC_ALG == HDCC
+          case HDCC_CONFLICT:
+            cc_selector.process_conflict_msg(static_cast<HdccConflictMessage *>(msg));
+            Message::release_message(msg);
+            break;
+#endif
           case CL_QRY:
             // Query from client
             DEBUG("SEQ process_txn\n");

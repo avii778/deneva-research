@@ -48,6 +48,9 @@ class Row_lock;
 class Row_mvcc;
 class Row_ts;
 class Row_occ;
+class Row_silo;
+class Row_aria;
+class Row_hdcc;
 class Row_maat;
 class Row_specex;
 class Row_life;
@@ -116,6 +119,12 @@ public:
   Row_ts *manager;
 #elif CC_ALG == MVCC
   Row_mvcc *manager;
+#elif CC_ALG == HDCC
+  Row_hdcc *manager;
+#elif CC_ALG == ARIA
+  Row_aria *manager;
+#elif CC_ALG == SILO
+  Row_silo *manager;
 #elif CC_ALG == OCC
   Row_occ *manager;
 #elif CC_ALG == MAAT

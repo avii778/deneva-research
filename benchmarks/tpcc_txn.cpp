@@ -86,9 +86,13 @@ RC TPCCTxnManager::run_txn() {
   RC rc = RCOK;
   uint64_t starttime = get_sys_clock();
 
-#if CC_ALG == CALVIN
+#if (CC_ALG == CALVIN || CC_ALG == HDCC)
+#if CC_ALG == HDCC
+  if (algo == CALVIN) { rc = run_calvin_txn(); return rc; }
+#else
   rc = run_calvin_txn();
   return rc;
+#endif
 #endif
 
   if(IS_LOCAL(txn->txn_id) && (state == TPCC_PAYMENT0 || state == TPCC_NEWORDER0)) {
@@ -144,7 +148,7 @@ bool TPCCTxnManager::is_done() {
 
 RC TPCCTxnManager::acquire_locks() {
   uint64_t starttime = get_sys_clock();
-  assert(CC_ALG == CALVIN);
+  assert(CC_ALG == CALVIN || CC_ALG == HDCC);
   locking_done = false;
   RC rc = RCOK;
   RC rc2;
@@ -1174,7 +1178,7 @@ LifeExecuteResult TPCCTxnManager::execute_life_operation(
     target = lookup_life_row(operation.object);
   }
   operation.manager = target->manager;
-  return target->execute_life(descriptor, operation);
+  return execute_life_row(target->manager, descriptor, operation);
 }
 
 void TPCCTxnManager::life_advance_program(LifeTxnDescriptor &d,
@@ -1434,7 +1438,7 @@ RC TPCCTxnManager::run_calvin_txn() {
 RC TPCCTxnManager::run_tpcc_phase2() {
   TPCCQuery* tpcc_query = (TPCCQuery*) query;
   RC rc = RCOK;
-  assert(CC_ALG == CALVIN);
+  assert(CC_ALG == CALVIN || CC_ALG == HDCC);
 
 	uint64_t w_id = tpcc_query->w_id;
   uint64_t d_id = tpcc_query->d_id;
@@ -1492,7 +1496,7 @@ RC TPCCTxnManager::run_tpcc_phase2() {
 RC TPCCTxnManager::run_tpcc_phase5() {
   TPCCQuery* tpcc_query = (TPCCQuery*) query;
   RC rc = RCOK;
-  assert(CC_ALG == CALVIN);
+  assert(CC_ALG == CALVIN || CC_ALG == HDCC);
 
 	uint64_t w_id = tpcc_query->w_id;
   uint64_t d_id = tpcc_query->d_id;

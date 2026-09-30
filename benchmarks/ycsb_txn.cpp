@@ -160,6 +160,9 @@ YCSBTxnManager::YCSBTxnManager()
 }
 
 YCSBTxnManager::~YCSBTxnManager() {
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  cancel_life_waits();
+#endif
   delete life_finalize_requester_nodes;
   delete life_finalize_requester_txn_ids;
   delete life_wait_stacks;
@@ -191,6 +194,9 @@ void YCSBTxnManager::reset() {
   next_record_id = 0;
 #if CC_ALG == LIFE
   life_active = false;
+#if LIFE_WAIT_QUEUE
+  cancel_life_waits();
+#endif
   reset_pending_life_finalize();
   life_wait_stacks->clear();
   reset_life_piggyback_prepare();
@@ -217,6 +223,9 @@ bool YCSBTxnManager::is_life_active() const { return life_active; }
 void YCSBTxnManager::mark_life_active() { life_active = true; }
 
 void YCSBTxnManager::clear_life_active() {
+#if LIFE_WAIT_QUEUE
+  cancel_life_waits();
+#endif
   life_active = false;
   state = YCSB_0;
   next_record_id = 0;
@@ -229,14 +238,14 @@ void YCSBTxnManager::clear_life_active() {
 
 RC YCSBTxnManager::acquire_locks() {
   uint64_t starttime = get_sys_clock();
-  assert(CC_ALG == CALVIN);
+  assert(CC_ALG == CALVIN || CC_ALG == HDCC);
   YCSBQuery *ycsb_query = (YCSBQuery *)query;
   locking_done = false;
   RC rc = RCOK;
   incr_lr();
   assert(ycsb_query->requests.size() == g_req_per_query);
   assert(phase == CALVIN_RW_ANALYSIS);
-#if CALVIN_PRE_LOCK
+#if CALVIN_PRE_LOCK && CC_ALG == CALVIN
   RC token_rc =
       get_lock(_wl->get_calvin_db_lock_row(), WR);
   if (token_rc != RCOK)
@@ -314,6 +323,111 @@ RC YCSBTxnManager::run_txn() {
 }
 
 #if CC_ALG == LIFE
+LifeExecuteResult YCSBTxnManager::execute_life_row(
+    Row_life *row, const LifeTxnDescriptor &descriptor,
+    const LifeOperation &operation) {
+#if LIFE_WAIT_QUEUE
+  const bool released = life_resume_row == row &&
+      life_resume_pid == descriptor.pid && life_resume_tid == descriptor.tid &&
+      life_resume_history_size == descriptor.history.size();
+  life_resume_row = NULL;
+  const uint64_t resumed_at = released ? life_wait_now_ns() : 0;
+  LifeExecuteResult result = row->execute(descriptor, operation, !released);
+  if (released)
+    work_queue.life_wait_resumed(result.code, life_resume_completion,
+        resumed_at - life_resume_released_at, resumed_at - life_resume_ready_at);
+  if (result.code == LifeResultCode::Help || result.code == LifeResultCode::Finalize)
+    work_queue.life_wait_result(result.code == LifeResultCode::Finalize);
+  return result;
+#else
+  return row->execute(descriptor, operation);
+#endif
+}
+
+#if LIFE_WAIT_QUEUE
+namespace {
+std::atomic<uint64_t> life_queue_token(1);
+}
+
+void YCSBTxnManager::enqueue_life_wait(
+    const std::shared_ptr<LifeQueuedWait> &wait) {
+  LifeResumeMessage *msg = static_cast<LifeResumeMessage *>(
+      Message::create_message(RLIFE_RESUME));
+  msg->txn_id = get_txn_id();
+  msg->wait = wait;
+  wait->enqueued_at = life_wait_now_ns();
+  life_queued_waits.push_back(wait);
+  wait->row->enqueue_wait(wait->generation, wait->token, msg);
+}
+
+void YCSBTxnManager::cancel_life_waits() {
+  for (const auto &wait : life_queued_waits) {
+    wait->canceled.store(true);
+    work_queue.life_wait_cancel(reinterpret_cast<uintptr_t>(wait->row),
+                                wait->token);
+    wait->stack.clear();
+    wait->remote.reset();
+  }
+  life_queued_waits.clear();
+  life_resume_row = NULL;
+  life_release_when_idle = false;
+}
+
+bool YCSBTxnManager::claim_life_wait(
+    const std::shared_ptr<LifeQueuedWait> &wait) {
+  auto found = std::find(life_queued_waits.begin(), life_queued_waits.end(), wait);
+  if (wait->canceled.load() || found == life_queued_waits.end())
+    return false;
+  life_queued_waits.erase(found);
+  wait->canceled.store(true);
+  life_resume_row = wait->row;
+  assert(wait->remote || !wait->stack.empty());
+  const LifeTxnDescriptor &descriptor = wait->remote
+      ? wait->remote->descriptor : wait->stack.back();
+  life_resume_pid = descriptor.pid;
+  life_resume_tid = descriptor.tid;
+  life_resume_history_size = descriptor.history.size();
+  life_resume_released_at = wait->released_at;
+  life_resume_ready_at = wait->ready_at;
+  life_resume_completion = wait->completion_wake;
+  return true;
+}
+
+RC YCSBTxnManager::resume_life_wait(
+    const std::shared_ptr<LifeQueuedWait> &wait) {
+  life_response_stack = std::move(wait->stack);
+  const bool done = try_life_transactions(life_response_stack);
+  life_resume_row = NULL;
+  return done ? continue_life_after_stack() : WAIT_REM;
+}
+
+bool YCSBTxnManager::has_life_queued_remote(
+    const LifeExecuteMessage &request) const {
+  for (const auto &pending : life_queued_waits)
+    if (pending->remote && pending->remote->wait_id == request.wait_id &&
+        pending->remote->return_node_id == request.return_node_id &&
+        pending->remote->descriptor.pid == request.descriptor.pid &&
+        pending->remote->descriptor.tid == request.descriptor.tid)
+      return true;
+  return false;
+}
+
+void YCSBTxnManager::queue_life_remote(
+    const LifeExecuteMessage &request, const LifeExecuteResult &result,
+    uint64_t history_base_size) {
+  if (has_life_queued_remote(request))
+    return;
+  std::shared_ptr<LifeQueuedWait> wait(new LifeQueuedWait(
+      life_queue_token.fetch_add(1), result.deferred_row));
+  wait->generation = result.deferred_generation;
+  wait->remote.reset(new LifeExecuteMessage(request));
+  wait->remote->descriptor = result.transaction;
+  wait->remote->operation = life_current_operation(wait->remote->descriptor);
+  wait->history_base_size = history_base_size;
+  enqueue_life_wait(wait);
+}
+#endif
+
 RC YCSBTxnManager::run_life_txn() {
   uint64_t starttime = get_sys_clock();
 
@@ -424,6 +538,32 @@ bool YCSBTxnManager::try_life_transactions(
 
     switch (result.code) {
 
+#if LIFE_WAIT_QUEUE
+    case LifeResultCode::Deferred: {
+      for (const auto &pending : life_queued_waits) {
+        if (pending->remote || pending->row != result.deferred_row ||
+            pending->stack.size() != txns.size())
+          continue;
+        bool duplicate = true;
+        for (size_t i = 0; i < txns.size(); ++i)
+          duplicate = duplicate && pending->stack[i].pid == txns[i].pid &&
+              pending->stack[i].tid == txns[i].tid &&
+              pending->stack[i].history.size() == txns[i].history.size() &&
+              life_program_position(pending->stack[i]) == life_program_position(txns[i]);
+        if (duplicate) {
+          txns.clear();
+          return false;
+        }
+      }
+      std::shared_ptr<LifeQueuedWait> wait(new LifeQueuedWait(
+          life_queue_token.fetch_add(1), result.deferred_row));
+      wait->generation = result.deferred_generation;
+      wait->stack = std::move(txns);
+      enqueue_life_wait(wait);
+      return false;
+    }
+#endif
+
     case LifeResultCode::Success:
       life_advance_program(ctx, operation, result.response);
       break;
@@ -489,7 +629,7 @@ YCSBTxnManager::execute_life_operation(LifeTxnDescriptor &descriptor,
     life_row = lookup_life_row(request.key);
   operation = make_life_operation(life_row, request);
 
-  return life_row->execute_life(descriptor, operation);
+  return execute_life_row(life_row->manager, descriptor, operation);
 }
 
 RC YCSBTxnManager::send_life_execute(const LifeTxnDescriptor &descriptor,
@@ -543,7 +683,7 @@ YCSBTxnManager::execute_life_remote(const LifeTxnDescriptor &descriptor,
   LifeTxnDescriptor local_descriptor = descriptor;
   LifeOperation local_operation = operation;
   local_operation.manager = manager;
-  return manager->execute(local_descriptor, local_operation);
+  return execute_life_row(manager, local_descriptor, local_operation);
 }
 
 RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
@@ -613,6 +753,11 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
                          immediate_result.response);
   }
 
+  if (immediate_result.code == LifeResultCode::Deferred) {
+    immediate_result.transaction = std::move(response_descriptor);
+    return WAIT_REM;
+  }
+
   if (immediate_result.code == LifeResultCode::Success) {
     immediate_result.transaction = response_descriptor;
     immediate_result.observed_attempt = response_descriptor.tid.attempt;
@@ -635,6 +780,13 @@ RC YCSBTxnManager::serve_life_execute(const LifeTxnDescriptor &descriptor,
       }
     }
   }
+
+#if LIFE_ROLLBACK_BEFORE_HELP
+  // A destination batch may have executed a suffix the caller has not seen.
+  // Release that suffix here before returning the blocking descriptor.
+  if (immediate_result.code == LifeResultCode::Help)
+    finish_life_remote(response_descriptor, Abort);
+#endif
 
   if (!life_program_present(immediate_result.transaction))
     immediate_result.transaction = response_descriptor;
@@ -860,7 +1012,12 @@ RC YCSBTxnManager::apply_life_finalize_response(
 
     if (!has_saved_stack && has_current_descriptor)
       txns.push_back(descriptor);
-    txns.push_back(result.transaction);
+#if LIFE_ROLLBACK_BEFORE_HELP
+    if (result.code == LifeResultCode::Help)
+      push_life_help_descriptor(txns, result.transaction);
+    else
+#endif
+      txns.push_back(result.transaction);
     return try_life_transactions(txns) ? continue_life_after_stack() : WAIT_REM;
   }
 
@@ -1652,6 +1809,26 @@ RC YCSBTxnManager::continue_life_after_stack() {
 
 void YCSBTxnManager::push_life_help_descriptor(
     std::vector<LifeTxnDescriptor> &txns, const LifeTxnDescriptor &descriptor) {
+#if LIFE_ROLLBACK_BEFORE_HELP
+  if (!txns.empty()) {
+    LifeTxnDescriptor &blocked = txns.back();
+    std::vector<uint64_t> remote_nodes;
+    for (std::vector<LifeHistoryEntry>::const_iterator it = blocked.history.begin();
+         it != blocked.history.end(); ++it) {
+      const uint64_t node =
+          GET_NODE_ID(life_routing_partition(it->operation.object));
+      if (node != g_node_id &&
+          std::find(remote_nodes.begin(), remote_nodes.end(), node) ==
+              remote_nodes.end())
+        remote_nodes.push_back(node);
+    }
+    // Finish messages carry the old attempt, so delayed cleanup cannot abort
+    // the reset attempt when this descriptor resumes after helping.
+    if (!remote_nodes.empty())
+      send_life_finish_messages(blocked, remote_nodes, Abort);
+    rollback_and_reset_life_descriptor(blocked, blocked.tid.attempt);
+  }
+#endif
   for (std::vector<LifeTxnDescriptor>::iterator it = txns.begin();
        it != txns.end();) {
     if (it->tid.time == descriptor.tid.time)
@@ -1920,7 +2097,7 @@ RC YCSBTxnManager::run_calvin_txn() {
       // reconnaissance window to validate.
       this->phase = isRecon()
                         ? CALVIN_DONE
-                        : (CALVIN_PRE_LOCK ? CALVIN_SERVE_RD
+                        : ((CALVIN_PRE_LOCK || CC_ALG == HDCC) ? CALVIN_SERVE_RD
                                            : CALVIN_VALIDATE);
       break;
     case CALVIN_VALIDATE:
@@ -1961,7 +2138,7 @@ RC YCSBTxnManager::run_calvin_txn() {
       DEBUG("(%ld,%ld) execute writes\n", txn->txn_id, txn->batch_id);
       if (txn->rc == RCOK)
         rc = run_ycsb();
-#if CALVIN_PRE_LOCK
+#if CALVIN_PRE_LOCK && CC_ALG == CALVIN
       // Keep the database token until every server has completed its local
       // writes. WRITE_DONE responses use a separate counter so an early
       // response cannot be mistaken for a read-barrier response.
@@ -1995,13 +2172,13 @@ RC YCSBTxnManager::run_calvin_txn() {
 
 RC YCSBTxnManager::run_ycsb() {
   RC rc = RCOK;
-  assert(CC_ALG == CALVIN);
+  assert(CC_ALG == CALVIN || CC_ALG == HDCC);
   YCSBQuery *ycsb_query = (YCSBQuery *)query;
 
   for (uint64_t i = 0; i < ycsb_query->requests.size(); i++) {
     ycsb_request *req = ycsb_query->requests[i];
     if (this->phase == CALVIN_LOC_RD && req->acctype == WR && !isRecon() &&
-        !CALVIN_PRE_LOCK)
+        (!CALVIN_PRE_LOCK || CC_ALG == HDCC))
       continue;
     if (this->phase == CALVIN_EXEC_WR &&
         (req->acctype == RD || req->acctype == SCAN))
@@ -2013,7 +2190,7 @@ RC YCSBTxnManager::run_ycsb() {
     if (!loc)
       continue;
 
-    if (CALVIN_PRE_LOCK && this->phase == CALVIN_LOC_RD) {
+    if (CALVIN_PRE_LOCK && CC_ALG == CALVIN && this->phase == CALVIN_LOC_RD) {
       // The database token protects the row, so the reconnaissance/read pass
       // can observe every requested tuple without adding a second access for
       // write rows or creating validation snapshots.

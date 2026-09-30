@@ -71,6 +71,11 @@ void AbortQueue::process(uint64_t thd_id) {
       INC_STATS(thd_id, abort_queue_dequeue_cnt, 1);
       Message *msg = Message::create_message(RTXN);
       msg->txn_id = entry->txn_id;
+#if CC_ALG == HDCC
+      // Optimistic owners use epoch zero; Calvin retries stay in the sequencer.
+      msg->batch_id = 0;
+      msg->algo = SILO;
+#endif
       work_queue.enqueue(thd_id, msg, false);
       // entry = queue.top();
       DEBUG_M("AbortQueue::dequeue entry free\n");

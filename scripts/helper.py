@@ -19,6 +19,10 @@ CONFIG_PARAMS = [
     "ISOLATION_LEVEL",
     "YCSB_ABORT_MODE",
     "CALVIN_PRE_LOCK",
+    "ARIA_BATCH_SIZE", "ARIA_BATCH_TIME_NS",
+    "HDCC_SHARD_SIZE", "HDCC_LOWER_BOUND", "HDCC_UPPER_BOUND",
+    "HDCC_CONFLICT_INTERVAL_NS", "HDCC_PRORATE_RATIO",
+    "SILO_PRE_ABORT", "SILO_VALIDATION_NO_WAIT",
     "life_fairness",
     "LOGGING",
     "NETWORK_DELAY_TEST",
@@ -87,6 +91,10 @@ SHORTNAMES = {
     "PRIORITY":"",
     "PERC_PAYMENT":"PP",
     "ABORT_PENALTY":"PENALTY",
+    "LIFE_HELP_WAIT_US":"LWAIT",
+    "LIFE_WAIT_QUEUE":"LWQ",
+    "LIFE_WAIT_QUEUE_US":"LWQUS",
+    "LIFE_ROLLBACK_BEFORE_HELP":"LRBH",
     "STRICT_PPT":"SPPT",
     "NETWORK_DELAY_TEST":"NDT",
     "NETWORK_DELAY":"NDLY",
@@ -1047,6 +1055,10 @@ def get_execfile_name(cfgs,fmt,network_hosts=[]):
     output_f = ""
 #for key in sorted(cfgs.keys()):
     for key in CONFIG_PARAMS:
+        # Preserve existing executable names; include only the selected CC's knobs.
+        if any(key.startswith(algo + "_") and cfgs["CC_ALG"] != algo
+               for algo in ("SILO", "ARIA", "HDCC")):
+            continue
         output_f += "{}_".format(cfgs[key])
     return output_f
 

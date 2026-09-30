@@ -3,6 +3,9 @@
 #include "../storage/row.h"
 #include "../storage/table.h"
 #include "life_types.h"
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+#include "work_queue.h"
+#endif
 #if WORKLOAD == TPCC
 #include "tpcc_const.h"
 #endif
@@ -70,10 +73,36 @@ void Row_life::init(row_t *row) {
   processes.reset();
   priority_heap.clear();
   holders.clear();
+#if !life_fairness
+  retained_descriptors.clear();
+#endif
   inline_operation.reset();
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  release_generation = 0;
+#endif
 
   pthread_mutex_init(&latch, NULL);
 }
+
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+void Row_life::enqueue_wait(uint64_t generation, uint64_t token, Message *msg) {
+  // Same row -> scheduler lock order as completion. A release either precedes
+  // this registration (generation mismatch) or wakes its registered waiter.
+  LifeLatchGuard guard(&latch);
+  work_queue.life_wait_enqueue(reinterpret_cast<uintptr_t>(this), token, msg,
+                               generation != release_generation);
+}
+
+void Row_life::notify_release(const LifeProcessId &pid) {
+  ++release_generation;
+  ProcessSlot *slot = mutable_process_slot(pid);
+  if (slot->prepared_at) {
+    work_queue.life_prepared_release(life_wait_now_ns() - slot->prepared_at);
+    slot->prepared_at = 0;
+  }
+  work_queue.life_wait_wake(reinterpret_cast<uintptr_t>(this));
+}
+#endif
 
 const LifeTxnDescriptor::TouchedObject *
 Row_life::touched_object(const LifeTxnDescriptor &tx) const {
@@ -177,6 +206,46 @@ bool Row_life::release_holder(const LifeTxnDescriptor &tx) {
   remove_holder(&it->second);
   return true;
 }
+
+#if !life_fairness
+void Row_life::forget_retained_descriptor(ProcessSlot *slot) {
+  if (slot->retained_index == NO_HEAP_INDEX)
+    return;
+  const size_t index = slot->retained_index;
+  assert(index < retained_descriptors.size() && retained_descriptors[index] == slot);
+  retained_descriptors[index] = retained_descriptors.back();
+  retained_descriptors[index]->retained_index = index;
+  retained_descriptors.pop_back();
+  slot->retained_index = NO_HEAP_INDEX;
+}
+
+void Row_life::retire_committed_descriptors(const LifeTxnId &before) {
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  const uint64_t scanned = retained_descriptors.size();
+  uint64_t reset = 0;
+#endif
+  for (size_t i = 0; i < retained_descriptors.size();) {
+    ProcessSlot *slot = retained_descriptors[i];
+    LifeProcessRecord &record = slot->record;
+    assert(record.has_value && record.status == LifeTxnStatus::Committed &&
+           record.transaction);
+    if (record.tid < before) {
+      // Match the former full-map scan's strict timestamp/attempt predicate.
+      // In particular, out-of-order admission must retain newer descriptors.
+      record.transaction.reset();
+      forget_retained_descriptor(slot);
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+      ++reset;
+#endif
+    } else {
+      ++i;
+    }
+  }
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  work_queue.life_cleanup_scan(scanned, reset);
+#endif
+}
+#endif
 
 void Row_life::priority_swap(size_t lhs, size_t rhs) {
   std::swap(priority_heap[lhs], priority_heap[rhs]);
@@ -649,7 +718,14 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
 #if life_fairness
     if (context_status == LifeTxnStatus::Prepared) {
 
-#if LIFE_HELP_WAIT_US > 0
+#if LIFE_WAIT_QUEUE
+      if (allow_help_wait) {
+        LifeExecuteResult result = make_result(LifeResultCode::Deferred);
+        result.deferred_row = this;
+        result.deferred_generation = release_generation;
+        return result;
+      }
+#elif LIFE_HELP_WAIT_US > 0
       if (allow_help_wait) {
         guard.unlock();
         usleep(LIFE_HELP_WAIT_US);
@@ -681,7 +757,14 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
     }
 
     if (blocking_tid < tx.tid) {
-#if LIFE_HELP_WAIT_US > 0
+#if LIFE_WAIT_QUEUE
+      if (allow_help_wait) {
+        LifeExecuteResult result = make_result(LifeResultCode::Deferred);
+        result.deferred_row = this;
+        result.deferred_generation = release_generation;
+        return result;
+      }
+#elif LIFE_HELP_WAIT_US > 0
       if (allow_help_wait) {
         guard.unlock();
         usleep(LIFE_HELP_WAIT_US);
@@ -766,7 +849,14 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
     const bool prepared = holder.record.status == LifeTxnStatus::Prepared;
     if (!prepared && !(holder.record.tid < tx.tid))
       continue;
-#if LIFE_HELP_WAIT_US > 0
+#if LIFE_WAIT_QUEUE
+    if (allow_help_wait) {
+      LifeExecuteResult result = make_result(LifeResultCode::Deferred);
+      result.deferred_row = this;
+      result.deferred_generation = release_generation;
+      return result;
+    }
+#elif LIFE_HELP_WAIT_US > 0
     if (allow_help_wait) {
       guard.unlock();
       usleep(LIFE_HELP_WAIT_US);
@@ -839,15 +929,10 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   if (slot->holder_index == NO_HEAP_INDEX &&
       holders.size() == holders.capacity())
     holders.reserve(holders.empty() ? 1 : holders.size() * 2);
-  // Retain committed descriptors until a later transaction is admitted,
-  // then keep only their terminal tombstones.
-  for (ProcessSlots::iterator it = processes->begin(); it != processes->end();
-       ++it) {
-    LifeProcessRecord &record = it->second.record;
-    if (record.has_value && record.status == LifeTxnStatus::Committed &&
-        record.tid < tx.tid)
-      record.transaction.reset();
-  }
+  retire_committed_descriptors(tx.tid);
+  // A recycled process name is about to replace its terminal record. It must
+  // never leave a pointer to an executing record in the retirement list.
+  forget_retained_descriptor(slot);
   for (size_t i = 0; i < holders.size();) {
     ProcessSlot *holder = holders[i];
     if (holder_conflicts(*holder, tx, exclusive)) {
@@ -864,6 +949,9 @@ LifeExecuteResult Row_life::execute(const LifeTxnDescriptor &tx,
   }
 #endif
   slot->record = updated;
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  slot->prepared_at = 0;
+#endif
 #if life_fairness
   priority_insert_or_update(slot);
   active_process.set(tx.pid);
@@ -912,6 +1000,11 @@ LifeExecuteResult Row_life::prepare(const LifeTxnDescriptorPtr &tx) {
   updated.transaction = tx;
   updated.tid = tx->tid;
   updated.has_value = true;
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+  ProcessSlot *slot = mutable_process_slot(tx->pid);
+  if (local_status != LifeTxnStatus::Prepared || local_tid != tx->tid)
+    slot->prepared_at = life_wait_now_ns();
+#endif
   mutable_process_record(tx->pid) = updated;
 
   return make_result(LifeResultCode::Success);
@@ -980,6 +1073,16 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
       return;
     }
 
+    ProcessSlot *slot = mutable_process_slot(tx->pid);
+#if !life_fairness
+    assert(slot->retained_index == NO_HEAP_INDEX);
+    // Allocate before applying writes so allocation failure cannot leave a
+    // published commit without its descriptor-retirement bookkeeping.
+    if (retained_descriptors.size() == retained_descriptors.capacity())
+      retained_descriptors.reserve(retained_descriptors.empty()
+                                       ? 1 : retained_descriptors.size() * 2);
+#endif
+
     for (size_t i = 0; i < history_indices.size(); ++i) {
       if (!validate_committed_operation(
               tx->history[history_indices[i]].operation)) {
@@ -994,7 +1097,6 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
       (void)applied;
     }
 
-    ProcessSlot *slot = mutable_process_slot(tx->pid);
     LifeProcessRecord &updated = slot->record;
 #if life_fairness
     // The terminal tid/status tombstone rejects stale traffic. The descriptor
@@ -1014,6 +1116,8 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
     updated.tid = tx->tid;
     updated.status = LifeTxnStatus::Committed;
     updated.has_value = true;
+    slot->retained_index = retained_descriptors.size();
+    retained_descriptors.push_back(slot);
 #endif
 
     // Publish the terminal record and detach the active context atomically.
@@ -1026,6 +1130,11 @@ void Row_life::commit(const LifeTxnDescriptorPtr &tx,
     if (release_holder(*tx)) {
 #endif
       pending = std::move(inline_operation);
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+      // Terminal state is published under the row latch before a waiter can
+      // resume. Duplicate/stale completion messages never reach this branch.
+      notify_release(tx->pid);
+#endif
     }
   }
 
@@ -1053,12 +1162,18 @@ void Row_life::rollback(const LifeTxnDescriptor &tx) {
     }
 
 #if life_fairness
-    if (active_process.has_value && active_process.value == tx.pid) {
+    if (active_process.has_value && active_process.value == tx.pid &&
+        local != NULL && local->tid == tx.tid) {
       active_process.reset();
 #else
     if (release_holder(tx)) {
 #endif
       pending = std::move(inline_operation);
+#if CC_ALG == LIFE && LIFE_WAIT_QUEUE
+      // Terminal state is published under the row latch before a waiter can
+      // resume. Duplicate/stale completion messages never reach this branch.
+      notify_release(tx.pid);
+#endif
     }
   }
 

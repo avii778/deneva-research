@@ -57,6 +57,10 @@ public:
   row_t *data;
   row_t *orig_data;
   void cleanup();
+#if CC_ALG == SILO || CC_ALG == HDCC
+  bool isIntermediateState;
+  uint64_t tid;
+#endif
 };
 
 class Transaction {
@@ -211,7 +215,7 @@ public:
 
   void release_locks(RC rc);
   bool isRecon() {
-    assert(CC_ALG == CALVIN || !recon);
+    assert((CC_ALG == CALVIN || CC_ALG == HDCC) || !recon);
     return recon;
   };
   bool recon;
@@ -227,6 +231,38 @@ public:
   bool aborted;
   uint64_t return_id;
   RC validate();
+#if CC_ALG == HDCC
+  int algo;
+  uint64_t last_tid, num_locks, max_calvin_tid, max_calvin_bid;
+  bool _pre_abort;
+  std::vector<int> write_set;
+  RC validate_once();
+  RC validate_lock();
+  RC validate_cont();
+  RC validate_c();
+  RC finish(RC rc);
+  void send_validation_messages();
+  void observe_calvin(uint64_t batch, uint64_t id);
+#endif
+#if CC_ALG == ARIA
+  RC reserve();
+  RC check();
+  RC finish(RC rc);
+  RC aria_reserve();
+  void aria_notify(unsigned stage);
+  bool raw, war;
+  uint32_t aria_responses;
+#endif
+#if CC_ALG == SILO
+  RC validate_silo();
+  RC finish(RC rc);
+  RC find_tid_silo(ts_t tid);
+  bool _pre_abort;
+  bool _validation_no_wait;
+  ts_t _cur_tid, last_tid, max_tid;
+  uint64_t num_locks;
+  std::vector<int> write_set;
+#endif
   void cleanup(RC rc);
   void cleanup_row(RC rc, uint64_t rid);
   void release_last_row_lock();

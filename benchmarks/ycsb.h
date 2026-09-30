@@ -21,6 +21,7 @@
 #include "helper.h"
 #include "txn.h"
 #include "wl.h"
+#include "life_wait_context.h"
 
 class YCSBQuery;
 class YCSBQueryMessage;
@@ -118,6 +119,18 @@ public:
   bool is_life_active() const;
   void mark_life_active();
   void clear_life_active();
+#if LIFE_WAIT_QUEUE
+  bool has_life_queued_remote(const LifeExecuteMessage &request) const;
+  void queue_life_remote(const LifeExecuteMessage &request,
+                         const LifeExecuteResult &result,
+                         uint64_t history_base_size);
+  bool claim_life_wait(const std::shared_ptr<LifeQueuedWait> &wait);
+  RC resume_life_wait(const std::shared_ptr<LifeQueuedWait> &wait);
+  bool has_life_queued_waits() const { return !life_queued_waits.empty(); }
+  void clear_life_resume_permit() { life_resume_row = NULL; }
+  bool life_release_when_idle = false;
+  void cancel_life_waits();
+#endif
 #endif
   void copy_remote_requests(YCSBQueryMessage *msg);
 
@@ -132,6 +145,19 @@ protected:
   };
 #if CC_ALG == LIFE
   RC run_life_txn();
+  LifeExecuteResult execute_life_row(Row_life *row,
+                                     const LifeTxnDescriptor &descriptor,
+                                     const LifeOperation &operation);
+#if LIFE_WAIT_QUEUE
+  void enqueue_life_wait(const std::shared_ptr<LifeQueuedWait> &wait);
+  std::vector<std::shared_ptr<LifeQueuedWait> > life_queued_waits;
+  Row_life *life_resume_row = NULL;
+  LifeProcessId life_resume_pid;
+  LifeTxnId life_resume_tid;
+  size_t life_resume_history_size = 0;
+  uint64_t life_resume_released_at = 0, life_resume_ready_at = 0;
+  bool life_resume_completion = false;
+#endif
   virtual RC complete_life_home_transaction();
   bool try_life_transactions(std::vector<LifeTxnDescriptor> &txns);
   virtual LifeExecuteResult
